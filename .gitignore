@@ -5,6 +5,7 @@
 .idea/
 .vscode/
 *.swp
+.cursor/
 
 # OS
 .DS_Store
