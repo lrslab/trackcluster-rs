@@ -1,0 +1,31 @@
+[package]
+name = "trackcluster-rs"
+version = "0.1.0"
+edition = "2021"
+default-run = "trackcluster"
+description = "Pure-Rust long-read isoform clustering and counting pipeline."
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+authors = ["runsheng"]
+repository = "https://github.com/lrslab/trackcluster-rs"
+homepage = "https://github.com/lrslab/trackcluster-rs"
+documentation = "https://docs.rs/trackcluster-rs"
+keywords = ["bioinformatics", "genomics", "isoform", "nanopore", "long-reads"]
+categories = ["science", "command-line-utilities"]
+exclude = ["rust-toolchain.toml"]
+
+[dependencies]
+anyhow = "1.0.79"
+clap = { version = "4.5.27", features = ["derive"] }
+thiserror = "2.0.11"
+
+[features]
+index-binned = []
+
+[dev-dependencies]
+proptest = "1.6.0"
+criterion = { version = "0.5.1", features = ["html_reports"] }
+
+[[bench]]
+name = "perf"
+harness = false
