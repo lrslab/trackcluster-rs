@@ -38,10 +38,15 @@ cargo login
 cargo publish
 ```
 
-## 6) Create GitHub release tag
+## 6) Create GitHub release with binaries
+The `.github/workflows/release.yml` workflow builds pre-built binaries for
+Linux (x86_64, ARM64) and macOS (Intel, Apple Silicon) automatically when a
+version tag is pushed:
+
 ```bash
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
-Then create a GitHub Release using `CHANGELOG.md` notes.
+This creates a GitHub Release with tarballs attached. Release notes are
+generated automatically from commit history.

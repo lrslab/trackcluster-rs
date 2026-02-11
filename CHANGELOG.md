@@ -6,4 +6,5 @@
 - Native interval utilities (no runtime shell-out)
 - Small fixtures + golden-based integration tests for `clusterj` and `count`
 - Pin Rust 1.90.0 via `rust-toolchain.toml`
+- CI: lint/test workflow + automated release with pre-built binaries for Linux and macOS
 
