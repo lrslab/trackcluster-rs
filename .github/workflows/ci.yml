@@ -14,7 +14,7 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: Guard: no bedtools/subprocess in Rust
+      - name: "Guard: no bedtools/subprocess in Rust"
         run: |
           if rg -n 'bedtools|subprocess' src tests; then
             echo "Found forbidden strings in Rust sources (bedtools/subprocess)"
