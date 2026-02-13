@@ -33,8 +33,10 @@ Download a tarball for your platform from the
 
 ```bash
 # Example: Linux x86_64
-curl -LO https://github.com/lrslab/trackcluster-rs/releases/download/v0.1.0/trackcluster-v0.1.0-x86_64-unknown-linux-musl.tar.gz
-tar xzf trackcluster-v0.1.0-x86_64-unknown-linux-musl.tar.gz
+REPO=lrslab/trackcluster-rs
+TAG="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | sed -n 's/.*"tag_name": "\([^"]*\)".*/\1/p' | head -n1)"
+curl -fLO "https://github.com/${REPO}/releases/download/${TAG}/trackcluster-${TAG}-x86_64-unknown-linux-musl.tar.gz"
+tar xzf "trackcluster-${TAG}-x86_64-unknown-linux-musl.tar.gz"
 ./trackcluster --help
 ```
 
@@ -98,6 +100,7 @@ trackcluster count-multi --manifest samples.tsv -r tests/fixtures/ref.bed -i out
 
 ## Docs
 - Pipeline tutorial: `docs/PIPELINE.md`
+- 488 real-data walkthrough: `docs/DEMO_488.md`
 - CLI reference: `docs/CLI.md`
 - Formats: `docs/FORMATS.md`
 - Design notes: `docs/design/bedtools_audit.md`
