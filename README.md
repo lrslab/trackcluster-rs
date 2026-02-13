@@ -75,6 +75,7 @@ trackcluster desc --isoform isoform.bed --reference tests/fixtures/ref.bed -o de
 
 ## Multi-sample pooled usage
 Use a manifest TSV to pool reads for clustering once, then quantify per-sample isoform usage.
+For a complete real-data walkthrough (including full `samples.tsv` details), see `docs/DEMO_488.md`.
 
 Example manifest (`samples.tsv`):
 ```tsv
@@ -99,8 +100,8 @@ trackcluster count-multi --manifest samples.tsv -r tests/fixtures/ref.bed -i out
 - `out/pooled.isoform_usage.group.tsv` (only when manifest has `group`)
 
 ## Docs
+- 488 real-data demo (full walkthrough + manifest details): `docs/DEMO_488.md`
 - Pipeline tutorial: `docs/PIPELINE.md`
-- 488 real-data walkthrough: `docs/DEMO_488.md`
 - CLI reference: `docs/CLI.md`
 - Formats: `docs/FORMATS.md`
 - Design notes: `docs/design/bedtools_audit.md`

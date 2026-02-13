@@ -55,7 +55,7 @@ You should have:
   --output-root /Users/li/data/shoudong_488/multigroup_smoke_20260213_202018/out \
   --prefix shoudong488 \
   --threads 8 \
-  --sw-score -1
+  --sw-score 11
 ```
 
 Expected key outputs:
@@ -76,7 +76,7 @@ Expected key outputs:
   --output-root /Users/li/data/shoudong_488/multigroup_full_20260213_202410/out_grouped_rerun_20260213_203004 \
   --prefix shoudong488_full \
   --threads 8 \
-  --sw-score -1
+  --sw-score 11
 ```
 
 For reruns into the same output directory, add `--force`:
@@ -88,7 +88,7 @@ For reruns into the same output directory, add `--force`:
   --output-root /Users/li/data/shoudong_488/multigroup_full_20260213_202410/out_grouped_rerun_20260213_203004 \
   --prefix shoudong488_full \
   --threads 8 \
-  --sw-score -1 \
+  --sw-score 11 \
   --force
 ```
 
@@ -106,6 +106,7 @@ Current recorded full-run summary includes:
 - `processed: 25415`
 - `errors: 0`
 - `elapsed_seconds: 531.924451458` (with `threads: 8`)
+- `sw_score` should be `11` for this demo; if the file shows `-1`, rerun the command in Section 5 with `--sw-score 11`.
 
 Inspect output headers:
 
@@ -118,7 +119,27 @@ sed -n '1,5p' /Users/li/data/shoudong_488/multigroup_full_20260213_202410/out_gr
 
 ## 7) Manifest format used by this demo
 
-`samples.tsv` (full) is:
+`samples.tsv` is a tab-separated text file with a header and 3 columns:
+
+- `sample` (required): unique sample ID used in output column names
+- `group` (optional but recommended): biological/experimental group label
+- `reads` (required): path to each sample BED file
+
+Rules to follow:
+
+- Use tabs (not spaces) between columns.
+- Keep sample names unique.
+- Keep row order stable if you want stable column order in `*.isoform_counts.matrix.tsv`.
+- `reads` paths can be absolute or relative to the manifest file location.
+- Every `reads` path must exist and be BED12/bigGenePred-like.
+
+Quick check before running:
+
+```bash
+awk -F'\t' 'NR==1{print "header:",$0; next} {print NR,$1,$2,$3}' /Users/li/data/shoudong_488/multigroup_full_20260213_202410/samples.tsv | head
+```
+
+`samples.tsv` used in the full 488 demo:
 
 ```tsv
 sample	group	reads
@@ -135,5 +156,6 @@ c24_control_2_s	c24_control	/Users/li/data/shoudong_488/multigroup_full_20260213
 ## 8) Notes
 
 - `flow --manifest` performs pooled isoform discovery, then writes per-sample and per-group usage tables.
+- The demo uses `--sw-score 11` (the standard collapse behavior for 5' truncation handling).
 - Output file names are `<prefix>_*` and `<prefix>.*`, so keep `--prefix` stable if you want deterministic downstream paths.
 - On Linux, prefer the `x86_64-unknown-linux-musl` release artifact to avoid glibc version mismatch issues.
