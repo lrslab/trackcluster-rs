@@ -27,9 +27,11 @@ Run the full pipeline as a single command:
 2) `clusterj_batch` (cluster per gene in parallel)
 3) merge per-gene outputs into `<prefix>_isoform.bed` and `<prefix>_unused.bed`
 4) `count` and `desc` on the merged isoforms
+5) when `--manifest` is used: run per-sample `count-multi` outputs from the pooled isoforms
 
 Key flags:
-- `--reads/-s`: reads BED
+- `--reads/-s`: reads BED (single-sample mode; mutually exclusive with `--manifest`)
+- `--manifest`: sample manifest TSV for pooled clustering + per-sample usage
 - `--reference/-r`: reference BED
 - `--output-root/-o`: output directory (created if missing)
 - `--prefix`: output prefix (used for merged outputs like `<prefix>_isoform.bed`)
@@ -45,6 +47,10 @@ Outputs (under `--output-root`):
 - `<prefix>_isoform_count.csv`
 - `<prefix>_desc.txt`, `<prefix>_class4.txt`, `<prefix>_class12.txt`, `<prefix>_fusion.txt`
 - `clusterj_batch_summary.txt`, `clusterj_batch_errors.txt`
+- `<prefix>_pooled_reads.bed` (manifest mode only)
+- `<prefix>.isoform_usage.long.tsv` (manifest mode only)
+- `<prefix>.isoform_counts.matrix.tsv` (manifest mode only)
+- `<prefix>.isoform_usage.group.tsv` (manifest mode only; only when manifest has `group`)
 
 Example:
 ```bash
@@ -55,6 +61,22 @@ trackcluster flow \
   --prefix sample \
   --threads 32 \
   --sw-score -1
+```
+
+Manifest example:
+```tsv
+sample	group	reads
+S1	control	S1.reads.bed
+S2	treated	S2.reads.bed
+```
+
+Manifest-mode example:
+```bash
+trackcluster flow \
+  --manifest samples.tsv \
+  --reference ref.bed \
+  --output-root out \
+  --prefix pooled
 ```
 
 ### `trackcluster preparedir`
@@ -146,6 +168,39 @@ trackcluster count \
   --reference ref.bed \
   --isoform isoform.bed \
   --out isoform_count.csv
+```
+
+### `trackcluster count-multi`
+Compute per-sample isoform counts/proportions from pooled isoforms using a sample manifest.
+
+Input:
+- `--manifest`: TSV with required columns `sample`, `reads`; optional `group`
+- `--reference/-r`: reference BED
+- `--isoform/-i`: pooled isoform BED (typically from `flow --manifest` or pooled `clusterj`)
+- `--out/-o`: output prefix
+
+Outputs (`--out <prefix>`):
+- `<prefix>.isoform_usage.long.tsv`
+- `<prefix>.isoform_counts.matrix.tsv`
+- `<prefix>.isoform_usage.group.tsv` (only when manifest includes `group`)
+
+Long-table semantics:
+- One row per `(gene, isoform, sample)` with non-zero count.
+- `proportion` is within-gene usage for that `(gene, sample)`:
+  `proportion = count / sum(count of all isoforms for the gene+sample)`.
+
+Matrix-table semantics:
+- Rows are `(gene, isoform)`.
+- Columns are samples in manifest order.
+- Missing isoforms in a sample appear as `0`.
+
+Example:
+```bash
+trackcluster count-multi \
+  --manifest samples.tsv \
+  --reference ref.bed \
+  --isoform pooled_isoform.bed \
+  --out out/pooled
 ```
 
 ### `trackcluster desc`

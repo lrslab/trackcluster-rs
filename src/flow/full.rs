@@ -11,8 +11,11 @@ use anyhow::Context;
 
 use crate::annotate::addgene::AddGeneOpts;
 use crate::annotate::desc::{describe, DescOpts};
+use crate::count::multi::{run_count_multi_from_paths, MultiSampleOutputPaths};
 use crate::count::{count_by_subreads, write_counts_csv};
+use crate::flow::pool::write_pooled_reads;
 use crate::flow::preparedir::{prepare_dir_from_paths, PrepareDirResult};
+use crate::io::manifest::read_manifest_tsv;
 
 #[derive(Clone, Debug)]
 pub struct BatchRunOptions {
@@ -46,7 +49,8 @@ pub struct BatchRunResult {
 
 #[derive(Clone, Debug)]
 pub struct FullFlowOptions {
-    pub reads: PathBuf,
+    pub reads: Option<PathBuf>,
+    pub manifest: Option<PathBuf>,
     pub reference: PathBuf,
     pub output_root: PathBuf,
     pub prefix: String,
@@ -67,6 +71,7 @@ pub struct FullFlowResult {
     pub unused_bed: PathBuf,
     pub count_csv: PathBuf,
     pub desc_prefix: PathBuf,
+    pub multi_sample: Option<MultiSampleOutputPaths>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -480,9 +485,30 @@ pub fn run_full_flow(opts: FullFlowOptions) -> anyhow::Result<FullFlowResult> {
     fs::create_dir_all(&opts.output_root)
         .with_context(|| format!("create {:?}", opts.output_root))?;
 
+    let prepare_reads = match (&opts.reads, &opts.manifest) {
+        (Some(reads), None) => reads.clone(),
+        (None, Some(manifest)) => {
+            let sample_rows = read_manifest_tsv(manifest)?;
+            let pooled_reads = opts
+                .output_root
+                .join(format!("{}_pooled_reads.bed", opts.prefix));
+            let pooled_read_count = write_pooled_reads(&sample_rows, &pooled_reads)?;
+            eprintln!(
+                "flow: pooled reads from manifest {:?} (samples={}, reads={}) -> {:?}",
+                manifest,
+                sample_rows.len(),
+                pooled_read_count,
+                pooled_reads
+            );
+            pooled_reads
+        }
+        (Some(_), Some(_)) => anyhow::bail!("flow: use either reads or manifest, not both"),
+        (None, None) => anyhow::bail!("flow: reads or manifest is required"),
+    };
+
     let gene_list = opts.output_root.join(format!("{}_gene.txt", opts.prefix));
     let batch = run_clusterj_batch(BatchRunOptions {
-        prepare_reads: Some(opts.reads.clone()),
+        prepare_reads: Some(prepare_reads),
         prepare_reference: Some(opts.reference.clone()),
         prepare_prefix: Some(opts.prefix.clone()),
         prepare_fraction_read: opts.prepare_fraction_read,
@@ -522,11 +548,27 @@ pub fn run_full_flow(opts: FullFlowOptions) -> anyhow::Result<FullFlowResult> {
     eprintln!("flow: count + desc");
     run_count_and_desc(&isoform_bed, &opts.reference, &count_csv, &desc_prefix)?;
 
+    let multi_sample = if let Some(manifest) = opts.manifest.as_ref() {
+        let output_prefix = opts.output_root.join(&opts.prefix);
+        Some(
+            run_count_multi_from_paths(manifest, &opts.reference, &isoform_bed, &output_prefix)
+                .with_context(|| {
+                    format!(
+                        "run multi-sample counting for flow manifest {:?} and isoforms {:?}",
+                        manifest, isoform_bed
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+
     Ok(FullFlowResult {
         batch,
         isoform_bed,
         unused_bed,
         count_csv,
         desc_prefix,
+        multi_sample,
     })
 }

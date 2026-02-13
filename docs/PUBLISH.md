@@ -40,8 +40,8 @@ cargo publish
 
 ## 6) Create GitHub release with binaries
 The `.github/workflows/release.yml` workflow builds pre-built binaries for
-Linux (x86_64, ARM64) and macOS (Intel, Apple Silicon) automatically when a
-version tag is pushed:
+Linux (x86_64 musl static, ARM64 glibc) and macOS (Apple Silicon)
+automatically when a version tag is pushed:
 
 ```bash
 git tag v0.1.0

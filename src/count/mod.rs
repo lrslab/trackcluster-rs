@@ -4,13 +4,15 @@ use std::path::Path;
 
 use crate::model::Transcript;
 
+pub mod multi;
+
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct CountRecord {
     pub isoform_id: String,
     pub count: f64,
 }
 
-fn parse_subreads(tx: &Transcript) -> Vec<&str> {
+pub(crate) fn parse_subreads(tx: &Transcript) -> Vec<&str> {
     let Some(name2) = tx.extra_fields.first() else {
         return Vec::new();
     };

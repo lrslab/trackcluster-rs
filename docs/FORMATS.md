@@ -28,3 +28,67 @@ Isoforms produced by `clusterj`/`cluster` store supporting read IDs in the first
 - Example: `readA,readB,readC,|2.5`
 
 The `count` command parses the `<read1>,<read2>,...` portion and uses it to compute isoform counts.
+
+## Multi-sample manifest TSV
+`count-multi` and `flow --manifest` expect a tab-separated manifest with:
+
+- Required columns:
+  - `sample`: unique sample name
+  - `reads`: BED path (absolute or relative to manifest file)
+- Optional columns:
+  - `group`: condition/group label for pseudo-bulk summaries
+
+Example:
+```tsv
+sample	group	reads
+S1	control	S1.reads.bed
+S2	treated	S2.reads.bed
+```
+
+Constraints:
+- `sample` must be unique.
+- `sample` cannot contain `::` (reserved delimiter for pooled read IDs).
+- Missing files fail fast with an error.
+
+## Pooled read IDs
+When pooling manifest reads, trackcluster rewrites read IDs as:
+`<sample>::<orig_read_id>`
+
+This guarantees sample identity for downstream per-sample counting.
+
+## `count-multi` outputs
+
+### Long table (`*.isoform_usage.long.tsv`)
+Columns:
+- `gene`
+- `isoform_id`
+- `sample`
+- `group` (present when any sample has a group)
+- `count`
+- `proportion`
+- `gene_total`
+
+Semantics:
+- One row per `(gene, isoform_id, sample)` with non-zero count.
+- `proportion` is within-gene usage:
+  `count / sum(counts for all isoforms in the same gene and sample)`.
+
+### Matrix table (`*.isoform_counts.matrix.tsv`)
+Columns:
+- `gene`
+- `isoform_id`
+- one column per sample (manifest order)
+
+Semantics:
+- Missing isoforms in a sample are represented as `0`.
+
+### Group table (`*.isoform_usage.group.tsv`)
+Only emitted when manifest has `group`.
+
+Columns:
+- `gene`
+- `isoform_id`
+- `group`
+- `count`
+- `proportion`
+- `gene_total`

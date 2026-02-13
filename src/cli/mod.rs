@@ -2,6 +2,7 @@ pub mod addgene;
 pub mod cluster;
 pub mod clusterj;
 pub mod count;
+pub mod count_multi;
 pub mod desc;
 pub mod flow;
 pub mod preparedir;
@@ -27,6 +28,8 @@ pub enum Commands {
     Cluster(cluster::Args),
     Flow(flow::Args),
     Count(count::Args),
+    #[command(name = "count-multi")]
+    CountMulti(count_multi::Args),
     #[command(name = "addgene")]
     AddGene(addgene::Args),
     #[command(name = "preparedir")]
@@ -41,6 +44,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Cluster(args) => cluster::run(args),
         Commands::Flow(args) => flow::run(args),
         Commands::Count(args) => count::run(args),
+        Commands::CountMulti(args) => count_multi::run(args),
         Commands::AddGene(args) => addgene::run(args),
         Commands::PrepareDir(args) => preparedir::run(args),
         Commands::Desc(args) => desc::run(args),
@@ -108,7 +112,8 @@ mod tests {
 
         match cli.command {
             Commands::Flow(args) => {
-                assert_eq!(args.reads, PathBuf::from("reads.bed"));
+                assert_eq!(args.reads, Some(PathBuf::from("reads.bed")));
+                assert_eq!(args.manifest, None);
                 assert_eq!(args.reference, PathBuf::from("ref.bed"));
                 assert_eq!(args.output_root, PathBuf::from("outdir"));
                 assert_eq!(args.prefix, "sample");
@@ -116,6 +121,59 @@ mod tests {
                 assert_eq!(args.sw_score, -1);
             }
             _ => panic!("expected flow args"),
+        }
+    }
+
+    #[test]
+    fn parses_flow_manifest_flags() {
+        let cli = Cli::try_parse_from([
+            "trackcluster",
+            "flow",
+            "--manifest",
+            "samples.tsv",
+            "-r",
+            "ref.bed",
+            "-o",
+            "outdir",
+            "--prefix",
+            "pooled",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Flow(args) => {
+                assert_eq!(args.reads, None);
+                assert_eq!(args.manifest, Some(PathBuf::from("samples.tsv")));
+                assert_eq!(args.reference, PathBuf::from("ref.bed"));
+            }
+            _ => panic!("expected flow args"),
+        }
+    }
+
+    #[test]
+    fn parses_count_multi_flags() {
+        let cli = Cli::try_parse_from([
+            "trackcluster",
+            "count-multi",
+            "--manifest",
+            "samples.tsv",
+            "-r",
+            "ref.bed",
+            "-i",
+            "isoform.bed",
+            "-o",
+            "out/prefix",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::CountMulti(args) => {
+                assert_eq!(args.manifest, PathBuf::from("samples.tsv"));
+                assert_eq!(args.reference, PathBuf::from("ref.bed"));
+                assert_eq!(args.isoform, PathBuf::from("isoform.bed"));
+                assert_eq!(args.out_prefix, PathBuf::from("out/prefix"));
+            }
+            _ => panic!("expected count-multi args"),
         }
     }
 }

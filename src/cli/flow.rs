@@ -2,9 +2,13 @@ use std::path::PathBuf;
 
 #[derive(clap::Args, Debug)]
 pub struct Args {
-    /// Reads BED
+    /// Reads BED (single-sample mode; mutually exclusive with --manifest)
     #[arg(short = 's', long = "reads")]
-    pub reads: PathBuf,
+    pub reads: Option<PathBuf>,
+
+    /// Multi-sample manifest TSV with columns: sample, reads, optional group
+    #[arg(long = "manifest")]
+    pub manifest: Option<PathBuf>,
 
     /// Reference BED
     #[arg(short = 'r', long = "reference")]
@@ -52,8 +56,15 @@ pub struct Args {
 }
 
 pub fn run(args: Args) -> anyhow::Result<()> {
+    match (&args.reads, &args.manifest) {
+        (Some(_), Some(_)) => anyhow::bail!("flow: use either --reads or --manifest, not both"),
+        (None, None) => anyhow::bail!("flow: one of --reads or --manifest is required"),
+        _ => {}
+    }
+
     let result = crate::flow::full::run_full_flow(crate::flow::full::FullFlowOptions {
         reads: args.reads,
+        manifest: args.manifest,
         reference: args.reference,
         output_root: args.output_root,
         prefix: args.prefix,
@@ -79,6 +90,12 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         result.batch.errors,
         result.batch.elapsed_seconds
     );
+    if let Some(multi) = result.multi_sample {
+        eprintln!(
+            "flow: multi-sample long={:?} matrix={:?} group={:?}",
+            multi.long_tsv, multi.matrix_tsv, multi.group_tsv
+        );
+    }
 
     Ok(())
 }

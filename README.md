@@ -17,6 +17,7 @@ Implemented subcommands:
 - `clusterj`: junction-chain clustering (fast mode)
 - `cluster`: overlap-based clustering (slower, more permissive)
 - `count`: isoform expression counting
+- `count-multi`: per-sample (and optional per-group) isoform usage from pooled isoforms
 - `desc`: novel isoform description/classification vs reference
 - `addgene`: assign gene names to reads by overlap with reference
 - `validate-bed`: basic BED12/bigGenePred input validation
@@ -32,12 +33,12 @@ Download a tarball for your platform from the
 
 ```bash
 # Example: Linux x86_64
-curl -LO https://github.com/lrslab/trackcluster-rs/releases/download/v0.1.0/trackcluster-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
-tar xzf trackcluster-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://github.com/lrslab/trackcluster-rs/releases/download/v0.1.0/trackcluster-v0.1.0-x86_64-unknown-linux-musl.tar.gz
+tar xzf trackcluster-v0.1.0-x86_64-unknown-linux-musl.tar.gz
 ./trackcluster --help
 ```
 
-Available targets: Linux x86_64, Linux ARM64, macOS Intel, macOS Apple Silicon.
+Available targets: Linux x86_64 (musl static), Linux ARM64 (glibc), macOS Apple Silicon.
 
 ### From source
 ```bash
@@ -69,6 +70,31 @@ trackcluster count -s tests/fixtures/reads.bed -r tests/fixtures/ref.bed -i isof
 # Describe/classify isoforms vs reference (writes <prefix>_*.txt)
 trackcluster desc --isoform isoform.bed --reference tests/fixtures/ref.bed -o desc_out
 ```
+
+## Multi-sample pooled usage
+Use a manifest TSV to pool reads for clustering once, then quantify per-sample isoform usage.
+
+Example manifest (`samples.tsv`):
+```tsv
+sample	group	reads
+S1	control	/path/S1.reads.bed
+S2	treated	/path/S2.reads.bed
+```
+
+Run full pooled flow:
+```bash
+trackcluster flow --manifest samples.tsv -r tests/fixtures/ref.bed -o out --prefix pooled
+```
+
+Or run per-sample quantification from an existing pooled isoform BED:
+```bash
+trackcluster count-multi --manifest samples.tsv -r tests/fixtures/ref.bed -i out/pooled_isoform.bed -o out/pooled
+```
+
+`count-multi` writes:
+- `out/pooled.isoform_usage.long.tsv`
+- `out/pooled.isoform_counts.matrix.tsv`
+- `out/pooled.isoform_usage.group.tsv` (only when manifest has `group`)
 
 ## Docs
 - Pipeline tutorial: `docs/PIPELINE.md`

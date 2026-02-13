@@ -93,3 +93,66 @@ fn flow_runs_end_to_end_and_matches_goldens() {
     assert!(out_dir.join(format!("{prefix}_fusion.txt")).exists());
     assert!(out_dir.join(format!("{prefix}_class12.txt")).exists());
 }
+
+#[test]
+fn flow_manifest_writes_multi_sample_usage_outputs() {
+    let exe = env!("CARGO_BIN_EXE_trackcluster");
+
+    let manifest = repo_path("tests/fixtures/samples.tsv");
+    let reference = repo_path("tests/fixtures/ref.bed");
+
+    let out_dir = fresh_temp_dir("flow_manifest");
+    let prefix = "pooled";
+
+    let status = Command::new(exe)
+        .args([
+            "flow",
+            "--manifest",
+            manifest.to_str().unwrap(),
+            "-r",
+            reference.to_str().unwrap(),
+            "-o",
+            out_dir.to_str().unwrap(),
+            "--prefix",
+            prefix,
+            "--threads",
+            "1",
+            "--force",
+        ])
+        .status()
+        .expect("run flow manifest mode");
+    assert!(status.success());
+
+    let pooled_reads = out_dir.join(format!("{prefix}_pooled_reads.bed"));
+    assert!(pooled_reads.exists());
+    let pooled = fs::read_to_string(pooled_reads).expect("read pooled reads");
+    assert!(pooled.contains("\tS1::read_s1\t"));
+    assert!(pooled.contains("\tS2::read_s2\t"));
+
+    let long_tsv = out_dir.join(format!("{prefix}.isoform_usage.long.tsv"));
+    let matrix_tsv = out_dir.join(format!("{prefix}.isoform_counts.matrix.tsv"));
+    let group_tsv = out_dir.join(format!("{prefix}.isoform_usage.group.tsv"));
+    assert!(long_tsv.exists());
+    assert!(matrix_tsv.exists());
+    assert!(group_tsv.exists());
+
+    let long_content = fs::read_to_string(long_tsv).expect("read long tsv");
+    let mut sample_prop_sum = std::collections::HashMap::<String, f64>::new();
+    for (idx, line) in long_content.lines().enumerate() {
+        if idx == 0 {
+            assert_eq!(
+                line,
+                "gene\tisoform_id\tsample\tgroup\tcount\tproportion\tgene_total"
+            );
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        assert_eq!(fields.len(), 7);
+        let key = format!("{}\t{}", fields[0], fields[2]); // gene + sample
+        let proportion: f64 = fields[5].parse().expect("parse proportion");
+        *sample_prop_sum.entry(key).or_insert(0.0) += proportion;
+    }
+    for total in sample_prop_sum.values() {
+        assert!((*total - 1.0).abs() < 1e-9);
+    }
+}
