@@ -29,6 +29,10 @@ pub struct Args {
     /// Maximum number of batching rounds before a final merge (TrackCluster Python default: 100)
     #[arg(long = "batch-rounds", default_value_t = 100)]
     pub batch_rounds: usize,
+
+    /// name2 output mode: full read list + coverage, coverage only, or none
+    #[arg(long = "name2-mode", default_value_t = crate::cluster::clusterj::Name2Mode::Full)]
+    pub name2_mode: crate::cluster::clusterj::Name2Mode,
 }
 
 pub fn run(args: Args) -> anyhow::Result<()> {
@@ -37,13 +41,14 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     let refs: Vec<crate::model::Transcript> = crate::io::bed::read_bed12(&args.reference)?
         .collect::<Result<Vec<_>, crate::io::bed::BedError>>()?;
 
-    let result = crate::cluster::clusterj::clusterj(
+    let result = crate::cluster::clusterj::clusterj_with_name2_mode(
         &reads,
         Some(&refs),
         args.threads,
         args.sw_score,
         args.batch_size,
         args.batch_rounds,
+        args.name2_mode,
     );
 
     crate::cluster::output::write_isoforms_bed(&args.out, &result.isoforms)?;

@@ -137,6 +137,7 @@ mod tests {
             "outdir",
             "--prefix",
             "pooled",
+            "--emit-pooled-reads",
         ])
         .unwrap();
 
@@ -145,6 +146,7 @@ mod tests {
                 assert_eq!(args.reads, None);
                 assert_eq!(args.manifest, Some(PathBuf::from("samples.tsv")));
                 assert_eq!(args.reference, PathBuf::from("ref.bed"));
+                assert!(args.emit_pooled_reads);
             }
             _ => panic!("expected flow args"),
         }

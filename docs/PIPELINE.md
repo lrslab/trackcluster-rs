@@ -88,7 +88,7 @@ Under `--output-root`:
 
 In manifest mode:
 
-- `pooled_pooled_reads.bed` (input pooling with sample-tagged read IDs like `S1::read123`)
+- `pooled_pooled_reads.bed` (only if `--emit-pooled-reads`; sample-tagged IDs like `S1::read123`)
 - `pooled.isoform_usage.long.tsv`
 - `pooled.isoform_counts.matrix.tsv`
 - `pooled.isoform_usage.group.tsv` (if manifest includes `group`)

@@ -38,6 +38,10 @@ pub struct Args {
     #[arg(long = "batch-rounds", default_value_t = 100)]
     pub batch_rounds: usize,
 
+    /// name2 output mode: full read list + coverage, coverage only, or none
+    #[arg(long = "name2-mode", default_value_t = crate::cluster::clusterj::Name2Mode::Full)]
+    pub name2_mode: crate::cluster::clusterj::Name2Mode,
+
     /// Prepare step: minimum fraction of read span overlapping a reference span
     #[arg(long = "prepare-fraction-read", default_value_t = 0.01)]
     pub prepare_fraction_read: f64,
@@ -46,6 +50,10 @@ pub struct Args {
     #[arg(long = "prepare-fraction-ref", default_value_t = 0.05)]
     pub prepare_fraction_ref: f64,
 
+    /// Manifest mode: also write `<prefix>_pooled_reads.bed` for debugging/compatibility
+    #[arg(long = "emit-pooled-reads")]
+    pub emit_pooled_reads: bool,
+
     /// Overwrite existing outputs (default: skip genes whose output file already exists)
     #[arg(long = "force")]
     pub force: bool,
@@ -53,6 +61,19 @@ pub struct Args {
     /// Print a progress line every N genes
     #[arg(long = "progress-every", default_value_t = 1000)]
     pub progress_every: usize,
+
+    /// Restrict downsampling to these gene(s) only (repeatable; exact gene folder names).
+    /// If omitted and `--max-reads-per-gene > 0`, downsampling applies to all genes.
+    #[arg(long = "downsample-gene")]
+    pub downsample_genes: Vec<String>,
+
+    /// Per-gene cap: if >0 and gene is selected, reservoir-sample reads down to this count.
+    #[arg(long = "max-reads-per-gene", default_value_t = 0)]
+    pub max_reads_per_gene: usize,
+
+    /// Deterministic RNG seed used for per-gene downsampling.
+    #[arg(long = "downsample-seed", default_value_t = 1)]
+    pub downsample_seed: u64,
 }
 
 pub fn run(args: Args) -> anyhow::Result<()> {
@@ -72,10 +93,15 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         sw_score: args.sw_score,
         batch_size: args.batch_size,
         batch_rounds: args.batch_rounds,
+        name2_mode: args.name2_mode,
         prepare_fraction_read: args.prepare_fraction_read,
         prepare_fraction_ref: args.prepare_fraction_ref,
+        emit_pooled_reads: args.emit_pooled_reads,
         force: args.force,
         progress_every: args.progress_every,
+        downsample_genes: args.downsample_genes,
+        max_reads_per_gene: args.max_reads_per_gene,
+        downsample_seed: args.downsample_seed,
     })?;
 
     eprintln!(

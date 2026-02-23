@@ -53,7 +53,7 @@ fn gene_name(tx: &Transcript) -> &str {
         .unwrap_or(tx.name.as_str())
 }
 
-fn dedup_longest_by_name(reads: &[Transcript]) -> Vec<Transcript> {
+pub fn dedup_longest_by_name(reads: &[Transcript]) -> Vec<Transcript> {
     let mut out: Vec<Transcript> = Vec::new();
     let mut pos: HashMap<String, usize> = HashMap::new();
 
@@ -76,12 +76,12 @@ fn dedup_longest_by_name(reads: &[Transcript]) -> Vec<Transcript> {
     out
 }
 
-pub fn add_gene(
+pub fn add_gene_no_dedup(
     reads: &[Transcript],
     references: &[Transcript],
     opts: AddGeneOpts,
 ) -> Vec<Transcript> {
-    let mut reads = dedup_longest_by_name(reads);
+    let mut reads = reads.to_vec();
 
     let mut reads_sorted = reads.clone();
     let mut refs_sorted: Vec<Transcript> = references.to_vec();
@@ -140,6 +140,15 @@ pub fn add_gene(
     }
 
     reads
+}
+
+pub fn add_gene(
+    reads: &[Transcript],
+    references: &[Transcript],
+    opts: AddGeneOpts,
+) -> Vec<Transcript> {
+    let reads = dedup_longest_by_name(reads);
+    add_gene_no_dedup(&reads, references, opts)
 }
 
 #[cfg(test)]
@@ -211,5 +220,25 @@ mod tests {
         let out = add_gene(&reads, &refs, AddGeneOpts::default());
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].tx_end.get(), 200);
+    }
+
+    #[test]
+    fn add_gene_no_dedup_preserves_duplicate_reads() {
+        let refs = vec![make_tx("ref", 0, 1000, &[(0, 1000)], "GENE1")];
+        let reads = vec![
+            make_tx("dup", 100, 150, &[(100, 150)], "none"),
+            make_tx("dup", 100, 200, &[(100, 200)], "none"),
+        ];
+
+        let out = add_gene_no_dedup(&reads, &refs, AddGeneOpts::default());
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out[0].extra_fields.get(GENE_NAME_COL).map(|s| s.as_str()),
+            Some("GENE1")
+        );
+        assert_eq!(
+            out[1].extra_fields.get(GENE_NAME_COL).map(|s| s.as_str()),
+            Some("GENE1")
+        );
     }
 }

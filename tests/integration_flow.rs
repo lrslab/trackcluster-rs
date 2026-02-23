@@ -115,6 +115,7 @@ fn flow_manifest_writes_multi_sample_usage_outputs() {
             out_dir.to_str().unwrap(),
             "--prefix",
             prefix,
+            "--emit-pooled-reads",
             "--threads",
             "1",
             "--force",
@@ -155,4 +156,80 @@ fn flow_manifest_writes_multi_sample_usage_outputs() {
     for total in sample_prop_sum.values() {
         assert!((*total - 1.0).abs() < 1e-9);
     }
+}
+
+#[test]
+fn flow_manifest_skips_pooled_reads_by_default() {
+    let exe = env!("CARGO_BIN_EXE_trackcluster");
+
+    let manifest = repo_path("tests/fixtures/samples.tsv");
+    let reference = repo_path("tests/fixtures/ref.bed");
+
+    let out_dir = fresh_temp_dir("flow_manifest_no_pool");
+    let prefix = "pooled";
+
+    let status = Command::new(exe)
+        .args([
+            "flow",
+            "--manifest",
+            manifest.to_str().unwrap(),
+            "-r",
+            reference.to_str().unwrap(),
+            "-o",
+            out_dir.to_str().unwrap(),
+            "--prefix",
+            prefix,
+            "--threads",
+            "1",
+            "--force",
+        ])
+        .status()
+        .expect("run flow manifest mode");
+    assert!(status.success());
+
+    let pooled_reads = out_dir.join(format!("{prefix}_pooled_reads.bed"));
+    assert!(!pooled_reads.exists());
+}
+
+#[test]
+fn flow_manifest_downsamples_gene_over_cutoff_and_writes_scale_factors() {
+    let exe = env!("CARGO_BIN_EXE_trackcluster");
+
+    let manifest = repo_path("tests/fixtures/samples.tsv");
+    let reference = repo_path("tests/fixtures/ref.bed");
+
+    let out_dir = fresh_temp_dir("flow_manifest_downsample");
+    let prefix = "pooled";
+
+    let status = Command::new(exe)
+        .args([
+            "flow",
+            "--manifest",
+            manifest.to_str().unwrap(),
+            "-r",
+            reference.to_str().unwrap(),
+            "-o",
+            out_dir.to_str().unwrap(),
+            "--prefix",
+            prefix,
+            "--threads",
+            "1",
+            "--force",
+            "--max-reads-per-gene",
+            "1",
+            "--downsample-seed",
+            "1",
+        ])
+        .status()
+        .expect("run flow manifest downsample");
+    assert!(status.success());
+
+    let summary = out_dir.join("clusterj_batch_downsample.tsv");
+    assert!(summary.exists());
+    let summary_text = fs::read_to_string(summary).unwrap();
+    assert!(summary_text
+        .lines()
+        .any(|line| line.starts_with("GENEA\t2\t1\t2")));
+
+    assert!(out_dir.join("GENEA/downsample.tsv").exists());
 }

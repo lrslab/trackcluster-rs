@@ -7,6 +7,7 @@
 *.swp
 .cursor/
 
+
 # OS
 .DS_Store
 

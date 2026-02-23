@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -11,11 +12,14 @@ use anyhow::Context;
 
 use crate::annotate::addgene::AddGeneOpts;
 use crate::annotate::desc::{describe, DescOpts};
-use crate::count::multi::{run_count_multi_from_paths, MultiSampleOutputPaths};
-use crate::count::{count_by_subreads, write_counts_csv};
-use crate::flow::pool::write_pooled_reads;
-use crate::flow::preparedir::{prepare_dir_from_paths, PrepareDirResult};
-use crate::io::manifest::read_manifest_tsv;
+use crate::count::multi::{run_count_multi_from_read_to_isoform, MultiSampleOutputPaths};
+use crate::count::{count_by_read_to_isoform, write_counts_csv};
+use crate::flow::preparedir::{
+    prepare_dir_from_manifest_rows, prepare_dir_from_paths, PrepareDirResult,
+};
+use crate::io::bed::{read_bed12, BedError};
+use crate::io::manifest::{read_manifest_tsv, SampleRow};
+use crate::model::Transcript;
 
 #[derive(Clone, Debug)]
 pub struct BatchRunOptions {
@@ -31,8 +35,16 @@ pub struct BatchRunOptions {
     pub sw_score: i64,
     pub batch_size: usize,
     pub batch_rounds: usize,
+    pub name2_mode: crate::cluster::clusterj::Name2Mode,
     pub force: bool,
     pub progress_every: usize,
+    /// Per-gene downsampling: if non-empty, only downsample these gene folders (exact names).
+    /// If empty and `max_reads_per_gene > 0`, downsampling applies to all genes.
+    pub downsample_genes: Vec<String>,
+    /// Per-gene downsampling: cap reads per selected gene to this many (0 disables).
+    pub max_reads_per_gene: usize,
+    /// Per-gene downsampling: deterministic RNG seed.
+    pub downsample_seed: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -45,6 +57,7 @@ pub struct BatchRunResult {
     pub elapsed_seconds: f64,
     pub summary_path: PathBuf,
     pub error_path: PathBuf,
+    pub downsample_path: PathBuf,
 }
 
 #[derive(Clone, Debug)]
@@ -58,10 +71,19 @@ pub struct FullFlowOptions {
     pub sw_score: i64,
     pub batch_size: usize,
     pub batch_rounds: usize,
+    pub name2_mode: crate::cluster::clusterj::Name2Mode,
     pub prepare_fraction_read: f64,
     pub prepare_fraction_ref: f64,
+    pub emit_pooled_reads: bool,
     pub force: bool,
     pub progress_every: usize,
+    /// Per-gene downsampling: if non-empty, only downsample these gene folders (exact names).
+    /// If empty and `max_reads_per_gene > 0`, downsampling applies to all genes.
+    pub downsample_genes: Vec<String>,
+    /// Per-gene downsampling: cap reads per selected gene to this many (0 disables).
+    pub max_reads_per_gene: usize,
+    /// Per-gene downsampling: deterministic RNG seed.
+    pub downsample_seed: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -78,6 +100,179 @@ pub struct FullFlowResult {
 enum GeneOutcome {
     Processed,
     Skipped,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Lcg64 {
+    state: u64,
+}
+
+impl Lcg64 {
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        self.state
+    }
+
+    fn gen_below(&mut self, upper: usize) -> usize {
+        debug_assert!(upper > 0);
+        (self.next_u64() % (upper as u64)) as usize
+    }
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 14695981039346656037;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    hash
+}
+
+fn seed_for_gene(base_seed: u64, gene: &str) -> u64 {
+    base_seed ^ fnv1a64(gene.as_bytes())
+}
+
+#[derive(Clone, Debug)]
+struct DownsampleRecord {
+    gene: String,
+    original_reads: usize,
+    sampled_reads: usize,
+    target_reads: usize,
+    seed: u64,
+    scale_factor: f64,
+}
+
+#[derive(Clone, Debug)]
+struct ProcessGeneResult {
+    outcome: GeneOutcome,
+    downsample: Option<DownsampleRecord>,
+}
+
+fn should_downsample_gene(gene: &str, args: &BatchRunOptions) -> bool {
+    if args.max_reads_per_gene == 0 {
+        return false;
+    }
+    if args.downsample_genes.is_empty() {
+        return true;
+    }
+    args.downsample_genes.iter().any(|g| g == gene)
+}
+
+fn reservoir_sample_reads(
+    path: &Path,
+    target_reads: usize,
+    seed: u64,
+) -> anyhow::Result<(Vec<Transcript>, usize)> {
+    let mut rng = Lcg64::new(seed);
+    let mut sampled: Vec<Transcript> = Vec::with_capacity(target_reads);
+    let mut total_reads = 0usize;
+
+    let reader = read_bed12(path).with_context(|| format!("open reads {path:?}"))?;
+    for record in reader {
+        let tx = record.with_context(|| format!("parse reads {path:?}"))?;
+        total_reads += 1;
+
+        if sampled.len() < target_reads {
+            sampled.push(tx);
+            continue;
+        }
+
+        let idx = rng.gen_below(total_reads);
+        if idx < target_reads {
+            sampled[idx] = tx;
+        }
+    }
+
+    Ok((sampled, total_reads))
+}
+
+fn write_downsample_tsv(path: &Path, record: &DownsampleRecord) -> anyhow::Result<()> {
+    let mut writer = std::io::BufWriter::new(
+        fs::File::create(path).with_context(|| format!("write downsample info {path:?}"))?,
+    );
+    writeln!(
+        writer,
+        "gene\toriginal_reads\tsampled_reads\tscale_factor\tseed\ttarget_reads"
+    )?;
+    writeln!(
+        writer,
+        "{}\t{}\t{}\t{}\t{}\t{}",
+        record.gene,
+        record.original_reads,
+        record.sampled_reads,
+        record.scale_factor,
+        record.seed,
+        record.target_reads
+    )?;
+    Ok(())
+}
+
+fn read_downsample_scales(path: &Path) -> anyhow::Result<HashMap<String, f64>> {
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+
+    let file = fs::File::open(path).with_context(|| format!("open downsample file {path:?}"))?;
+    let reader = BufReader::new(file);
+    let mut out: HashMap<String, f64> = HashMap::new();
+    for (line_no, line) in reader.lines().enumerate() {
+        let line = line.with_context(|| format!("read downsample file {path:?}"))?;
+        if line_no == 0 {
+            continue;
+        }
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let mut fields = line.split('\t');
+        let Some(gene) = fields.next() else {
+            continue;
+        };
+        let _original_reads = fields.next();
+        let _sampled_reads = fields.next();
+        let Some(scale_factor) = fields.next() else {
+            continue;
+        };
+
+        let gene = gene.trim();
+        if gene.is_empty() || gene == "none" {
+            continue;
+        }
+        let scale_factor: f64 = scale_factor.trim().parse().with_context(|| {
+            format!("parse scale_factor {scale_factor:?} for gene {gene:?} in {path:?}")
+        })?;
+        if scale_factor > 0.0 {
+            out.insert(gene.to_owned(), scale_factor);
+        }
+    }
+    Ok(out)
+}
+
+fn scale_for_gene_field(gene_field: &str, scales: &HashMap<String, f64>) -> Option<f64> {
+    let gene_field = gene_field.trim();
+    if gene_field.is_empty() || gene_field == "none" {
+        return None;
+    }
+
+    let mut scale: Option<f64> = None;
+    for gene in gene_field
+        .split("||")
+        .map(str::trim)
+        .filter(|g| !g.is_empty() && *g != "none")
+    {
+        let Some(candidate) = scales.get(gene).copied() else {
+            continue;
+        };
+        if scale.replace(candidate).is_some() {
+            return None;
+        }
+    }
+    scale
 }
 
 fn read_gene_list(path: &Path) -> anyhow::Result<Vec<String>> {
@@ -114,19 +309,25 @@ fn discover_genes(root: &Path) -> anyhow::Result<Vec<String>> {
     Ok(genes)
 }
 
-fn process_gene(gene: &str, args: &BatchRunOptions) -> anyhow::Result<GeneOutcome> {
+fn process_gene(gene: &str, args: &BatchRunOptions) -> anyhow::Result<ProcessGeneResult> {
     let gene_dir = args.input_root.join(gene);
     let reads = gene_dir.join(format!("{gene}_nano.bed"));
     let reference = gene_dir.join(format!("{gene}_gff.bed"));
     if !reads.exists() || !reference.exists() {
-        return Ok(GeneOutcome::Skipped);
+        return Ok(ProcessGeneResult {
+            outcome: GeneOutcome::Skipped,
+            downsample: None,
+        });
     }
 
     let reads_len = fs::metadata(&reads)
         .with_context(|| format!("stat reads {reads:?}"))?
         .len();
     if reads_len == 0 {
-        return Ok(GeneOutcome::Skipped);
+        return Ok(ProcessGeneResult {
+            outcome: GeneOutcome::Skipped,
+            downsample: None,
+        });
     }
 
     let out_dir = args.output_root.join(gene);
@@ -137,26 +338,51 @@ fn process_gene(gene: &str, args: &BatchRunOptions) -> anyhow::Result<GeneOutcom
     let out_mapping = out_dir.join(format!("{gene}_read_to_isoform.tsv"));
 
     if !args.force && out_isoforms.exists() {
-        return Ok(GeneOutcome::Skipped);
+        return Ok(ProcessGeneResult {
+            outcome: GeneOutcome::Skipped,
+            downsample: None,
+        });
     }
 
-    let reads: Vec<crate::model::Transcript> = crate::io::bed::read_bed12(&reads)
-        .with_context(|| format!("open reads {reads:?}"))?
-        .collect::<Result<Vec<_>, crate::io::bed::BedError>>()
-        .with_context(|| format!("parse reads {reads:?}"))?;
+    let (reads, downsample) = if should_downsample_gene(gene, args) {
+        let target_reads = args.max_reads_per_gene.max(1);
+        let seed = seed_for_gene(args.downsample_seed, gene);
+        let (sampled, total_reads) = reservoir_sample_reads(&reads, target_reads, seed)?;
+        let sampled_reads = sampled.len();
+        let downsample = if total_reads > sampled_reads && sampled_reads > 0 {
+            Some(DownsampleRecord {
+                gene: gene.to_owned(),
+                original_reads: total_reads,
+                sampled_reads,
+                target_reads,
+                seed,
+                scale_factor: total_reads as f64 / sampled_reads as f64,
+            })
+        } else {
+            None
+        };
+        (sampled, downsample)
+    } else {
+        let reads: Vec<crate::model::Transcript> = crate::io::bed::read_bed12(&reads)
+            .with_context(|| format!("open reads {reads:?}"))?
+            .collect::<Result<Vec<_>, crate::io::bed::BedError>>()
+            .with_context(|| format!("parse reads {reads:?}"))?;
+        (reads, None)
+    };
 
     let refs: Vec<crate::model::Transcript> = crate::io::bed::read_bed12(&reference)
         .with_context(|| format!("open reference {reference:?}"))?
         .collect::<Result<Vec<_>, crate::io::bed::BedError>>()
         .with_context(|| format!("parse reference {reference:?}"))?;
 
-    let result = crate::cluster::clusterj::clusterj(
+    let result = crate::cluster::clusterj::clusterj_with_name2_mode(
         &reads,
         Some(&refs),
         1,
         args.sw_score,
         args.batch_size,
         args.batch_rounds,
+        args.name2_mode,
     );
 
     crate::cluster::output::write_isoforms_bed(&out_isoforms, &result.isoforms)
@@ -166,7 +392,16 @@ fn process_gene(gene: &str, args: &BatchRunOptions) -> anyhow::Result<GeneOutcom
     crate::cluster::output::write_read_to_isoform_tsv(&out_mapping, &result.read_to_isoform)
         .with_context(|| format!("write {out_mapping:?}"))?;
 
-    Ok(GeneOutcome::Processed)
+    if let Some(record) = downsample.as_ref() {
+        let path = out_dir.join("downsample.tsv");
+        write_downsample_tsv(&path, record)
+            .with_context(|| format!("write per-gene downsample info {path:?}"))?;
+    }
+
+    Ok(ProcessGeneResult {
+        outcome: GeneOutcome::Processed,
+        downsample,
+    })
 }
 
 pub fn run_clusterj_batch(args: BatchRunOptions) -> anyhow::Result<BatchRunResult> {
@@ -239,6 +474,7 @@ pub fn run_clusterj_batch(args: BatchRunOptions) -> anyhow::Result<BatchRunResul
     let errors = Arc::new(AtomicUsize::new(0));
     let done = Arc::new(AtomicUsize::new(0));
     let error_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let downsample_records: Arc<Mutex<Vec<DownsampleRecord>>> = Arc::new(Mutex::new(Vec::new()));
 
     let queue = Arc::new(Mutex::new(genes));
     let worker_count = args.threads.max(1).min(total);
@@ -251,6 +487,7 @@ pub fn run_clusterj_batch(args: BatchRunOptions) -> anyhow::Result<BatchRunResul
         let errors = Arc::clone(&errors);
         let done = Arc::clone(&done);
         let error_lines = Arc::clone(&error_lines);
+        let downsample_records = Arc::clone(&downsample_records);
         let args = args.clone();
 
         handles.push(std::thread::spawn(move || loop {
@@ -262,15 +499,18 @@ pub fn run_clusterj_batch(args: BatchRunOptions) -> anyhow::Result<BatchRunResul
                 break;
             };
 
-            let outcome = match panic::catch_unwind(AssertUnwindSafe(|| process_gene(&gene, &args)))
+            let result = match panic::catch_unwind(AssertUnwindSafe(|| process_gene(&gene, &args)))
             {
-                Ok(Ok(outcome)) => outcome,
+                Ok(Ok(result)) => result,
                 Ok(Err(err)) => {
                     errors.fetch_add(1, Ordering::Relaxed);
                     if let Ok(mut guard) = error_lines.lock() {
                         guard.push(format!("{gene}\t{err}"));
                     }
-                    GeneOutcome::Skipped
+                    ProcessGeneResult {
+                        outcome: GeneOutcome::Skipped,
+                        downsample: None,
+                    }
                 }
                 Err(payload) => {
                     errors.fetch_add(1, Ordering::Relaxed);
@@ -283,11 +523,20 @@ pub fn run_clusterj_batch(args: BatchRunOptions) -> anyhow::Result<BatchRunResul
                     if let Ok(mut guard) = error_lines.lock() {
                         guard.push(format!("{gene}\tpanic\t{msg}"));
                     }
-                    GeneOutcome::Skipped
+                    ProcessGeneResult {
+                        outcome: GeneOutcome::Skipped,
+                        downsample: None,
+                    }
                 }
             };
 
-            match outcome {
+            if let Some(record) = result.downsample {
+                if let Ok(mut guard) = downsample_records.lock() {
+                    guard.push(record);
+                }
+            }
+
+            match result.outcome {
                 GeneOutcome::Processed => {
                     processed.fetch_add(1, Ordering::Relaxed);
                 }
@@ -335,6 +584,7 @@ pub fn run_clusterj_batch(args: BatchRunOptions) -> anyhow::Result<BatchRunResul
     writeln!(summary, "sw_score\t{}", args.sw_score)?;
     writeln!(summary, "batch_size\t{}", args.batch_size)?;
     writeln!(summary, "batch_rounds\t{}", args.batch_rounds)?;
+    writeln!(summary, "name2_mode\t{}", args.name2_mode)?;
     writeln!(summary, "force\t{}", args.force)?;
     writeln!(summary, "total_genes\t{}", total)?;
     writeln!(summary, "processed\t{}", processed)?;
@@ -356,6 +606,36 @@ pub fn run_clusterj_batch(args: BatchRunOptions) -> anyhow::Result<BatchRunResul
         let _ = fs::remove_file(&error_path);
     }
 
+    let downsample_path = args.output_root.join("clusterj_batch_downsample.tsv");
+    let mut downsample_records = downsample_records
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !downsample_records.is_empty() {
+        downsample_records.sort_by(|a, b| a.gene.cmp(&b.gene));
+        let mut writer = std::io::BufWriter::new(
+            fs::File::create(&downsample_path)
+                .with_context(|| format!("write {downsample_path:?}"))?,
+        );
+        writeln!(
+            writer,
+            "gene\toriginal_reads\tsampled_reads\tscale_factor\tseed\ttarget_reads"
+        )?;
+        for record in downsample_records.iter() {
+            writeln!(
+                writer,
+                "{}\t{}\t{}\t{}\t{}\t{}",
+                record.gene,
+                record.original_reads,
+                record.sampled_reads,
+                record.scale_factor,
+                record.seed,
+                record.target_reads
+            )?;
+        }
+    } else if downsample_path.exists() {
+        let _ = fs::remove_file(&downsample_path);
+    }
+
     Ok(BatchRunResult {
         prepared,
         total_genes: total,
@@ -365,6 +645,7 @@ pub fn run_clusterj_batch(args: BatchRunOptions) -> anyhow::Result<BatchRunResul
         elapsed_seconds: elapsed.as_secs_f64(),
         summary_path,
         error_path,
+        downsample_path,
     })
 }
 
@@ -378,21 +659,27 @@ fn merge_files(inputs: &[PathBuf], out: &Path) -> anyhow::Result<()> {
     let mut writer = std::io::BufWriter::new(
         fs::File::create(out).with_context(|| format!("create merged output {out:?}"))?,
     );
+    let mut buffer = vec![0u8; 1024 * 1024];
     for input in inputs {
-        let mut bytes: Vec<u8> = Vec::new();
         let mut reader = std::io::BufReader::new(
             fs::File::open(input).with_context(|| format!("open {input:?}"))?,
         );
-        reader
-            .read_to_end(&mut bytes)
-            .with_context(|| format!("read {input:?}"))?;
-        if bytes.is_empty() {
-            continue;
+        let mut saw_bytes = false;
+        let mut last_byte: u8 = b'\n';
+        loop {
+            let read_len = reader
+                .read(&mut buffer)
+                .with_context(|| format!("read {input:?}"))?;
+            if read_len == 0 {
+                break;
+            }
+            saw_bytes = true;
+            last_byte = buffer[read_len - 1];
+            writer
+                .write_all(&buffer[..read_len])
+                .with_context(|| format!("append {input:?} into {out:?}"))?;
         }
-        writer
-            .write_all(&bytes)
-            .with_context(|| format!("append {input:?} into {out:?}"))?;
-        if !bytes.ends_with(b"\n") {
+        if saw_bytes && last_byte != b'\n' {
             writer
                 .write_all(b"\n")
                 .with_context(|| format!("final newline after {input:?}"))?;
@@ -421,26 +708,40 @@ fn merge_gene_outputs(
     Ok(())
 }
 
+fn read_bed12_records(path: &Path, kind: &str) -> anyhow::Result<Vec<Transcript>> {
+    read_bed12(path)
+        .with_context(|| format!("open {kind} {path:?}"))?
+        .collect::<Result<Vec<_>, BedError>>()
+        .with_context(|| format!("parse {kind} {path:?}"))
+}
+
 fn run_count_and_desc(
-    isoform_bed: &Path,
-    reference_bed: &Path,
+    isoforms: &[Transcript],
+    refs: &[Transcript],
+    read_to_isoform: &[(String, String)],
     count_csv: &Path,
     desc_prefix: &Path,
+    downsample_scales: Option<&HashMap<String, f64>>,
 ) -> anyhow::Result<()> {
-    let isoforms: Vec<crate::model::Transcript> = crate::io::bed::read_bed12(isoform_bed)
-        .with_context(|| format!("open isoform {isoform_bed:?}"))?
-        .collect::<Result<Vec<_>, crate::io::bed::BedError>>()
-        .with_context(|| format!("parse isoform {isoform_bed:?}"))?;
-    let refs: Vec<crate::model::Transcript> = crate::io::bed::read_bed12(reference_bed)
-        .with_context(|| format!("open reference {reference_bed:?}"))?
-        .collect::<Result<Vec<_>, crate::io::bed::BedError>>()
-        .with_context(|| format!("parse reference {reference_bed:?}"))?;
-
-    let counts = count_by_subreads(&isoforms, &refs);
+    let mut counts = count_by_read_to_isoform(isoforms, read_to_isoform);
+    if let Some(scales) = downsample_scales {
+        const GENE_NAME_COL: usize = 5;
+        for (record, isoform) in counts.iter_mut().zip(isoforms.iter()) {
+            let gene_field = isoform
+                .extra_fields
+                .get(GENE_NAME_COL)
+                .map(|value| value.as_str())
+                .unwrap_or("")
+                .trim();
+            if let Some(scale) = scale_for_gene_field(gene_field, scales) {
+                record.count *= scale;
+            }
+        }
+    }
     write_counts_csv(count_csv, &counts)
         .with_context(|| format!("write count csv {count_csv:?}"))?;
 
-    let desc = describe(&isoforms, &refs, DescOpts::default());
+    let desc = describe(isoforms, refs, DescOpts::default());
 
     let desc_path = append_suffix(desc_prefix, "_desc.txt");
     let mut writer = std::io::BufWriter::new(
@@ -481,54 +782,174 @@ fn run_count_and_desc(
     Ok(())
 }
 
+fn run_count_multi_scaled(
+    sample_rows: &[SampleRow],
+    isoforms: &[Transcript],
+    read_to_isoform: &[(String, String)],
+    out_prefix: &Path,
+    downsample_scales: &HashMap<String, f64>,
+) -> anyhow::Result<MultiSampleOutputPaths> {
+    if let Some(parent) = out_prefix
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).with_context(|| format!("create output dir {parent:?}"))?;
+    }
+
+    let mut result =
+        crate::count::multi::count_multi_by_read_to_isoform(isoforms, read_to_isoform, sample_rows)
+            .with_context(|| format!("count-multi {:?}", out_prefix))?;
+    let include_group = sample_rows.iter().any(|sample| sample.group.is_some());
+
+    for row in &mut result.matrix_rows {
+        let Some(scale) = scale_for_gene_field(&row.gene, downsample_scales) else {
+            continue;
+        };
+        for count in &mut row.counts {
+            *count *= scale;
+        }
+    }
+
+    for row in &mut result.long_rows {
+        let Some(scale) = scale_for_gene_field(&row.gene, downsample_scales) else {
+            continue;
+        };
+        row.count *= scale;
+        row.gene_total *= scale;
+    }
+
+    for row in &mut result.group_rows {
+        let Some(scale) = scale_for_gene_field(&row.gene, downsample_scales) else {
+            continue;
+        };
+        row.count *= scale;
+        row.gene_total *= scale;
+    }
+
+    let long_tsv = append_suffix(out_prefix, ".isoform_usage.long.tsv");
+    let matrix_tsv = append_suffix(out_prefix, ".isoform_counts.matrix.tsv");
+    crate::count::multi::write_usage_long_tsv(&long_tsv, &result.long_rows, include_group)
+        .with_context(|| format!("write long output {long_tsv:?}"))?;
+    crate::count::multi::write_counts_matrix_tsv(&matrix_tsv, &result.matrix_rows, sample_rows)
+        .with_context(|| format!("write matrix output {matrix_tsv:?}"))?;
+
+    let group_tsv = if result.group_rows.is_empty() {
+        None
+    } else {
+        let path = append_suffix(out_prefix, ".isoform_usage.group.tsv");
+        crate::count::multi::write_group_usage_tsv(&path, &result.group_rows)
+            .with_context(|| format!("write group output {path:?}"))?;
+        Some(path)
+    };
+
+    Ok(MultiSampleOutputPaths {
+        long_tsv,
+        matrix_tsv,
+        group_tsv,
+    })
+}
+
 pub fn run_full_flow(opts: FullFlowOptions) -> anyhow::Result<FullFlowResult> {
     fs::create_dir_all(&opts.output_root)
         .with_context(|| format!("create {:?}", opts.output_root))?;
 
-    let prepare_reads = match (&opts.reads, &opts.manifest) {
-        (Some(reads), None) => reads.clone(),
-        (None, Some(manifest)) => {
-            let sample_rows = read_manifest_tsv(manifest)?;
-            let pooled_reads = opts
-                .output_root
-                .join(format!("{}_pooled_reads.bed", opts.prefix));
-            let pooled_read_count = write_pooled_reads(&sample_rows, &pooled_reads)?;
+    let gene_list = opts.output_root.join(format!("{}_gene.txt", opts.prefix));
+    let mut sample_rows: Option<Vec<SampleRow>> = None;
+
+    let batch = match (&opts.reads, &opts.manifest) {
+        (Some(reads), None) => run_clusterj_batch(BatchRunOptions {
+            prepare_reads: Some(reads.clone()),
+            prepare_reference: Some(opts.reference.clone()),
+            prepare_prefix: Some(opts.prefix.clone()),
+            prepare_fraction_read: opts.prepare_fraction_read,
+            prepare_fraction_ref: opts.prepare_fraction_ref,
+            input_root: opts.output_root.clone(),
+            gene_list: Some(gene_list.clone()),
+            output_root: opts.output_root.clone(),
+            threads: opts.threads,
+            sw_score: opts.sw_score,
+            batch_size: opts.batch_size,
+            batch_rounds: opts.batch_rounds,
+            name2_mode: opts.name2_mode,
+            force: opts.force,
+            progress_every: opts.progress_every,
+            downsample_genes: opts.downsample_genes.clone(),
+            max_reads_per_gene: opts.max_reads_per_gene,
+            downsample_seed: opts.downsample_seed,
+        })?,
+        (None, Some(manifest_path)) => {
+            let rows = read_manifest_tsv(manifest_path)?;
+            let pooled_reads_out = if opts.emit_pooled_reads {
+                Some(
+                    opts.output_root
+                        .join(format!("{}_pooled_reads.bed", opts.prefix)),
+                )
+            } else {
+                None
+            };
+            let prepared = prepare_dir_from_manifest_rows(
+                &rows,
+                &opts.reference,
+                &opts.output_root,
+                &opts.prefix,
+                AddGeneOpts {
+                    fraction_read: opts.prepare_fraction_read,
+                    fraction_ref: opts.prepare_fraction_ref,
+                },
+                pooled_reads_out.as_deref(),
+            )
+            .with_context(|| format!("prepare from manifest {manifest_path:?}"))?;
+            if let Some(path) = pooled_reads_out {
+                eprintln!(
+                    "flow: emitted pooled reads from manifest {:?} (samples={}) -> {:?}",
+                    manifest_path,
+                    rows.len(),
+                    path
+                );
+            }
             eprintln!(
-                "flow: pooled reads from manifest {:?} (samples={}, reads={}) -> {:?}",
-                manifest,
-                sample_rows.len(),
-                pooled_read_count,
-                pooled_reads
+                "prepare: genes={}, dedup_reads={}, novel_reads={}",
+                prepared.genes.len(),
+                prepared.dedup_reads,
+                prepared.novel_reads
             );
-            pooled_reads
+
+            let mut batch = run_clusterj_batch(BatchRunOptions {
+                prepare_reads: None,
+                prepare_reference: None,
+                prepare_prefix: None,
+                prepare_fraction_read: opts.prepare_fraction_read,
+                prepare_fraction_ref: opts.prepare_fraction_ref,
+                input_root: opts.output_root.clone(),
+                gene_list: Some(gene_list.clone()),
+                output_root: opts.output_root.clone(),
+                threads: opts.threads,
+                sw_score: opts.sw_score,
+                batch_size: opts.batch_size,
+                batch_rounds: opts.batch_rounds,
+                name2_mode: opts.name2_mode,
+                force: opts.force,
+                progress_every: opts.progress_every,
+                downsample_genes: opts.downsample_genes.clone(),
+                max_reads_per_gene: opts.max_reads_per_gene,
+                downsample_seed: opts.downsample_seed,
+            })?;
+            batch.prepared = Some(prepared);
+            sample_rows = Some(rows);
+            batch
         }
         (Some(_), Some(_)) => anyhow::bail!("flow: use either reads or manifest, not both"),
         (None, None) => anyhow::bail!("flow: reads or manifest is required"),
     };
-
-    let gene_list = opts.output_root.join(format!("{}_gene.txt", opts.prefix));
-    let batch = run_clusterj_batch(BatchRunOptions {
-        prepare_reads: Some(prepare_reads),
-        prepare_reference: Some(opts.reference.clone()),
-        prepare_prefix: Some(opts.prefix.clone()),
-        prepare_fraction_read: opts.prepare_fraction_read,
-        prepare_fraction_ref: opts.prepare_fraction_ref,
-        input_root: opts.output_root.clone(),
-        gene_list: Some(gene_list.clone()),
-        output_root: opts.output_root.clone(),
-        threads: opts.threads,
-        sw_score: opts.sw_score,
-        batch_size: opts.batch_size,
-        batch_rounds: opts.batch_rounds,
-        force: opts.force,
-        progress_every: opts.progress_every,
-    })?;
 
     let genes = read_gene_list(&gene_list).with_context(|| format!("read {:?}", gene_list))?;
     let isoform_bed = opts
         .output_root
         .join(format!("{}_isoform.bed", opts.prefix));
     let unused_bed = opts.output_root.join(format!("{}_unused.bed", opts.prefix));
+    let read_to_isoform_tsv = opts
+        .output_root
+        .join(format!("{}_read_to_isoform.tsv", opts.prefix));
     let count_csv = opts
         .output_root
         .join(format!("{}_isoform_count.csv", opts.prefix));
@@ -545,20 +966,66 @@ pub fn run_full_flow(opts: FullFlowOptions) -> anyhow::Result<FullFlowResult> {
     eprintln!("flow: merge unused -> {:?}", unused_bed);
     merge_gene_outputs(&opts.output_root, &genes, "_unused.bed", &unused_bed)?;
 
-    eprintln!("flow: count + desc");
-    run_count_and_desc(&isoform_bed, &opts.reference, &count_csv, &desc_prefix)?;
+    eprintln!("flow: merge read-to-isoform -> {:?}", read_to_isoform_tsv);
+    merge_gene_outputs(
+        &opts.output_root,
+        &genes,
+        "_read_to_isoform.tsv",
+        &read_to_isoform_tsv,
+    )?;
 
-    let multi_sample = if let Some(manifest) = opts.manifest.as_ref() {
+    let downsample_path = opts.output_root.join("clusterj_batch_downsample.tsv");
+    let downsample_scales = read_downsample_scales(&downsample_path)
+        .with_context(|| format!("read downsample scales {downsample_path:?}"))?;
+    let downsample_scales = if downsample_scales.is_empty() {
+        None
+    } else {
+        eprintln!(
+            "flow: applying downsample scale factors (genes={}) from {:?}",
+            downsample_scales.len(),
+            downsample_path
+        );
+        Some(downsample_scales)
+    };
+
+    let isoforms = read_bed12_records(&isoform_bed, "isoform")?;
+    let refs = read_bed12_records(&opts.reference, "reference")?;
+    let read_to_isoform = crate::count::read_read_to_isoform_tsv(&read_to_isoform_tsv)
+        .with_context(|| format!("read merged read_to_isoform {read_to_isoform_tsv:?}"))?;
+
+    eprintln!("flow: count + desc");
+    run_count_and_desc(
+        &isoforms,
+        &refs,
+        &read_to_isoform,
+        &count_csv,
+        &desc_prefix,
+        downsample_scales.as_ref(),
+    )?;
+
+    let multi_sample = if let Some(rows) = sample_rows.as_ref() {
         let output_prefix = opts.output_root.join(&opts.prefix);
-        Some(
-            run_count_multi_from_paths(manifest, &opts.reference, &isoform_bed, &output_prefix)
+        if let Some(scales) = downsample_scales.as_ref() {
+            Some(run_count_multi_scaled(
+                rows,
+                &isoforms,
+                &read_to_isoform,
+                &output_prefix,
+                scales,
+            )?)
+        } else {
+            Some(
+                run_count_multi_from_read_to_isoform(
+                    rows,
+                    &isoforms,
+                    &read_to_isoform,
+                    &output_prefix,
+                )
                 .with_context(|| {
-                    format!(
-                        "run multi-sample counting for flow manifest {:?} and isoforms {:?}",
-                        manifest, isoform_bed
-                    )
+                    format!("run multi-sample counting for flow {:?}", output_prefix)
                 })?,
-        )
+            )
+        }
     } else {
         None
     };
@@ -571,4 +1038,44 @@ pub fn run_full_flow(opts: FullFlowOptions) -> anyhow::Result<FullFlowResult> {
         desc_prefix,
         multi_sample,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    fn fresh_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_nanos();
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "trackcluster_rs_full_{}_{}_{}",
+            prefix,
+            std::process::id(),
+            nanos
+        ));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn merge_files_adds_newline_only_when_missing() {
+        let dir = fresh_temp_dir("merge_files_newline");
+        let in1 = dir.join("in1.txt");
+        let in2 = dir.join("in2.txt");
+        let in3 = dir.join("in3.txt");
+        let out = dir.join("out.txt");
+
+        fs::write(&in1, "first\n").unwrap();
+        fs::write(&in2, "second").unwrap();
+        fs::write(&in3, "").unwrap();
+
+        merge_files(&[in1, in2, in3], &out).unwrap();
+        let merged = fs::read_to_string(out).unwrap();
+        assert_eq!(merged, "first\nsecond\n");
+    }
 }

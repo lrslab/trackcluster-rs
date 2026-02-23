@@ -39,6 +39,7 @@ Key flags:
 - `--sw-score`: set to `-1` to disable 5' truncation collapsing
 - `--batch-size`, `--batch-rounds`: bounds for very large genes
 - `--prepare-fraction-read`, `--prepare-fraction-ref`: overlap thresholds for gene assignment
+- `--emit-pooled-reads`: when using `--manifest`, also write `<prefix>_pooled_reads.bed`
 - `--force`: overwrite existing per-gene outputs (otherwise genes with existing outputs are skipped)
 
 Outputs (under `--output-root`):
@@ -47,7 +48,7 @@ Outputs (under `--output-root`):
 - `<prefix>_isoform_count.csv`
 - `<prefix>_desc.txt`, `<prefix>_class4.txt`, `<prefix>_class12.txt`, `<prefix>_fusion.txt`
 - `clusterj_batch_summary.txt`, `clusterj_batch_errors.txt`
-- `<prefix>_pooled_reads.bed` (manifest mode only)
+- `<prefix>_pooled_reads.bed` (manifest mode + `--emit-pooled-reads`)
 - `<prefix>.isoform_usage.long.tsv` (manifest mode only)
 - `<prefix>.isoform_counts.matrix.tsv` (manifest mode only)
 - `<prefix>.isoform_usage.group.tsv` (manifest mode only; only when manifest has `group`)

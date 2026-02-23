@@ -87,87 +87,10 @@ fn group_order(samples: &[SampleRow]) -> Vec<String> {
     groups
 }
 
-pub fn count_multi_by_subreads(
-    isoforms: &[Transcript],
-    references: &[Transcript],
+fn usage_from_matrix_rows(
+    mut matrix_rows: Vec<UsageMatrixRow>,
     samples: &[SampleRow],
-) -> anyhow::Result<MultiSampleCountResult> {
-    if samples.is_empty() {
-        anyhow::bail!("count-multi requires at least one sample");
-    }
-
-    let ref_names: HashSet<&str> = references.iter().map(|tx| tx.name.as_str()).collect();
-    let sample_to_idx: HashMap<&str, usize> = samples
-        .iter()
-        .enumerate()
-        .map(|(idx, row)| (row.sample.as_str(), idx))
-        .collect();
-
-    let mut read_occurrence: HashMap<String, u32> = HashMap::new();
-    let mut read_to_sample_idx: HashMap<String, usize> = HashMap::new();
-    for isoform in isoforms {
-        for read_name in parse_subreads(isoform) {
-            if ref_names.contains(read_name) {
-                continue;
-            }
-
-            let (sample_name, _raw_read_id) = split_tagged_read_name(read_name).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "read id {read_name:?} in isoform {:?} is missing sample prefix; expected format '<sample>::<read_id>'",
-                    isoform.name
-                )
-            })?;
-            let sample_idx = sample_to_idx.get(sample_name).copied().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "read id {read_name:?} in isoform {:?} references unknown sample {sample_name:?} (not present in manifest)",
-                    isoform.name
-                )
-            })?;
-
-            match read_to_sample_idx.get(read_name).copied() {
-                Some(existing) if existing != sample_idx => {
-                    anyhow::bail!(
-                        "read id {read_name:?} maps to multiple samples ({:?} and {:?})",
-                        samples[existing].sample,
-                        samples[sample_idx].sample
-                    );
-                }
-                Some(_) => {}
-                None => {
-                    read_to_sample_idx.insert(read_name.to_owned(), sample_idx);
-                }
-            }
-
-            *read_occurrence.entry(read_name.to_owned()).or_insert(0) += 1;
-        }
-    }
-
-    let mut matrix_rows: Vec<UsageMatrixRow> = isoforms
-        .iter()
-        .map(|isoform| {
-            let mut counts = vec![0.0f64; samples.len()];
-            for read_name in parse_subreads(isoform) {
-                if ref_names.contains(read_name) {
-                    continue;
-                }
-                let sample_idx = *read_to_sample_idx.get(read_name).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "internal error: sample lookup missing for read id {read_name:?}"
-                    )
-                })?;
-                let denom = read_occurrence.get(read_name).copied().unwrap_or(0);
-                if denom > 0 {
-                    counts[sample_idx] += 1.0f64 / (denom as f64);
-                }
-            }
-
-            Ok(UsageMatrixRow {
-                gene: isoform_gene(isoform),
-                isoform_id: isoform.name.clone(),
-                counts,
-            })
-        })
-        .collect::<Result<Vec<_>, anyhow::Error>>()?;
+) -> MultiSampleCountResult {
     matrix_rows.sort_by(|a, b| {
         a.gene
             .cmp(&b.gene)
@@ -272,11 +195,180 @@ pub fn count_multi_by_subreads(
         out
     };
 
-    Ok(MultiSampleCountResult {
+    MultiSampleCountResult {
         matrix_rows,
         long_rows,
         group_rows,
-    })
+    }
+}
+
+pub fn count_multi_by_subreads(
+    isoforms: &[Transcript],
+    references: &[Transcript],
+    samples: &[SampleRow],
+) -> anyhow::Result<MultiSampleCountResult> {
+    if samples.is_empty() {
+        anyhow::bail!("count-multi requires at least one sample");
+    }
+
+    let ref_names: HashSet<&str> = references.iter().map(|tx| tx.name.as_str()).collect();
+    let sample_to_idx: HashMap<&str, usize> = samples
+        .iter()
+        .enumerate()
+        .map(|(idx, row)| (row.sample.as_str(), idx))
+        .collect();
+
+    let mut read_occurrence: HashMap<String, u32> = HashMap::new();
+    let mut read_to_sample_idx: HashMap<String, usize> = HashMap::new();
+    for isoform in isoforms {
+        for read_name in parse_subreads(isoform) {
+            if ref_names.contains(read_name) {
+                continue;
+            }
+
+            let (sample_name, _raw_read_id) = split_tagged_read_name(read_name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "read id {read_name:?} in isoform {:?} is missing sample prefix; expected format '<sample>::<read_id>'",
+                    isoform.name
+                )
+            })?;
+            let sample_idx = sample_to_idx.get(sample_name).copied().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "read id {read_name:?} in isoform {:?} references unknown sample {sample_name:?} (not present in manifest)",
+                    isoform.name
+                )
+            })?;
+
+            match read_to_sample_idx.get(read_name).copied() {
+                Some(existing) if existing != sample_idx => {
+                    anyhow::bail!(
+                        "read id {read_name:?} maps to multiple samples ({:?} and {:?})",
+                        samples[existing].sample,
+                        samples[sample_idx].sample
+                    );
+                }
+                Some(_) => {}
+                None => {
+                    read_to_sample_idx.insert(read_name.to_owned(), sample_idx);
+                }
+            }
+
+            *read_occurrence.entry(read_name.to_owned()).or_insert(0) += 1;
+        }
+    }
+
+    let matrix_rows: Vec<UsageMatrixRow> = isoforms
+        .iter()
+        .map(|isoform| {
+            let mut counts = vec![0.0f64; samples.len()];
+            for read_name in parse_subreads(isoform) {
+                if ref_names.contains(read_name) {
+                    continue;
+                }
+                let sample_idx = *read_to_sample_idx.get(read_name).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "internal error: sample lookup missing for read id {read_name:?}"
+                    )
+                })?;
+                let denom = read_occurrence.get(read_name).copied().unwrap_or(0);
+                if denom > 0 {
+                    counts[sample_idx] += 1.0f64 / (denom as f64);
+                }
+            }
+
+            Ok(UsageMatrixRow {
+                gene: isoform_gene(isoform),
+                isoform_id: isoform.name.clone(),
+                counts,
+            })
+        })
+        .collect::<Result<Vec<_>, anyhow::Error>>()?;
+    Ok(usage_from_matrix_rows(matrix_rows, samples))
+}
+
+pub fn count_multi_by_read_to_isoform(
+    isoforms: &[Transcript],
+    read_to_isoform: &[(String, String)],
+    samples: &[SampleRow],
+) -> anyhow::Result<MultiSampleCountResult> {
+    if samples.is_empty() {
+        anyhow::bail!("count-multi requires at least one sample");
+    }
+
+    let sample_to_idx: HashMap<&str, usize> = samples
+        .iter()
+        .enumerate()
+        .map(|(idx, row)| (row.sample.as_str(), idx))
+        .collect();
+
+    let mut read_occurrence: HashMap<&str, u32> = HashMap::new();
+    let mut read_to_sample_idx: HashMap<&str, usize> = HashMap::new();
+    for (read_name, _isoform_id) in read_to_isoform {
+        let (sample_name, _raw_read_id) = split_tagged_read_name(read_name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "read id {read_name:?} is missing sample prefix; expected format '<sample>::<read_id>'"
+            )
+        })?;
+        let sample_idx = sample_to_idx.get(sample_name).copied().ok_or_else(|| {
+            anyhow::anyhow!(
+                "read id {read_name:?} references unknown sample {sample_name:?} (not present in manifest)"
+            )
+        })?;
+
+        match read_to_sample_idx.get(read_name.as_str()).copied() {
+            Some(existing) if existing != sample_idx => {
+                anyhow::bail!(
+                    "read id {read_name:?} maps to multiple samples ({:?} and {:?})",
+                    samples[existing].sample,
+                    samples[sample_idx].sample
+                );
+            }
+            Some(_) => {}
+            None => {
+                read_to_sample_idx.insert(read_name.as_str(), sample_idx);
+            }
+        }
+
+        *read_occurrence.entry(read_name.as_str()).or_insert(0) += 1;
+    }
+
+    let isoform_to_idx: HashMap<&str, usize> = isoforms
+        .iter()
+        .enumerate()
+        .map(|(idx, isoform)| (isoform.name.as_str(), idx))
+        .collect();
+    let mut counts_by_isoform: Vec<Vec<f64>> = vec![vec![0.0f64; samples.len()]; isoforms.len()];
+
+    for (read_name, isoform_id) in read_to_isoform {
+        let Some(sample_idx) = read_to_sample_idx.get(read_name.as_str()).copied() else {
+            anyhow::bail!("internal error: sample lookup missing for read id {read_name:?}");
+        };
+        let Some(isoform_idx) = isoform_to_idx.get(isoform_id.as_str()).copied() else {
+            anyhow::bail!(
+                "read_to_isoform references isoform id {isoform_id:?} that is missing from isoform BED"
+            );
+        };
+
+        let denom = read_occurrence
+            .get(read_name.as_str())
+            .copied()
+            .unwrap_or(0);
+        if denom > 0 {
+            counts_by_isoform[isoform_idx][sample_idx] += 1.0f64 / denom as f64;
+        }
+    }
+
+    let matrix_rows: Vec<UsageMatrixRow> = isoforms
+        .iter()
+        .zip(counts_by_isoform)
+        .map(|(isoform, counts)| UsageMatrixRow {
+            gene: isoform_gene(isoform),
+            isoform_id: isoform.name.clone(),
+            counts,
+        })
+        .collect();
+
+    Ok(usage_from_matrix_rows(matrix_rows, samples))
 }
 
 pub fn write_usage_long_tsv(
@@ -373,21 +465,21 @@ pub fn run_count_multi_from_paths(
         .collect::<Result<Vec<_>, crate::io::bed::BedError>>()
         .with_context(|| format!("parse reference {reference:?}"))?;
 
-    if let Some(parent) = out_prefix
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-    {
-        std::fs::create_dir_all(parent).with_context(|| format!("create output dir {parent:?}"))?;
-    }
+    run_count_multi(&sample_rows, &isoforms, &refs, out_prefix)
+}
 
-    let result = count_multi_by_subreads(&isoforms, &refs, &sample_rows)?;
+fn write_count_multi_outputs(
+    sample_rows: &[SampleRow],
+    result: &MultiSampleCountResult,
+    out_prefix: &Path,
+) -> anyhow::Result<MultiSampleOutputPaths> {
     let include_group = sample_rows.iter().any(|sample| sample.group.is_some());
 
     let long_tsv = append_suffix(out_prefix, ".isoform_usage.long.tsv");
     let matrix_tsv = append_suffix(out_prefix, ".isoform_counts.matrix.tsv");
     write_usage_long_tsv(&long_tsv, &result.long_rows, include_group)
         .with_context(|| format!("write long output {long_tsv:?}"))?;
-    write_counts_matrix_tsv(&matrix_tsv, &result.matrix_rows, &sample_rows)
+    write_counts_matrix_tsv(&matrix_tsv, &result.matrix_rows, sample_rows)
         .with_context(|| format!("write matrix output {matrix_tsv:?}"))?;
 
     let group_tsv = if result.group_rows.is_empty() {
@@ -404,6 +496,40 @@ pub fn run_count_multi_from_paths(
         matrix_tsv,
         group_tsv,
     })
+}
+
+pub fn run_count_multi(
+    sample_rows: &[SampleRow],
+    isoforms: &[Transcript],
+    references: &[Transcript],
+    out_prefix: &Path,
+) -> anyhow::Result<MultiSampleOutputPaths> {
+    if let Some(parent) = out_prefix
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).with_context(|| format!("create output dir {parent:?}"))?;
+    }
+
+    let result = count_multi_by_subreads(isoforms, references, sample_rows)?;
+    write_count_multi_outputs(sample_rows, &result, out_prefix)
+}
+
+pub fn run_count_multi_from_read_to_isoform(
+    sample_rows: &[SampleRow],
+    isoforms: &[Transcript],
+    read_to_isoform: &[(String, String)],
+    out_prefix: &Path,
+) -> anyhow::Result<MultiSampleOutputPaths> {
+    if let Some(parent) = out_prefix
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).with_context(|| format!("create output dir {parent:?}"))?;
+    }
+
+    let result = count_multi_by_read_to_isoform(isoforms, read_to_isoform, sample_rows)?;
+    write_count_multi_outputs(sample_rows, &result, out_prefix)
 }
 
 #[cfg(test)]
@@ -490,6 +616,40 @@ mod tests {
         assert!((s2_total - 1.0).abs() < 1e-9);
 
         assert_eq!(result.group_rows.len(), 4);
+    }
+
+    #[test]
+    fn mapping_counts_match_subread_counts() {
+        let references = vec![make_tx("ref_a", "ref_a", "GENEA")];
+        let isoforms = vec![
+            make_tx("iso1", "S1::r1,S1::r2,S2::r3,|0", "GENEA"),
+            make_tx("iso2", "S1::r2,S2::r4,|0", "GENEA"),
+        ];
+        let mapping = vec![
+            ("S1::r1".to_owned(), "iso1".to_owned()),
+            ("S1::r2".to_owned(), "iso1".to_owned()),
+            ("S1::r2".to_owned(), "iso2".to_owned()),
+            ("S2::r3".to_owned(), "iso1".to_owned()),
+            ("S2::r4".to_owned(), "iso2".to_owned()),
+        ];
+
+        let by_subreads = count_multi_by_subreads(&isoforms, &references, &sample_rows()).unwrap();
+        let by_mapping =
+            count_multi_by_read_to_isoform(&isoforms, &mapping, &sample_rows()).unwrap();
+
+        assert_eq!(by_subreads.matrix_rows.len(), by_mapping.matrix_rows.len());
+        for (left, right) in by_subreads
+            .matrix_rows
+            .iter()
+            .zip(by_mapping.matrix_rows.iter())
+        {
+            assert_eq!(left.gene, right.gene);
+            assert_eq!(left.isoform_id, right.isoform_id);
+            assert_eq!(left.counts.len(), right.counts.len());
+            for (l, r) in left.counts.iter().zip(right.counts.iter()) {
+                assert!((l - r).abs() < 1e-9);
+            }
+        }
     }
 
     #[test]

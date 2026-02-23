@@ -57,6 +57,10 @@ struct Args {
     #[arg(long = "batch-rounds", default_value_t = 100)]
     batch_rounds: usize,
 
+    /// name2 output mode: full read list + coverage, coverage only, or none
+    #[arg(long = "name2-mode", default_value_t = trackcluster_rs::cluster::clusterj::Name2Mode::Full)]
+    name2_mode: trackcluster_rs::cluster::clusterj::Name2Mode,
+
     /// Overwrite existing outputs (default: skip genes whose output file already exists)
     #[arg(long = "force")]
     force: bool,
@@ -64,6 +68,19 @@ struct Args {
     /// Print a progress line every N genes
     #[arg(long = "progress-every", default_value_t = 1000)]
     progress_every: usize,
+
+    /// Restrict downsampling to these gene(s) only (repeatable; exact folder names under --input-root).
+    /// If omitted and `--max-reads-per-gene > 0`, downsampling applies to all genes.
+    #[arg(long = "downsample-gene")]
+    downsample_genes: Vec<String>,
+
+    /// Per-gene cap: if >0 and gene is selected, reservoir-sample reads down to this count.
+    #[arg(long = "max-reads-per-gene", default_value_t = 0)]
+    max_reads_per_gene: usize,
+
+    /// Deterministic RNG seed used for per-gene downsampling.
+    #[arg(long = "downsample-seed", default_value_t = 1)]
+    downsample_seed: u64,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -82,8 +99,12 @@ fn main() -> anyhow::Result<()> {
             sw_score: args.sw_score,
             batch_size: args.batch_size,
             batch_rounds: args.batch_rounds,
+            name2_mode: args.name2_mode,
             force: args.force,
             progress_every: args.progress_every,
+            downsample_genes: args.downsample_genes,
+            max_reads_per_gene: args.max_reads_per_gene,
+            downsample_seed: args.downsample_seed,
         },
     )?;
     Ok(())

@@ -244,13 +244,14 @@ fn bench_clusterj_grouping(c: &mut Criterion) {
             &(refs, reads),
             |bench, (refs, reads)| {
                 bench.iter(|| {
-                    let result = clusterj::clusterj(
+                    let result = clusterj::clusterj_with_name2_mode(
                         black_box(reads),
                         Some(black_box(refs)),
                         1,
                         11,
                         500,
                         100,
+                        clusterj::Name2Mode::Full,
                     );
                     black_box(result.isoforms.len());
                 });

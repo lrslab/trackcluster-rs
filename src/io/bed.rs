@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{BufRead, BufReader, Lines, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -59,8 +59,11 @@ pub enum BedParseError {
 pub struct Bed12Reader<R: BufRead> {
     path: PathBuf,
     line_number: usize,
-    lines: Lines<R>,
+    reader: R,
+    line_buf: String,
 }
+
+const BED_READ_BUFFER_BYTES: usize = 1024 * 1024;
 
 pub fn read_bed12<P: AsRef<Path>>(path: P) -> Result<Bed12Reader<BufReader<File>>, BedError> {
     let path = path.as_ref().to_path_buf();
@@ -68,11 +71,12 @@ pub fn read_bed12<P: AsRef<Path>>(path: P) -> Result<Bed12Reader<BufReader<File>
         path: path.clone(),
         source,
     })?;
-    let reader = BufReader::new(file);
+    let reader = BufReader::with_capacity(BED_READ_BUFFER_BYTES, file);
     Ok(Bed12Reader {
         path,
         line_number: 0,
-        lines: reader.lines(),
+        reader,
+        line_buf: String::new(),
     })
 }
 
@@ -81,9 +85,9 @@ impl<R: BufRead> Iterator for Bed12Reader<R> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            self.line_number += 1;
-            let line = match self.lines.next()? {
-                Ok(line) => line,
+            self.line_buf.clear();
+            let read_len = match self.reader.read_line(&mut self.line_buf) {
+                Ok(read_len) => read_len,
                 Err(source) => {
                     return Some(Err(BedError::IoRead {
                         path: self.path.clone(),
@@ -91,8 +95,12 @@ impl<R: BufRead> Iterator for Bed12Reader<R> {
                     }))
                 }
             };
+            if read_len == 0 {
+                return None;
+            }
+            self.line_number += 1;
 
-            let line = line.trim();
+            let line = self.line_buf.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }

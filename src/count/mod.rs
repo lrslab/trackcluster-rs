@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
 use crate::model::Transcript;
@@ -60,6 +60,72 @@ pub fn count_by_subreads(isoforms: &[Transcript], references: &[Transcript]) -> 
                 isoform_id: isoform.name.clone(),
                 count: coverage,
             }
+        })
+        .collect()
+}
+
+pub fn read_read_to_isoform_tsv<P: AsRef<Path>>(
+    path: P,
+) -> Result<Vec<(String, String)>, std::io::Error> {
+    let file = std::fs::File::open(path)?;
+    let reader = BufReader::new(file);
+
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for (line_no, line) in reader.lines().enumerate() {
+        let line = line?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let Some((read_id, isoform_id)) = line.split_once('\t') else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid read_to_isoform line {}: {:?}", line_no + 1, line),
+            ));
+        };
+
+        let read_id = read_id.trim();
+        let isoform_id = isoform_id.trim();
+        if read_id.is_empty() || isoform_id.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "empty read/isoform value at read_to_isoform line {}",
+                    line_no + 1
+                ),
+            ));
+        }
+
+        pairs.push((read_id.to_owned(), isoform_id.to_owned()));
+    }
+
+    Ok(pairs)
+}
+
+pub fn count_by_read_to_isoform(
+    isoforms: &[Transcript],
+    read_to_isoform: &[(String, String)],
+) -> Vec<CountRecord> {
+    let mut read_occurrence: HashMap<&str, u32> = HashMap::new();
+    for (read_id, _) in read_to_isoform {
+        *read_occurrence.entry(read_id.as_str()).or_insert(0) += 1;
+    }
+
+    let mut counts: HashMap<&str, f64> = HashMap::new();
+    for (read_id, isoform_id) in read_to_isoform {
+        let denom = read_occurrence.get(read_id.as_str()).copied().unwrap_or(0);
+        if denom == 0 {
+            continue;
+        }
+        *counts.entry(isoform_id.as_str()).or_insert(0.0) += 1.0f64 / denom as f64;
+    }
+
+    isoforms
+        .iter()
+        .map(|isoform| CountRecord {
+            isoform_id: isoform.name.clone(),
+            count: counts.get(isoform.name.as_str()).copied().unwrap_or(0.0),
         })
         .collect()
 }
@@ -125,5 +191,28 @@ mod tests {
         assert!((iso1.count - 1.5).abs() < 1e-9);
         assert!((iso2.count - 0.5).abs() < 1e-9);
         assert!((iso3.count - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn mapping_counts_match_subread_counts() {
+        let references = vec![make_tx("ref1", &[(0, 10)], "ref1")];
+        let isoforms = vec![
+            make_tx("iso1", &[(0, 10)], "r1,r2,|0"),
+            make_tx("iso2", &[(0, 10)], "r2,|0"),
+        ];
+        let pairs = vec![
+            ("r1".to_owned(), "iso1".to_owned()),
+            ("r2".to_owned(), "iso1".to_owned()),
+            ("r2".to_owned(), "iso2".to_owned()),
+        ];
+
+        let by_subreads = count_by_subreads(&isoforms, &references);
+        let by_mapping = count_by_read_to_isoform(&isoforms, &pairs);
+        assert_eq!(by_subreads.len(), by_mapping.len());
+
+        for (left, right) in by_subreads.iter().zip(by_mapping.iter()) {
+            assert_eq!(left.isoform_id, right.isoform_id);
+            assert!((left.count - right.count).abs() < 1e-9);
+        }
     }
 }

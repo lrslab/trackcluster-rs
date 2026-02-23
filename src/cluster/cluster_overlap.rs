@@ -15,12 +15,16 @@ struct Track {
 
 impl Track {
     fn new(tx: Transcript) -> Self {
+        let mut subreads: HashSet<String> = HashSet::new();
+        if !is_isoform_anno(&tx) {
+            subreads.insert(tx.name.clone());
+        }
         let exon_len = tx.exons.iter().map(|exon| exon.len()).sum();
         let introns = tx.introns();
         let intron_len = introns.iter().map(|intron| intron.len()).sum();
         Self {
             tx,
-            subreads: HashSet::new(),
+            subreads,
             exon_len,
             introns,
             intron_len,
@@ -285,18 +289,24 @@ struct PartitionResult {
 
 struct WorkItem {
     index: usize,
-    refs: Vec<Transcript>,
-    reads: Vec<Transcript>,
+    ref_indices: Vec<usize>,
+    read_indices: Vec<usize>,
 }
 
 fn process_partition(
-    refs: Vec<Transcript>,
-    reads: Vec<Transcript>,
+    references: &[Transcript],
+    reads: &[Transcript],
+    ref_indices: &[usize],
+    read_indices: &[usize],
     ref_names: &HashSet<String>,
 ) -> PartitionResult {
-    let mut records: Vec<Transcript> = Vec::new();
-    records.extend(refs);
-    records.extend(reads);
+    let mut records: Vec<Transcript> = Vec::with_capacity(ref_indices.len() + read_indices.len());
+    for &idx in ref_indices {
+        records.push(references[idx].clone());
+    }
+    for &idx in read_indices {
+        records.push(reads[idx].clone());
+    }
 
     sort_by_coord(&mut records);
     let loci = cluster_by_span(&records, StrandMode::Match);
@@ -343,19 +353,19 @@ pub fn cluster(
     let ref_names: std::sync::Arc<HashSet<String>> =
         std::sync::Arc::new(references.iter().map(|tx| tx.name.clone()).collect());
 
-    let mut refs_by_key: HashMap<PartitionKey, Vec<Transcript>> = HashMap::new();
-    for tx in references {
+    let mut refs_by_key: HashMap<PartitionKey, Vec<usize>> = HashMap::new();
+    for (idx, tx) in references.iter().enumerate() {
         refs_by_key
             .entry(PartitionKey {
                 chrom: tx.chrom.clone(),
                 strand: tx.strand,
             })
             .or_default()
-            .push(tx.clone());
+            .push(idx);
     }
 
-    let mut reads_by_key: HashMap<PartitionKey, Vec<Transcript>> = HashMap::new();
-    for read in reads {
+    let mut reads_by_key: HashMap<PartitionKey, Vec<usize>> = HashMap::new();
+    for (idx, read) in reads.iter().enumerate() {
         let key = PartitionKey {
             chrom: read.chrom.clone(),
             strand: read.strand,
@@ -363,7 +373,7 @@ pub fn cluster(
         if !refs_by_key.contains_key(&key) {
             continue;
         }
-        reads_by_key.entry(key).or_default().push(read.clone());
+        reads_by_key.entry(key).or_default().push(idx);
     }
 
     let mut all_isoforms: Vec<Transcript> = Vec::new();
@@ -376,15 +386,21 @@ pub fn cluster(
     for (index, key) in keys.iter().enumerate() {
         work.push(WorkItem {
             index,
-            refs: refs_by_key.remove(key).unwrap_or_default(),
-            reads: reads_by_key.remove(key).unwrap_or_default(),
+            ref_indices: refs_by_key.remove(key).unwrap_or_default(),
+            read_indices: reads_by_key.remove(key).unwrap_or_default(),
         });
     }
 
     let mut parts: Vec<Option<PartitionResult>> = (0..keys.len()).map(|_| None).collect();
     if threads == 1 || work.len() <= 1 {
         for item in work {
-            parts[item.index] = Some(process_partition(item.refs, item.reads, &ref_names));
+            parts[item.index] = Some(process_partition(
+                references,
+                reads,
+                &item.ref_indices,
+                &item.read_indices,
+                &ref_names,
+            ));
         }
     } else {
         use std::sync::{mpsc, Arc, Mutex};
@@ -393,37 +409,40 @@ pub fn cluster(
         let (tx, rx) = mpsc::channel::<(usize, PartitionResult)>();
 
         let worker_count = threads.min(keys.len());
-        let mut handles = Vec::with_capacity(worker_count);
-        for _ in 0..worker_count {
-            let queue = Arc::clone(&queue);
-            let tx = tx.clone();
-            let ref_names = Arc::clone(&ref_names);
+        std::thread::scope(|scope| {
+            for _ in 0..worker_count {
+                let queue = Arc::clone(&queue);
+                let tx = tx.clone();
+                let ref_names = Arc::clone(&ref_names);
 
-            handles.push(std::thread::spawn(move || loop {
-                let item = {
-                    let mut guard = queue.lock().expect("work queue poisoned");
-                    guard.pop()
-                };
-                let Some(item) = item else {
-                    break;
-                };
+                scope.spawn(move || loop {
+                    let item = {
+                        let mut guard = queue.lock().expect("work queue poisoned");
+                        guard.pop()
+                    };
+                    let Some(item) = item else {
+                        break;
+                    };
 
-                let result = process_partition(item.refs, item.reads, &ref_names);
-                if tx.send((item.index, result)).is_err() {
-                    break;
-                }
-            }));
-        }
-        drop(tx);
+                    let result = process_partition(
+                        references,
+                        reads,
+                        &item.ref_indices,
+                        &item.read_indices,
+                        &ref_names,
+                    );
+                    if tx.send((item.index, result)).is_err() {
+                        break;
+                    }
+                });
+            }
+            drop(tx);
 
-        for _ in 0..keys.len() {
-            let (index, result) = rx.recv().expect("worker hung up");
-            parts[index] = Some(result);
-        }
-
-        for handle in handles {
-            handle.join().expect("worker panicked");
-        }
+            for _ in 0..keys.len() {
+                let (index, result) = rx.recv().expect("worker hung up");
+                parts[index] = Some(result);
+            }
+        });
     }
 
     for part in parts.into_iter().flatten() {

@@ -89,6 +89,8 @@ Run full pooled flow:
 trackcluster flow --manifest samples.tsv -r tests/fixtures/ref.bed -o out --prefix pooled
 ```
 
+Add `--emit-pooled-reads` if you also want `<prefix>_pooled_reads.bed` written.
+
 Or run per-sample quantification from an existing pooled isoform BED:
 ```bash
 trackcluster count-multi --manifest samples.tsv -r tests/fixtures/ref.bed -i out/pooled_isoform.bed -o out/pooled

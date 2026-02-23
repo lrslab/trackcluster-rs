@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::cluster::result::ClusterResult;
+use crate::interval::{cluster_by_span, StrandMode};
 use crate::model::{Coord, Interval, Strand, Transcript};
 
 #[derive(Clone, Debug)]
@@ -18,6 +19,49 @@ struct PartitionKey {
 const NAME2_COL: usize = 0;
 const TTYPE_COL: usize = 4;
 const DEFAULT_SW_SCORE: i64 = 11;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Name2Mode {
+    #[default]
+    Full,
+    Coverage,
+    None,
+}
+
+impl Name2Mode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Coverage => "coverage",
+            Self::None => "none",
+        }
+    }
+}
+
+impl std::fmt::Display for Name2Mode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Name2Mode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.eq_ignore_ascii_case("full") {
+            return Ok(Self::Full);
+        }
+        if s.eq_ignore_ascii_case("coverage") {
+            return Ok(Self::Coverage);
+        }
+        if s.eq_ignore_ascii_case("none") {
+            return Ok(Self::None);
+        }
+        Err(format!(
+            "invalid name2 mode {s:?}; expected one of: full, coverage, none"
+        ))
+    }
+}
 
 fn get_extra(tx: &Transcript, idx: usize) -> Option<&str> {
     tx.extra_fields.get(idx).map(|value| value.as_str())
@@ -532,6 +576,50 @@ fn merge_tracks_by_name(tracks: Vec<Track>) -> Vec<Track> {
     out
 }
 
+fn split_reference_and_read_tracks(tracks: Vec<Track>) -> (Vec<Track>, Vec<Track>) {
+    let mut refs: Vec<Track> = Vec::new();
+    let mut reads: Vec<Track> = Vec::new();
+    for track in tracks {
+        if is_isoform_anno(&track.tx) {
+            refs.push(track);
+        } else {
+            reads.push(track);
+        }
+    }
+    (refs, reads)
+}
+
+fn merge_one_batch(mut tracks: Vec<Track>, sw_score: i64) -> Vec<Track> {
+    let keep_indices = junction_simple_merge(&mut tracks, sw_score);
+    select_tracks_by_keep_indices(tracks, keep_indices)
+}
+
+fn merge_read_batches(
+    ref_tracks: &[Track],
+    read_tracks: Vec<Track>,
+    batch_size: usize,
+    sw_score: i64,
+) -> (Vec<Track>, bool) {
+    let mut anchors: Vec<Track> = ref_tracks.to_vec();
+    let mut changed = false;
+
+    for chunk in read_tracks.chunks(batch_size.max(1)) {
+        let mut batch: Vec<Track> = Vec::with_capacity(anchors.len() + chunk.len());
+        batch.extend(anchors);
+        batch.extend(chunk.iter().cloned());
+
+        let before_len = batch.len();
+        let merged = merge_one_batch(batch, sw_score);
+        if merged.len() < before_len {
+            changed = true;
+        }
+
+        anchors = merge_tracks_by_name(merged);
+    }
+
+    (anchors, changed)
+}
+
 fn batch_junction_simple_merge(
     tracks: Vec<Track>,
     sw_score: i64,
@@ -547,28 +635,36 @@ fn batch_junction_simple_merge(
 
     // Match TrackCluster Python `process_one_junction_corrected_try` behavior:
     // - Intermediate merges always use the default SW cutoff (11) even if `sw_score` is -1.
-    // - The final merge uses the user-provided `sw_score`.
-    while rounds < max_rounds && tracks.len() > batch_size {
-        let rest = tracks.split_off(batch_size);
-        let mut batch = tracks;
+    // - Read batching always keeps references available as potential containers.
+    while rounds < max_rounds {
+        let (refs, reads) = split_reference_and_read_tracks(tracks);
+        if reads.len() <= batch_size {
+            let mut combined: Vec<Track> = Vec::with_capacity(refs.len() + reads.len());
+            combined.extend(refs);
+            combined.extend(reads);
+            return merge_one_batch(combined, sw_score);
+        }
 
-        let keep_indices = junction_simple_merge(&mut batch, DEFAULT_SW_SCORE);
-        let kept_batch = select_tracks_by_keep_indices(batch, keep_indices);
+        let (merged, changed) = merge_read_batches(&refs, reads, batch_size, DEFAULT_SW_SCORE);
+        tracks = merged;
 
-        let mut combined: Vec<Track> = Vec::with_capacity(kept_batch.len() + rest.len());
-        combined.extend(kept_batch);
-        combined.extend(rest);
-        tracks = merge_tracks_by_name(combined);
-
-        if tracks.len() >= previous_len {
+        if !changed || tracks.len() >= previous_len {
             break;
         }
         previous_len = tracks.len();
         rounds += 1;
     }
 
-    let keep_indices = junction_simple_merge(&mut tracks, sw_score);
-    select_tracks_by_keep_indices(tracks, keep_indices)
+    let (refs, reads) = split_reference_and_read_tracks(tracks);
+    if reads.len() <= batch_size {
+        let mut combined: Vec<Track> = Vec::with_capacity(refs.len() + reads.len());
+        combined.extend(refs);
+        combined.extend(reads);
+        return merge_one_batch(combined, sw_score);
+    }
+
+    let (merged, _) = merge_read_batches(&refs, reads, batch_size, sw_score);
+    merged
 }
 
 fn build_read_to_isoform(isoforms: &[Track], ref_names: &HashSet<String>) -> Vec<(String, String)> {
@@ -584,7 +680,7 @@ fn build_read_to_isoform(isoforms: &[Track], ref_names: &HashSet<String>) -> Vec
     pairs
 }
 
-fn update_name2_with_coverage(isoforms: &mut [Track], ref_names: &HashSet<String>) {
+fn update_name2(isoforms: &mut [Track], ref_names: &HashSet<String>, mode: Name2Mode) {
     let values: Vec<String> = {
         let mut occurrence: HashMap<&str, u32> = HashMap::new();
         for track in isoforms.iter() {
@@ -613,7 +709,11 @@ fn update_name2_with_coverage(isoforms: &mut [Track], ref_names: &HashSet<String
                     }
                 }
 
-                format!("{joined},|{coverage}")
+                match mode {
+                    Name2Mode::Full => format!("{joined},|{coverage}"),
+                    Name2Mode::Coverage => format!("|{coverage}"),
+                    Name2Mode::None => "none".to_owned(),
+                }
             })
             .collect()
     };
@@ -621,6 +721,50 @@ fn update_name2_with_coverage(isoforms: &mut [Track], ref_names: &HashSet<String
     for (track, value) in isoforms.iter_mut().zip(values) {
         set_extra(&mut track.tx, NAME2_COL, value);
     }
+}
+
+fn split_tracks_into_loci(tracks: Vec<Track>) -> Vec<Vec<Track>> {
+    if tracks.is_empty() {
+        return Vec::new();
+    }
+    if tracks.len() == 1 {
+        return vec![tracks];
+    }
+
+    let mut tracks: Vec<Option<Track>> = tracks.into_iter().map(Some).collect();
+    let mut order: Vec<usize> = (0..tracks.len()).collect();
+    order.sort_by(|left, right| {
+        let left_tx = &tracks[*left].as_ref().expect("track present").tx;
+        let right_tx = &tracks[*right].as_ref().expect("track present").tx;
+        left_tx
+            .chrom
+            .cmp(&right_tx.chrom)
+            .then_with(|| left_tx.tx_start.cmp(&right_tx.tx_start))
+            .then_with(|| left_tx.tx_end.cmp(&right_tx.tx_end))
+            .then_with(|| left_tx.strand.cmp(&right_tx.strand))
+    });
+
+    let sorted_records: Vec<Transcript> = order
+        .iter()
+        .map(|idx| tracks[*idx].as_ref().expect("track present").tx.clone())
+        .collect();
+    let loci = cluster_by_span(&sorted_records, StrandMode::Match);
+
+    let mut out: Vec<Vec<Track>> = Vec::with_capacity(loci.len());
+    for locus in loci {
+        let mut locus_tracks: Vec<Track> = Vec::with_capacity(locus.members.len());
+        for member in locus.members {
+            let original_idx = order[member];
+            locus_tracks.push(
+                tracks[original_idx]
+                    .take()
+                    .expect("track already consumed for locus"),
+            );
+        }
+        out.push(locus_tracks);
+    }
+
+    out
 }
 
 struct PartitionResult {
@@ -631,37 +775,52 @@ struct PartitionResult {
 
 struct WorkItem {
     index: usize,
-    refs: Vec<Transcript>,
-    reads: Vec<Transcript>,
+    ref_indices: Vec<usize>,
+    read_indices: Vec<usize>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_partition(
-    refs: Vec<Transcript>,
-    reads: Vec<Transcript>,
+    references: &[Transcript],
+    reads: &[Transcript],
+    ref_indices: &[usize],
+    read_indices: &[usize],
     ref_names: &HashSet<String>,
     sw_score: i64,
     batch_size: usize,
     batch_rounds: usize,
+    name2_mode: Name2Mode,
 ) -> PartitionResult {
-    let mut tracks: Vec<Track> = Vec::with_capacity(refs.len() + reads.len());
-    for tx in refs.into_iter().chain(reads.into_iter()) {
+    let mut tracks: Vec<Track> = Vec::with_capacity(ref_indices.len() + read_indices.len());
+    for &idx in ref_indices {
         tracks.push(Track {
-            tx,
+            tx: references[idx].clone(),
             subreads: HashSet::new(),
         });
     }
+    for &idx in read_indices {
+        let tx = reads[idx].clone();
+        let mut subreads: HashSet<String> = HashSet::new();
+        subreads.insert(tx.name.clone());
+        tracks.push(Track { tx, subreads });
+    }
 
-    let (mut corrected, rare) = flow_junction_correct(tracks, 2, 10);
+    let (corrected, rare) = flow_junction_correct(tracks, 2, 10);
     let unused: Vec<Transcript> = rare.into_iter().map(|track| track.tx).collect();
 
-    let mut kept = if batch_size == 0 {
-        let keep_indices = junction_simple_merge(&mut corrected, sw_score);
-        select_tracks_by_keep_indices(corrected, keep_indices)
-    } else {
-        batch_junction_simple_merge(corrected, sw_score, batch_size, batch_rounds)
-    };
+    let loci = split_tracks_into_loci(corrected);
+    let mut kept: Vec<Track> = Vec::new();
+    for mut locus_tracks in loci {
+        let mut locus_kept = if batch_size == 0 {
+            let keep_indices = junction_simple_merge(&mut locus_tracks, sw_score);
+            select_tracks_by_keep_indices(locus_tracks, keep_indices)
+        } else {
+            batch_junction_simple_merge(locus_tracks, sw_score, batch_size, batch_rounds)
+        };
+        kept.append(&mut locus_kept);
+    }
 
-    update_name2_with_coverage(&mut kept, ref_names);
+    update_name2(&mut kept, ref_names, name2_mode);
     let pairs = build_read_to_isoform(&kept, ref_names);
     let isoforms = kept.into_iter().map(|track| track.tx).collect();
 
@@ -680,6 +839,26 @@ pub fn clusterj(
     batch_size: usize,
     batch_rounds: usize,
 ) -> ClusterResult {
+    clusterj_with_name2_mode(
+        reads,
+        references,
+        threads,
+        sw_score,
+        batch_size,
+        batch_rounds,
+        Name2Mode::Full,
+    )
+}
+
+pub fn clusterj_with_name2_mode(
+    reads: &[Transcript],
+    references: Option<&[Transcript]>,
+    threads: usize,
+    sw_score: i64,
+    batch_size: usize,
+    batch_rounds: usize,
+    name2_mode: Name2Mode,
+) -> ClusterResult {
     let references = match references {
         Some(references) => references,
         None => {
@@ -695,19 +874,19 @@ pub fn clusterj(
     let ref_names: std::sync::Arc<HashSet<String>> =
         std::sync::Arc::new(references.iter().map(|tx| tx.name.clone()).collect());
 
-    let mut refs_by_key: HashMap<PartitionKey, Vec<Transcript>> = HashMap::new();
-    for tx in references {
+    let mut refs_by_key: HashMap<PartitionKey, Vec<usize>> = HashMap::new();
+    for (idx, tx) in references.iter().enumerate() {
         refs_by_key
             .entry(PartitionKey {
                 chrom: tx.chrom.clone(),
                 strand: tx.strand,
             })
             .or_default()
-            .push(tx.clone());
+            .push(idx);
     }
 
-    let mut reads_by_key: HashMap<PartitionKey, Vec<Transcript>> = HashMap::new();
-    for read in reads {
+    let mut reads_by_key: HashMap<PartitionKey, Vec<usize>> = HashMap::new();
+    for (idx, read) in reads.iter().enumerate() {
         let key = PartitionKey {
             chrom: read.chrom.clone(),
             strand: read.strand,
@@ -715,7 +894,7 @@ pub fn clusterj(
         if !refs_by_key.contains_key(&key) {
             continue;
         }
-        reads_by_key.entry(key).or_default().push(read.clone());
+        reads_by_key.entry(key).or_default().push(idx);
     }
 
     let mut all_isoforms: Vec<Transcript> = Vec::new();
@@ -729,8 +908,8 @@ pub fn clusterj(
     for (index, key) in keys.iter().enumerate() {
         work.push(WorkItem {
             index,
-            refs: refs_by_key.remove(key).unwrap_or_default(),
-            reads: reads_by_key.remove(key).unwrap_or_default(),
+            ref_indices: refs_by_key.remove(key).unwrap_or_default(),
+            read_indices: reads_by_key.remove(key).unwrap_or_default(),
         });
     }
 
@@ -738,12 +917,15 @@ pub fn clusterj(
     if threads == 1 || work.len() <= 1 {
         for item in work {
             parts[item.index] = Some(process_partition(
-                item.refs,
-                item.reads,
+                references,
+                reads,
+                &item.ref_indices,
+                &item.read_indices,
                 &ref_names,
                 sw_score,
                 batch_size,
                 batch_rounds,
+                name2_mode,
             ));
         }
     } else {
@@ -753,44 +935,44 @@ pub fn clusterj(
         let (tx, rx) = mpsc::channel::<(usize, PartitionResult)>();
 
         let worker_count = threads.min(keys.len());
-        let mut handles = Vec::with_capacity(worker_count);
-        for _ in 0..worker_count {
-            let queue = Arc::clone(&queue);
-            let tx = tx.clone();
-            let ref_names = Arc::clone(&ref_names);
+        std::thread::scope(|scope| {
+            for _ in 0..worker_count {
+                let queue = Arc::clone(&queue);
+                let tx = tx.clone();
+                let ref_names = Arc::clone(&ref_names);
 
-            handles.push(std::thread::spawn(move || loop {
-                let item = {
-                    let mut guard = queue.lock().expect("work queue poisoned");
-                    guard.pop()
-                };
-                let Some(item) = item else {
-                    break;
-                };
+                scope.spawn(move || loop {
+                    let item = {
+                        let mut guard = queue.lock().expect("work queue poisoned");
+                        guard.pop()
+                    };
+                    let Some(item) = item else {
+                        break;
+                    };
 
-                let result = process_partition(
-                    item.refs,
-                    item.reads,
-                    &ref_names,
-                    sw_score,
-                    batch_size,
-                    batch_rounds,
-                );
-                if tx.send((item.index, result)).is_err() {
-                    break;
-                }
-            }));
-        }
-        drop(tx);
+                    let result = process_partition(
+                        references,
+                        reads,
+                        &item.ref_indices,
+                        &item.read_indices,
+                        &ref_names,
+                        sw_score,
+                        batch_size,
+                        batch_rounds,
+                        name2_mode,
+                    );
+                    if tx.send((item.index, result)).is_err() {
+                        break;
+                    }
+                });
+            }
+            drop(tx);
 
-        for _ in 0..keys.len() {
-            let (index, result) = rx.recv().expect("worker hung up");
-            parts[index] = Some(result);
-        }
-
-        for handle in handles {
-            handle.join().expect("worker panicked");
-        }
+            for _ in 0..keys.len() {
+                let (index, result) = rx.recv().expect("worker hung up");
+                parts[index] = Some(result);
+            }
+        });
     }
 
     for part in parts.into_iter().flatten() {
@@ -854,6 +1036,211 @@ mod tests {
     }
 
     #[test]
+    fn junction_correction_snaps_low_coverage_sites_and_rebuilds_exons() {
+        let reference = make_tx(
+            "ref",
+            Strand::Plus,
+            &[(100, 110), (200, 210)],
+            "isoform_anno",
+            100,
+        );
+        let read = make_tx(
+            "read",
+            Strand::Plus,
+            &[(100, 111), (201, 210)],
+            "nanopore_read",
+            1,
+        );
+
+        let tracks = vec![
+            Track {
+                tx: reference,
+                subreads: HashSet::new(),
+            },
+            Track {
+                tx: read,
+                subreads: HashSet::new(),
+            },
+        ];
+        let (corrected, rare) = flow_junction_correct(tracks, 2, 10);
+        assert!(rare.is_empty());
+
+        let corrected_read = corrected
+            .iter()
+            .find(|track| track.tx.name == "read")
+            .expect("corrected read missing");
+
+        let expected = vec![
+            Interval::new(Coord::new(100), Coord::new(110)).unwrap(),
+            Interval::new(Coord::new(200), Coord::new(210)).unwrap(),
+        ];
+        assert_eq!(corrected_read.tx.exons, expected);
+        assert_eq!(
+            corrected_read
+                .tx
+                .extra_fields
+                .get(TTYPE_COL)
+                .map(String::as_str),
+            Some("nanopore_read_corrected")
+        );
+    }
+
+    #[test]
+    fn junction_correction_sends_uncorrectable_reads_to_unused() {
+        let reference = make_tx(
+            "ref",
+            Strand::Plus,
+            &[(100, 110), (200, 210)],
+            "isoform_anno",
+            100,
+        );
+        let read = make_tx(
+            "read_uncorrectable",
+            Strand::Plus,
+            &[(100, 150), (201, 210)],
+            "nanopore_read",
+            1,
+        );
+
+        let tracks = vec![
+            Track {
+                tx: reference,
+                subreads: HashSet::new(),
+            },
+            Track {
+                tx: read,
+                subreads: HashSet::new(),
+            },
+        ];
+        let (corrected, rare) = flow_junction_correct(tracks, 2, 10);
+
+        assert!(rare
+            .iter()
+            .any(|track| track.tx.name == "read_uncorrectable"));
+        assert!(!corrected
+            .iter()
+            .any(|track| track.tx.name == "read_uncorrectable"));
+    }
+
+    #[test]
+    fn retained_read_isoform_counts_itself() {
+        let refs = vec![make_tx(
+            "ref1",
+            Strand::Plus,
+            &[(100, 200)],
+            "isoform_anno",
+            100,
+        )];
+        let reads = vec![make_tx(
+            "read1",
+            Strand::Plus,
+            &[(50, 150)],
+            "nanopore_read",
+            1,
+        )];
+
+        let result = clusterj_with_name2_mode(&reads, Some(&refs), 1, 11, 0, 1, Name2Mode::Full);
+        assert!(result.unused.is_empty());
+
+        assert!(result
+            .read_to_isoform
+            .iter()
+            .any(|(read_id, iso_id)| read_id == "read1" && iso_id == "read1"));
+
+        let read_isoform = result
+            .isoforms
+            .iter()
+            .find(|tx| tx.name == "read1")
+            .expect("read isoform missing");
+        let name2 = read_isoform
+            .extra_fields
+            .first()
+            .map(String::as_str)
+            .unwrap_or("");
+        let sub_part = name2.split(",|").next().unwrap_or("");
+        assert!(sub_part.split(',').any(|token| token == "read1"));
+
+        let counts = crate::count::count_by_subreads(&result.isoforms, &refs);
+        let read_count = counts
+            .iter()
+            .find(|record| record.isoform_id == "read1")
+            .expect("missing count record for read isoform");
+        assert!((read_count.count - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn name2_mode_coverage_writes_only_coverage_but_keeps_mapping() {
+        let refs = vec![make_tx(
+            "ref1",
+            Strand::Plus,
+            &[(100, 200)],
+            "isoform_anno",
+            100,
+        )];
+        let reads = vec![make_tx(
+            "read1",
+            Strand::Plus,
+            &[(50, 150)],
+            "nanopore_read",
+            1,
+        )];
+
+        let result =
+            clusterj_with_name2_mode(&reads, Some(&refs), 1, 11, 0, 1, Name2Mode::Coverage);
+        let read_isoform = result
+            .isoforms
+            .iter()
+            .find(|tx| tx.name == "read1")
+            .expect("read isoform missing");
+        let name2 = read_isoform
+            .extra_fields
+            .first()
+            .map(String::as_str)
+            .unwrap_or("");
+        assert!(name2.starts_with('|'));
+        assert!(!name2.contains("read1"));
+        assert!(result
+            .read_to_isoform
+            .iter()
+            .any(|(read_id, iso_id)| read_id == "read1" && iso_id == "read1"));
+    }
+
+    #[test]
+    fn name2_mode_none_disables_subread_payload() {
+        let refs = vec![make_tx(
+            "ref1",
+            Strand::Plus,
+            &[(100, 200)],
+            "isoform_anno",
+            100,
+        )];
+        let reads = vec![make_tx(
+            "read1",
+            Strand::Plus,
+            &[(50, 150)],
+            "nanopore_read",
+            1,
+        )];
+
+        let result = clusterj_with_name2_mode(&reads, Some(&refs), 1, 11, 0, 1, Name2Mode::None);
+        let read_isoform = result
+            .isoforms
+            .iter()
+            .find(|tx| tx.name == "read1")
+            .expect("read isoform missing");
+        let name2 = read_isoform
+            .extra_fields
+            .first()
+            .map(String::as_str)
+            .unwrap_or("");
+        assert_eq!(name2, "none");
+        assert!(result
+            .read_to_isoform
+            .iter()
+            .any(|(read_id, iso_id)| read_id == "read1" && iso_id == "read1"));
+    }
+
+    #[test]
     fn merges_5prime_truncations_into_multiple_compatible_tracks() {
         let refs = vec![
             make_tx(
@@ -879,7 +1266,7 @@ mod tests {
             1,
         )];
 
-        let result = clusterj(&reads, Some(&refs), 1, 11, 0, 1);
+        let result = clusterj_with_name2_mode(&reads, Some(&refs), 1, 11, 0, 1, Name2Mode::Full);
         assert_eq!(result.unused.len(), 0);
 
         let iso_names: HashSet<_> = result.isoforms.iter().map(|tx| tx.name.as_str()).collect();
@@ -931,8 +1318,8 @@ mod tests {
             ),
         ];
 
-        let single = clusterj(&reads, Some(&refs), 1, 11, 0, 1);
-        let threaded = clusterj(&reads, Some(&refs), 4, 11, 0, 1);
+        let single = clusterj_with_name2_mode(&reads, Some(&refs), 1, 11, 0, 1, Name2Mode::Full);
+        let threaded = clusterj_with_name2_mode(&reads, Some(&refs), 4, 11, 0, 1, Name2Mode::Full);
         assert_eq!(single.isoforms, threaded.isoforms);
         assert_eq!(single.read_to_isoform, threaded.read_to_isoform);
         assert_eq!(single.unused, threaded.unused);
