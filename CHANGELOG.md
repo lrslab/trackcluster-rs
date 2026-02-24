@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.4
+- Add `--name2-mode` (full/coverage/none) to control isoform `name2` payload size while keeping a read-to-isoform mapping.
+- Add `--read-to-isoform` fast path for `count` and `count-multi` to reuse mapping TSVs from `flow`/`clusterj`.
+- Add per-gene downsampling for `flow`/`clusterj-batch` (`--max-reads-per-gene`, `--downsample-gene`, `--downsample-seed`) and scale counts/usage tables via `clusterj_batch_downsample.tsv`.
+- Change manifest mode: `<prefix>_pooled_reads.bed` is now written only when `flow --emit-pooled-reads` is set.
+- Performance: bucketed two-pass `preparedir` for large inputs + faster BED12 reading.
+- Default `--sw-score` is now `11` (TrackCluster Python default); use `-1` to disable collapsing.
+
 ## 0.1.3
 - Add `count-multi` subcommand for per-sample isoform usage from pooled isoforms
 - Add `flow --manifest` mode:
