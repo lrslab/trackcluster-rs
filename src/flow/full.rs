@@ -6,7 +6,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 
@@ -38,6 +38,10 @@ pub struct BatchRunOptions {
     pub name2_mode: crate::cluster::clusterj::Name2Mode,
     pub force: bool,
     pub progress_every: usize,
+    /// Emit a heartbeat status line every N seconds (0 disables).
+    pub heartbeat_seconds: u64,
+    /// When a heartbeat sees no progress, print up to this many in-flight genes (0 => 1).
+    pub heartbeat_top: usize,
     /// Per-gene downsampling: if non-empty, only downsample these gene folders (exact names).
     /// If empty and `max_reads_per_gene > 0`, downsampling applies to all genes.
     pub downsample_genes: Vec<String>,
@@ -77,6 +81,10 @@ pub struct FullFlowOptions {
     pub emit_pooled_reads: bool,
     pub force: bool,
     pub progress_every: usize,
+    /// Emit a heartbeat status line every N seconds during per-gene clustering (0 disables).
+    pub heartbeat_seconds: u64,
+    /// When a heartbeat sees no progress, print up to this many in-flight genes (0 => 1).
+    pub heartbeat_top: usize,
     /// Per-gene downsampling: if non-empty, only downsample these gene folders (exact names).
     /// If empty and `max_reads_per_gene > 0`, downsampling applies to all genes.
     pub downsample_genes: Vec<String>,
@@ -168,7 +176,9 @@ fn reservoir_sample_reads(
     seed: u64,
 ) -> anyhow::Result<(Vec<Transcript>, usize)> {
     let mut rng = Lcg64::new(seed);
-    let mut sampled: Vec<Transcript> = Vec::with_capacity(target_reads);
+    // Avoid huge preallocation when downsampling is enabled by default. The vector will grow to
+    // `target_reads` as needed, but most genes are far smaller than the cap.
+    let mut sampled: Vec<Transcript> = Vec::with_capacity(target_reads.min(4096));
     let mut total_reads = 0usize;
 
     let reader = read_bed12(path).with_context(|| format!("open reads {path:?}"))?;
@@ -469,6 +479,13 @@ pub fn run_clusterj_batch(args: BatchRunOptions) -> anyhow::Result<BatchRunResul
         args.threads.max(1)
     );
 
+    if args.threads > 1 && args.max_reads_per_gene == 0 {
+        eprintln!(
+            "clusterj-batch: note: --threads > 1 with --max-reads-per-gene=0 can use a lot of memory on large genes; \
+consider --max-reads-per-gene and/or --name2-mode coverage"
+        );
+    }
+
     let processed = Arc::new(AtomicUsize::new(0));
     let skipped = Arc::new(AtomicUsize::new(0));
     let errors = Arc::new(AtomicUsize::new(0));
@@ -479,8 +496,93 @@ pub fn run_clusterj_batch(args: BatchRunOptions) -> anyhow::Result<BatchRunResul
     let queue = Arc::new(Mutex::new(genes));
     let worker_count = args.threads.max(1).min(total);
 
+    #[derive(Debug, Default)]
+    struct WorkerState {
+        gene: Option<String>,
+        started_at: Option<Instant>,
+    }
+
+    let worker_states: Arc<Vec<Mutex<WorkerState>>> = Arc::new(
+        (0..worker_count)
+            .map(|_| Mutex::new(WorkerState::default()))
+            .collect(),
+    );
+
+    let (heartbeat_stop_tx, heartbeat_handle) = if args.heartbeat_seconds > 0 {
+        use std::sync::mpsc::{self, RecvTimeoutError};
+        let (stop_tx, stop_rx) = mpsc::channel::<()>();
+
+        let processed = Arc::clone(&processed);
+        let skipped = Arc::clone(&skipped);
+        let errors = Arc::clone(&errors);
+        let done = Arc::clone(&done);
+        let queue = Arc::clone(&queue);
+        let worker_states = Arc::clone(&worker_states);
+        let heartbeat_seconds = args.heartbeat_seconds;
+        let heartbeat_top = args.heartbeat_top.max(1);
+
+        let handle = std::thread::spawn(move || {
+            let mut last_done = done.load(Ordering::Relaxed);
+            loop {
+                match stop_rx.recv_timeout(Duration::from_secs(heartbeat_seconds)) {
+                    Ok(()) => break,
+                    Err(RecvTimeoutError::Disconnected) => break,
+                    Err(RecvTimeoutError::Timeout) => {}
+                }
+
+                let done_now = done.load(Ordering::Relaxed);
+                let processed_now = processed.load(Ordering::Relaxed);
+                let skipped_now = skipped.load(Ordering::Relaxed);
+                let errors_now = errors.load(Ordering::Relaxed);
+                let queue_remaining = queue.lock().map(|guard| guard.len()).unwrap_or_default();
+
+                eprintln!(
+                    "heartbeat: {done_now}/{total} (processed={processed_now}, skipped={skipped_now}, errors={errors_now}) queue_remaining={queue_remaining} elapsed={:?}",
+                    started.elapsed()
+                );
+
+                if done_now == last_done && done_now < total {
+                    let mut inflight: Vec<(String, Duration)> = Vec::new();
+                    for state_lock in worker_states.iter() {
+                        let Ok(state) = state_lock.lock() else {
+                            continue;
+                        };
+                        let (Some(gene), Some(started_at)) =
+                            (state.gene.as_ref(), state.started_at)
+                        else {
+                            continue;
+                        };
+                        inflight.push((gene.clone(), started_at.elapsed()));
+                    }
+
+                    if inflight.is_empty() {
+                        eprintln!("heartbeat: no in-flight genes (all workers idle?)");
+                    } else {
+                        inflight.sort_by(|a, b| b.1.cmp(&a.1));
+                        let top = heartbeat_top.min(inflight.len());
+                        let mut line = String::from("in_flight(top):");
+                        for (gene, dur) in inflight.into_iter().take(top) {
+                            line.push(' ');
+                            line.push_str(&format!("{gene}={:.1}s", dur.as_secs_f64()));
+                        }
+                        eprintln!("{line}");
+                    }
+                }
+
+                last_done = done_now;
+                if done_now >= total {
+                    break;
+                }
+            }
+        });
+
+        (Some(stop_tx), Some(handle))
+    } else {
+        (None, None)
+    };
+
     let mut handles = Vec::with_capacity(worker_count);
-    for _ in 0..worker_count {
+    for worker_idx in 0..worker_count {
         let queue = Arc::clone(&queue);
         let processed = Arc::clone(&processed);
         let skipped = Arc::clone(&skipped);
@@ -488,6 +590,7 @@ pub fn run_clusterj_batch(args: BatchRunOptions) -> anyhow::Result<BatchRunResul
         let done = Arc::clone(&done);
         let error_lines = Arc::clone(&error_lines);
         let downsample_records = Arc::clone(&downsample_records);
+        let worker_states = Arc::clone(&worker_states);
         let args = args.clone();
 
         handles.push(std::thread::spawn(move || loop {
@@ -498,6 +601,11 @@ pub fn run_clusterj_batch(args: BatchRunOptions) -> anyhow::Result<BatchRunResul
             let Some(gene) = gene else {
                 break;
             };
+
+            if let Ok(mut state) = worker_states[worker_idx].lock() {
+                state.gene = Some(gene.clone());
+                state.started_at = Some(Instant::now());
+            }
 
             let result = match panic::catch_unwind(AssertUnwindSafe(|| process_gene(&gene, &args)))
             {
@@ -529,6 +637,11 @@ pub fn run_clusterj_batch(args: BatchRunOptions) -> anyhow::Result<BatchRunResul
                     }
                 }
             };
+
+            if let Ok(mut state) = worker_states[worker_idx].lock() {
+                state.gene = None;
+                state.started_at = None;
+            }
 
             if let Some(record) = result.downsample {
                 if let Ok(mut guard) = downsample_records.lock() {
@@ -564,6 +677,13 @@ pub fn run_clusterj_batch(args: BatchRunOptions) -> anyhow::Result<BatchRunResul
         }
     }
 
+    if let Some(tx) = heartbeat_stop_tx {
+        let _ = tx.send(());
+    }
+    if let Some(handle) = heartbeat_handle {
+        let _ = handle.join();
+    }
+
     let elapsed = started.elapsed();
     let processed = processed.load(Ordering::Relaxed);
     let skipped = skipped.load(Ordering::Relaxed);
@@ -586,6 +706,20 @@ pub fn run_clusterj_batch(args: BatchRunOptions) -> anyhow::Result<BatchRunResul
     writeln!(summary, "batch_rounds\t{}", args.batch_rounds)?;
     writeln!(summary, "name2_mode\t{}", args.name2_mode)?;
     writeln!(summary, "force\t{}", args.force)?;
+    writeln!(summary, "progress_every\t{}", args.progress_every)?;
+    writeln!(summary, "heartbeat_seconds\t{}", args.heartbeat_seconds)?;
+    writeln!(summary, "heartbeat_top\t{}", args.heartbeat_top)?;
+    writeln!(summary, "max_reads_per_gene\t{}", args.max_reads_per_gene)?;
+    writeln!(summary, "downsample_seed\t{}", args.downsample_seed)?;
+    if args.downsample_genes.is_empty() {
+        writeln!(summary, "downsample_genes\t[]")?;
+    } else {
+        writeln!(
+            summary,
+            "downsample_genes\t{}",
+            args.downsample_genes.join(",")
+        )?;
+    }
     writeln!(summary, "total_genes\t{}", total)?;
     writeln!(summary, "processed\t{}", processed)?;
     writeln!(summary, "skipped\t{}", skipped)?;
@@ -873,6 +1007,8 @@ pub fn run_full_flow(opts: FullFlowOptions) -> anyhow::Result<FullFlowResult> {
             name2_mode: opts.name2_mode,
             force: opts.force,
             progress_every: opts.progress_every,
+            heartbeat_seconds: opts.heartbeat_seconds,
+            heartbeat_top: opts.heartbeat_top,
             downsample_genes: opts.downsample_genes.clone(),
             max_reads_per_gene: opts.max_reads_per_gene,
             downsample_seed: opts.downsample_seed,
@@ -930,6 +1066,8 @@ pub fn run_full_flow(opts: FullFlowOptions) -> anyhow::Result<FullFlowResult> {
                 name2_mode: opts.name2_mode,
                 force: opts.force,
                 progress_every: opts.progress_every,
+                heartbeat_seconds: opts.heartbeat_seconds,
+                heartbeat_top: opts.heartbeat_top,
                 downsample_genes: opts.downsample_genes.clone(),
                 max_reads_per_gene: opts.max_reads_per_gene,
                 downsample_seed: opts.downsample_seed,

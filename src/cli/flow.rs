@@ -39,7 +39,7 @@ pub struct Args {
     pub batch_rounds: usize,
 
     /// name2 output mode: full read list + coverage, coverage only, or none
-    #[arg(long = "name2-mode", default_value_t = crate::cluster::clusterj::Name2Mode::Full)]
+    #[arg(long = "name2-mode", default_value_t = crate::cluster::clusterj::Name2Mode::Coverage)]
     pub name2_mode: crate::cluster::clusterj::Name2Mode,
 
     /// Prepare step: minimum fraction of read span overlapping a reference span
@@ -62,13 +62,22 @@ pub struct Args {
     #[arg(long = "progress-every", default_value_t = 1000)]
     pub progress_every: usize,
 
+    /// Emit a heartbeat status line every N seconds during per-gene clustering (0 disables).
+    /// Useful when large genes make progress appear "stuck" because no gene completes for a while.
+    #[arg(long = "heartbeat-seconds", default_value_t = 60)]
+    pub heartbeat_seconds: u64,
+
+    /// When a heartbeat sees no progress, print up to this many in-flight genes (0 => 1).
+    #[arg(long = "heartbeat-top", default_value_t = 5)]
+    pub heartbeat_top: usize,
+
     /// Restrict downsampling to these gene(s) only (repeatable; exact gene folder names).
     /// If omitted and `--max-reads-per-gene > 0`, downsampling applies to all genes.
     #[arg(long = "downsample-gene")]
     pub downsample_genes: Vec<String>,
 
-    /// Per-gene cap: if >0 and gene is selected, reservoir-sample reads down to this count.
-    #[arg(long = "max-reads-per-gene", default_value_t = 0)]
+    /// Per-gene cap: reservoir-sample reads down to this count (set to 0 to disable downsampling).
+    #[arg(long = "max-reads-per-gene", default_value_t = 50000)]
     pub max_reads_per_gene: usize,
 
     /// Deterministic RNG seed used for per-gene downsampling.
@@ -99,6 +108,8 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         emit_pooled_reads: args.emit_pooled_reads,
         force: args.force,
         progress_every: args.progress_every,
+        heartbeat_seconds: args.heartbeat_seconds,
+        heartbeat_top: args.heartbeat_top,
         downsample_genes: args.downsample_genes,
         max_reads_per_gene: args.max_reads_per_gene,
         downsample_seed: args.downsample_seed,

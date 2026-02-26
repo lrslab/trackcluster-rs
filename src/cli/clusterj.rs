@@ -31,7 +31,7 @@ pub struct Args {
     pub batch_rounds: usize,
 
     /// name2 output mode: full read list + coverage, coverage only, or none
-    #[arg(long = "name2-mode", default_value_t = crate::cluster::clusterj::Name2Mode::Full)]
+    #[arg(long = "name2-mode", default_value_t = crate::cluster::clusterj::Name2Mode::Coverage)]
     pub name2_mode: crate::cluster::clusterj::Name2Mode,
 }
 

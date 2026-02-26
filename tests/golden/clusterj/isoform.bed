@@ -1,2 +1,2 @@
-chr1	100	150	ref_a	100	+	0	0	0	3	10,10,10,	0,20,40,	read_trunc,|0.5	none	none	-1,-1,-1,	isoform_anno	GENEA	group1	none
-chr1	80	150	ref_b	100	+	0	0	0	4	10,10,10,10,	0,20,40,60,	read_trunc,|0.5	none	none	-1,-1,-1,-1,	isoform_anno	GENEA	group1	none
+chr1	100	150	ref_a	100	+	0	0	0	3	10,10,10,	0,20,40,	|0.5	none	none	-1,-1,-1,	isoform_anno	GENEA	group1	none
+chr1	80	150	ref_b	100	+	0	0	0	4	10,10,10,10,	0,20,40,60,	|0.5	none	none	-1,-1,-1,-1,	isoform_anno	GENEA	group1	none

@@ -9,7 +9,11 @@ This is a reference for the Rust binaries shipped in this repo:
 - Coordinates are 0-based, half-open.
 - Most commands are strand-aware (the legacy TrackCluster behavior).
 - **Gene name field**: stored in extra field index `5` (value like `GENE1` or `GENE1||GENE2`; `none` means unassigned).
-- **Subread list (`name2`)**: stored in extra field index `0` for isoforms produced by `clusterj`/`cluster` (value like `read1,read2,|3.5`).
+- **Subread payload (`name2`)**: stored in extra field index `0` for isoforms produced by `clusterj`/`cluster`.
+  - Default (`--name2-mode coverage`): `|3.5` (no read IDs)
+  - `--name2-mode full`: `read1,read2,|3.5`
+  - `--name2-mode none`: `none` (no payload)
+  - Use the `*_read_to_isoform.tsv` mapping for counting when read IDs are not embedded (and it is auto-discovered by `count` / `count-multi` when present next to the isoform BED).
 
 ## `trackcluster`
 
@@ -36,18 +40,23 @@ Key flags:
 - `--output-root/-o`: output directory (created if missing)
 - `--prefix`: output prefix (used for merged outputs like `<prefix>_isoform.bed`)
 - `--threads/-t`: number of worker threads (parallel across genes)
-- `--sw-score`: set to `-1` to disable 5' truncation collapsing
+- `--sw-score`: Smith-Waterman cutoff for 5' truncation collapsing (default: `11`; set to `-1` to disable)
 - `--batch-size`, `--batch-rounds`: bounds for very large genes
+- `--name2-mode`: `coverage` (default), `full`, or `none` (controls isoform `name2` payload size; mapping TSVs are used for counting)
 - `--prepare-fraction-read`, `--prepare-fraction-ref`: overlap thresholds for gene assignment
 - `--emit-pooled-reads`: when using `--manifest`, also write `<prefix>_pooled_reads.bed`
+- `--max-reads-per-gene` (default: `50000`; set `0` to disable), `--downsample-gene`, `--downsample-seed`: per-gene downsampling (writes `clusterj_batch_downsample.tsv` and scales counts)
 - `--force`: overwrite existing per-gene outputs (otherwise genes with existing outputs are skipped)
+- `--heartbeat-seconds`, `--heartbeat-top`: periodic status line (and which gene(s) are currently in-flight when progress is not moving)
 
 Outputs (under `--output-root`):
 - `<prefix>_isoform.bed`
 - `<prefix>_unused.bed`
+- `<prefix>_read_to_isoform.tsv`
 - `<prefix>_isoform_count.csv`
 - `<prefix>_desc.txt`, `<prefix>_class4.txt`, `<prefix>_class12.txt`, `<prefix>_fusion.txt`
 - `clusterj_batch_summary.txt`, `clusterj_batch_errors.txt`
+- `clusterj_batch_downsample.tsv` (only when downsampling occurs)
 - `<prefix>_pooled_reads.bed` (manifest mode + `--emit-pooled-reads`)
 - `<prefix>.isoform_usage.long.tsv` (manifest mode only)
 - `<prefix>.isoform_counts.matrix.tsv` (manifest mode only)
@@ -60,8 +69,7 @@ trackcluster flow \
   --reference ref.bed \
   --output-root out \
   --prefix sample \
-  --threads 32 \
-  --sw-score -1
+  --threads 8
 ```
 
 Manifest example:
@@ -121,15 +129,17 @@ trackcluster addgene \
 Junction-chain clustering (fast mode).
 
 Outputs:
-- `<out>`: isoform BED
-- `<out>.read_to_isoform.tsv`: read -> isoform mapping
-- `<out>.unused.bed`: rare/filtered reads
+If `--out isoform.bed`, this command writes:
+- `isoform.bed`: isoform BED
+- `isoform.read_to_isoform.tsv`: read -> isoform mapping
+- `isoform.unused.bed`: rare/filtered reads
 
 Key flags:
 - `--reads/-s`, `--reference/-r`, `--out/-o`
 - `--threads/-t`: number of worker threads
-- `--sw-score`: set to `-1` to disable 5' truncation collapsing
+- `--sw-score`: Smith-Waterman cutoff for 5' truncation collapsing (default: `11`; set to `-1` to disable)
 - `--batch-size`, `--batch-rounds`: bounds for very large genes
+- `--name2-mode`: `coverage` (default), `full`, or `none` (controls isoform `name2` payload size)
 
 Example:
 ```bash
@@ -137,8 +147,7 @@ trackcluster clusterj \
   --reads reads.bed \
   --reference ref.bed \
   --out isoform.bed \
-  --threads 16 \
-  --sw-score -1
+  --threads 16
 ```
 
 ### `trackcluster cluster`
@@ -159,6 +168,9 @@ trackcluster cluster \
 ### `trackcluster count`
 Compute isoform counts from the isoform BED produced by `clusterj`/`cluster`.
 
+Tip:
+- A mapping TSV is written by `clusterj`/`cluster`/`flow`. `count` will auto-discover it when it lives next to the isoform BED (recommended; required when `name2` does not embed read IDs, e.g. default `--name2-mode coverage`).
+
 Output:
 - CSV with header `isoform_id,count`
 
@@ -168,6 +180,7 @@ trackcluster count \
   --reads reads.bed \
   --reference ref.bed \
   --isoform isoform.bed \
+  --read-to-isoform isoform.read_to_isoform.tsv \
   --out isoform_count.csv
 ```
 
@@ -178,6 +191,7 @@ Input:
 - `--manifest`: TSV with required columns `sample`, `reads`; optional `group`
 - `--reference/-r`: reference BED
 - `--isoform/-i`: pooled isoform BED (typically from `flow --manifest` or pooled `clusterj`)
+- `--read-to-isoform`: optional mapping TSV (recommended; required when isoform `name2` does not embed read IDs; auto-discovered when next to the isoform BED)
 - `--out/-o`: output prefix
 
 Outputs (`--out <prefix>`):
@@ -201,6 +215,7 @@ trackcluster count-multi \
   --manifest samples.tsv \
   --reference ref.bed \
   --isoform pooled_isoform.bed \
+  --read-to-isoform pooled_read_to_isoform.tsv \
   --out out/pooled
 ```
 
@@ -227,13 +242,19 @@ trackcluster desc \
 ## `clusterj_batch`
 Run `clusterj` per gene folder in parallel (optionally run `preparedir` first).
 
+Useful flags:
+- `--sw-score`: Smith-Waterman cutoff for 5' truncation collapsing (default: `11`; set to `-1` to disable)
+- `--batch-size`, `--batch-rounds`: bounds for very large genes
+- `--name2-mode`: `coverage` (default), `full`, or `none` (controls isoform `name2` payload size)
+- `--heartbeat-seconds`, `--heartbeat-top`: periodic status line (and which gene(s) are currently in-flight when progress is not moving)
+- `--max-reads-per-gene` (default: `50000`; set `0` to disable), `--downsample-gene`, `--downsample-seed`: per-gene downsampling (writes `clusterj_batch_downsample.tsv`)
+
 Typical usage (after `preparedir`):
 ```bash
 clusterj_batch \
   --input-root tracktest \
   --output-root trackout \
-  --threads 32 \
-  --sw-score -1 \
+  --threads 8 \
   --force
 ```
 
@@ -245,7 +266,6 @@ clusterj_batch \
   --prepare-prefix sample \
   --input-root tracktest \
   --output-root trackout \
-  --threads 32 \
-  --sw-score -1 \
+  --threads 8 \
   --force
 ```

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.5
+- Default `--name2-mode` is now `coverage` (smaller isoform BEDs; rely on mapping TSVs for counting).
+- Default `--max-reads-per-gene` is now `50000` for `flow`/`clusterj_batch` (memory-friendly; set `0` to disable). Counts/usage tables are scaled when downsampling occurs.
+- Add `--heartbeat-seconds` / `--heartbeat-top` to periodically report progress and in-flight genes during `flow`/`clusterj_batch`.
+- `count` and `count-multi` auto-discover `*_read_to_isoform.tsv` next to the isoform BED when present.
+
 ## 0.1.4
 - Add `--name2-mode` (full/coverage/none) to control isoform `name2` payload size while keeping a read-to-isoform mapping.
 - Add `--read-to-isoform` fast path for `count` and `count-multi` to reuse mapping TSVs from `flow`/`clusterj`.

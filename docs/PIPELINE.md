@@ -52,9 +52,13 @@ trackcluster flow \
   --reference ref.bed \
   --output-root out \
   --prefix sample \
-  --threads 32 \
-  --sw-score -1
+  --threads 8
 ```
+
+Defaults:
+- `--sw-score 11` (collapse 5' truncations); use `--sw-score -1` to disable.
+- `--name2-mode coverage` (memory-friendly). Use `--name2-mode full` to embed read IDs in the isoform BED (larger outputs); otherwise rely on `*_read_to_isoform.tsv` for counting.
+- `--max-reads-per-gene 50000` (memory-friendly cap; set `0` to disable). Counts/usage tables are scaled when downsampling occurs.
 
 ### Multi-sample pooled command
 
@@ -83,6 +87,7 @@ Under `--output-root`:
 - `sample_gene.txt`, `sample_dedup.bed`, `sample_novel.bed`
 - per-gene folders with per-gene clustering outputs
 - `sample_isoform.bed`, `sample_unused.bed`
+- `sample_read_to_isoform.tsv`
 - `sample_isoform_count.csv`
 - `sample_desc.txt`, `sample_class4.txt`, `sample_class12.txt`, `sample_fusion.txt`
 
@@ -97,6 +102,7 @@ The batch runner also writes:
 
 - `clusterj_batch_summary.txt`
 - `clusterj_batch_errors.txt`
+- `clusterj_batch_downsample.tsv` (only when downsampling occurs)
 
 ## Step 0 - Validate inputs (optional but recommended)
 
@@ -165,8 +171,7 @@ It also writes run summaries in the output root (e.g. `clusterj_batch_summary.tx
 clusterj_batch \
   --input-root tracktest \
   --output-root trackout \
-  --threads 32 \
-  --sw-score -1 \
+  --threads 8 \
   --force
 ```
 
@@ -188,6 +193,14 @@ find trackout -mindepth 2 -maxdepth 2 -name '*_unused.bed' -print0 \
   | xargs -0 cat > sample_unused.bed
 ```
 
+Recommended: combine read-to-isoform mappings (required for default `--name2-mode coverage|none` counting):
+
+```bash
+find trackout -mindepth 2 -maxdepth 2 -name '*_read_to_isoform.tsv' -print0 \
+  | sort -z \
+  | xargs -0 cat > sample_read_to_isoform.tsv
+```
+
 ## Step 4 - Count isoforms (`count`)
 
 ```bash
@@ -195,6 +208,7 @@ trackcluster count \
   --reads reads.bed \
   --reference ref.bed \
   --isoform sample_isoform.bed \
+  --read-to-isoform sample_read_to_isoform.tsv \
   --out sample_isoform_count.csv
 ```
 
@@ -207,6 +221,7 @@ trackcluster count-multi \
   --manifest samples.tsv \
   --reference ref.bed \
   --isoform sample_isoform.bed \
+  --read-to-isoform sample_read_to_isoform.tsv \
   --out sample
 ```
 
@@ -235,7 +250,7 @@ If your dataset is small, you can cluster without the gene-batched folder struct
 
 ```bash
 trackcluster clusterj --reads reads.bed --reference ref.bed --out isoform.bed --threads 8
-trackcluster count --reads reads.bed --reference ref.bed --isoform isoform.bed --out isoform_count.csv
+trackcluster count --reads reads.bed --reference ref.bed --isoform isoform.bed --read-to-isoform isoform.read_to_isoform.tsv --out isoform_count.csv
 ```
 
 If you also want `desc`, make sure isoforms have gene names first:

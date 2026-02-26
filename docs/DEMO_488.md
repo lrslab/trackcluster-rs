@@ -156,6 +156,8 @@ c24_control_2_s	c24_control	/Users/li/data/shoudong_488/multigroup_full_20260213
 ## 8) Notes
 
 - `flow --manifest` performs pooled isoform discovery, then writes per-sample and per-group usage tables.
+- By default, manifest mode does not write `<prefix>_pooled_reads.bed`; add `--emit-pooled-reads` if you want it for debugging/compatibility.
+- Defaults are memory-friendly: `--name2-mode coverage` and `--max-reads-per-gene 50000` (set `0` to disable downsampling).
 - The demo uses `--sw-score 11` (the standard collapse behavior for 5' truncation handling).
 - Output file names are `<prefix>_*` and `<prefix>.*`, so keep `--prefix` stable if you want deterministic downstream paths.
 - On Linux, prefer the `x86_64-unknown-linux-musl` release artifact to avoid glibc version mismatch issues.

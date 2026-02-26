@@ -23,11 +23,15 @@ This Rust rewrite follows the legacy TrackCluster convention of storing a gene n
 - Multi-gene values are joined with `||` (example: `GENE1||GENE2`).
 
 ### Subread list / `name2` field (TrackCluster convention)
-Isoforms produced by `clusterj`/`cluster` store supporting read IDs in the first extra field:
-- `extra_fields[0] = "<read1>,<read2>,...,|<coverage>"`
-- Example: `readA,readB,readC,|2.5`
+Isoforms produced by `clusterj`/`cluster` use extra field index `0` for the TrackCluster-style `name2` payload.
 
-The `count` command parses the `<read1>,<read2>,...` portion and uses it to compute isoform counts.
+By default (`--name2-mode coverage`), this stores only a coverage value:
+- `extra_fields[0] = "|<coverage>"` (no read IDs)
+- `--name2-mode none`: `extra_fields[0] = "none"` (no payload)
+- `--name2-mode full`: `extra_fields[0] = "<read1>,<read2>,...,|<coverage>"`
+  - Example: `readA,readB,readC,|2.5`
+
+When read IDs are omitted from `name2`, use the `*_read_to_isoform.tsv` mapping written by `clusterj`/`cluster`/`flow` and pass it to `count` / `count-multi` via `--read-to-isoform` (or keep it next to the isoform BED for auto-discovery).
 
 ## Multi-sample manifest TSV
 `count-multi` and `flow --manifest` expect a tab-separated manifest with:

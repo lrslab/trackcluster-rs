@@ -59,6 +59,7 @@ clusterj_batch --help
 ```bash
 # One-line flow: prepare per-gene inputs, run clusterj batch, merge outputs, count, and desc
 trackcluster flow -s tests/fixtures/reads.bed -r tests/fixtures/ref.bed -o out --prefix sample
+# Tip: disable the default per-gene downsampling cap with `--max-reads-per-gene 0` (uses more memory).
 
 # Validate a BED12/bigGenePred file
 trackcluster validate-bed -i tests/fixtures/minimal.bed
@@ -67,7 +68,7 @@ trackcluster validate-bed -i tests/fixtures/minimal.bed
 trackcluster clusterj -s tests/fixtures/reads.bed -r tests/fixtures/ref.bed -o isoform.bed
 
 # Count isoforms
-trackcluster count -s tests/fixtures/reads.bed -r tests/fixtures/ref.bed -i isoform.bed -o isoform_count.csv
+trackcluster count -s tests/fixtures/reads.bed -r tests/fixtures/ref.bed -i isoform.bed --read-to-isoform isoform.read_to_isoform.tsv -o isoform_count.csv
 
 # Describe/classify isoforms vs reference (writes <prefix>_*.txt)
 trackcluster desc --isoform isoform.bed --reference tests/fixtures/ref.bed -o desc_out
@@ -95,6 +96,8 @@ Or run per-sample quantification from an existing pooled isoform BED:
 ```bash
 trackcluster count-multi --manifest samples.tsv -r tests/fixtures/ref.bed -i out/pooled_isoform.bed -o out/pooled
 ```
+
+Tip: with default `--name2-mode coverage` (or `none`), use `--read-to-isoform out/pooled_read_to_isoform.tsv` (or keep the TSV next to the isoform BED for auto-discovery).
 
 `count-multi` writes:
 - `out/pooled.isoform_usage.long.tsv`

@@ -1,4 +1,6 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use anyhow::Context;
 
 #[derive(clap::Args, Debug)]
 pub struct Args {
@@ -23,14 +25,32 @@ pub struct Args {
     pub out_prefix: PathBuf,
 }
 
-pub fn run(args: Args) -> anyhow::Result<()> {
-    let outputs = if let Some(mapping_path) = args.read_to_isoform.as_ref() {
-        let sample_rows = crate::io::manifest::read_manifest_tsv(&args.manifest)?;
-        let isoforms: Vec<crate::model::Transcript> = crate::io::bed::read_bed12(&args.isoform)?
-            .collect::<Result<Vec<_>, crate::io::bed::BedError>>(
-        )?;
-        let pairs = crate::count::read_read_to_isoform_tsv(mapping_path)?;
+fn guess_mapping_path(isoform: &Path) -> Option<PathBuf> {
+    let candidate = isoform.with_extension("read_to_isoform.tsv");
+    if candidate.exists() {
+        return Some(candidate);
+    }
 
+    let file_name = isoform.file_name()?.to_string_lossy();
+    let prefix = file_name.strip_suffix("_isoform.bed")?;
+    let candidate = isoform.with_file_name(format!("{prefix}_read_to_isoform.tsv"));
+    candidate.exists().then_some(candidate)
+}
+
+pub fn run(args: Args) -> anyhow::Result<()> {
+    let sample_rows = crate::io::manifest::read_manifest_tsv(&args.manifest)?;
+    let isoforms: Vec<crate::model::Transcript> = crate::io::bed::read_bed12(&args.isoform)?
+        .collect::<Result<Vec<_>, crate::io::bed::BedError>>(
+    )?;
+
+    let mapping_path = args
+        .read_to_isoform
+        .clone()
+        .or_else(|| guess_mapping_path(&args.isoform));
+
+    let outputs = if let Some(mapping_path) = mapping_path.as_ref() {
+        let pairs = crate::count::read_read_to_isoform_tsv(mapping_path)
+            .with_context(|| format!("read mapping {mapping_path:?}"))?;
         crate::count::multi::run_count_multi_from_read_to_isoform(
             &sample_rows,
             &isoforms,
@@ -38,12 +58,24 @@ pub fn run(args: Args) -> anyhow::Result<()> {
             &args.out_prefix,
         )?
     } else {
-        crate::count::multi::run_count_multi_from_paths(
-            &args.manifest,
-            &args.reference,
-            &args.isoform,
-            &args.out_prefix,
-        )?
+        let has_subreads = isoforms
+            .iter()
+            .any(|tx| !crate::count::parse_subreads(tx).is_empty());
+        if !has_subreads {
+            anyhow::bail!(
+                "count-multi: no --read-to-isoform provided and no mapping file found next to {:?}; \
+this isoform BED does not embed read IDs (likely from --name2-mode coverage|none). \
+Provide --read-to-isoform or re-run clustering with --name2-mode full.",
+                args.isoform
+            );
+        }
+
+        let refs: Vec<crate::model::Transcript> = crate::io::bed::read_bed12(&args.reference)
+            .with_context(|| format!("open reference {:?}", args.reference))?
+            .collect::<Result<Vec<_>, crate::io::bed::BedError>>()
+            .with_context(|| format!("parse reference {:?}", args.reference))?;
+
+        crate::count::multi::run_count_multi(&sample_rows, &isoforms, &refs, &args.out_prefix)?
     };
 
     eprintln!(

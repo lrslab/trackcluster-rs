@@ -517,16 +517,18 @@ fn junction_simple_merge(tracks: &mut [Track], sw_score: i64) -> Vec<usize> {
                 if is_single_exon_in(&tracks[i].tx, &tracks[j].tx, &junctions_cache[j]) {
                     dropped[i] = true;
                     let (short, long) = get_two_mut(tracks, i, j);
-                    let name = short.tx.name.clone();
-                    long.subreads.insert(name);
+                    if is_isoform_anno(&short.tx) {
+                        long.subreads.insert(short.tx.name.clone());
+                    }
                     long.subreads.extend(short.subreads.iter().cloned());
                 }
             } else if is_junction_inside(junctions_i, exon_len_i, &junctions_cache[j], exon_lens[j])
             {
                 dropped[i] = true;
                 let (short, long) = get_two_mut(tracks, i, j);
-                let name = short.tx.name.clone();
-                long.subreads.insert(name);
+                if is_isoform_anno(&short.tx) {
+                    long.subreads.insert(short.tx.name.clone());
+                }
                 long.subreads.extend(short.subreads.iter().cloned());
             }
         }
@@ -681,6 +683,13 @@ fn build_read_to_isoform(isoforms: &[Track], ref_names: &HashSet<String>) -> Vec
 }
 
 fn update_name2(isoforms: &mut [Track], ref_names: &HashSet<String>, mode: Name2Mode) {
+    if mode == Name2Mode::None {
+        for track in isoforms.iter_mut() {
+            set_extra(&mut track.tx, NAME2_COL, "none".to_owned());
+        }
+        return;
+    }
+
     let values: Vec<String> = {
         let mut occurrence: HashMap<&str, u32> = HashMap::new();
         for track in isoforms.iter() {
@@ -694,25 +703,27 @@ fn update_name2(isoforms: &mut [Track], ref_names: &HashSet<String>, mode: Name2
         isoforms
             .iter()
             .map(|track| {
-                let mut subreads: Vec<&str> = track.subreads.iter().map(|s| s.as_str()).collect();
-                subreads.sort_unstable();
-                let joined = subreads.join(",");
-
                 let mut coverage = 0.0f64;
-                for name in &subreads {
-                    if ref_names.contains(*name) {
+                for name in &track.subreads {
+                    if ref_names.contains(name) {
                         continue;
                     }
-                    let denom = occurrence.get(*name).copied().unwrap_or(0);
+                    let denom = occurrence.get(name.as_str()).copied().unwrap_or(0);
                     if denom > 0 {
                         coverage += 1.0f64 / denom as f64;
                     }
                 }
 
                 match mode {
-                    Name2Mode::Full => format!("{joined},|{coverage}"),
+                    Name2Mode::Full => {
+                        let mut subreads: Vec<&str> =
+                            track.subreads.iter().map(|s| s.as_str()).collect();
+                        subreads.sort_unstable();
+                        let joined = subreads.join(",");
+                        format!("{joined},|{coverage}")
+                    }
                     Name2Mode::Coverage => format!("|{coverage}"),
-                    Name2Mode::None => "none".to_owned(),
+                    Name2Mode::None => unreachable!("handled above"),
                 }
             })
             .collect()
