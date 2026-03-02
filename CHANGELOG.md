@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.6
+- Performance: speed up `clusterj` 5' truncation collapsing on large loci by indexing junction suffixes (avoids quadratic scans).
+- Bench: add a large single-locus `clusterj` benchmark to track this workload.
+
 ## 0.1.5
 - Default `--name2-mode` is now `coverage` (smaller isoform BEDs; rely on mapping TSVs for counting).
 - Default `--max-reads-per-gene` is now `50000` for `flow`/`clusterj_batch` (memory-friendly; set `0` to disable). Counts/usage tables are scaled when downsampling occurs.

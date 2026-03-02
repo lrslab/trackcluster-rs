@@ -165,6 +165,48 @@ fn make_clusterj_inputs(
     (refs, reads)
 }
 
+fn make_clusterj_single_locus_inputs(
+    seed: u64,
+    refs_len: usize,
+    reads_len: usize,
+    locus_start: u32,
+) -> (Vec<Transcript>, Vec<Transcript>) {
+    let mut rng = Lcg64::new(seed);
+    let mut refs = Vec::with_capacity(refs_len);
+    let mut reads = Vec::with_capacity(reads_len);
+
+    for i in 0..refs_len {
+        let exon_len = 45 + rng.gen_range_u32(0, 10);
+        let gap_len = 90 + rng.gen_range_u32(0, 30);
+        let exons = exon_chain(locus_start, exon_len, gap_len, 4);
+        refs.push(make_tx(
+            "chr1",
+            Strand::Plus,
+            format!("ref{i}"),
+            exons,
+            "isoform_anno",
+            100,
+        ));
+    }
+
+    for i in 0..reads_len {
+        let exon_len = 30 + rng.gen_range_u32(0, 40);
+        let gap_len = 60 + rng.gen_range_u32(0, 80);
+        let exon_count = if rng.gen_bool() { 3 } else { 4 };
+        let exons = exon_chain(locus_start, exon_len, gap_len, exon_count);
+        reads.push(make_tx(
+            "chr1",
+            Strand::Plus,
+            format!("read{i}"),
+            exons,
+            "nanopore_read",
+            0,
+        ));
+    }
+
+    (refs, reads)
+}
+
 fn make_cluster_overlap_inputs(
     seed: u64,
     refs_len: usize,
@@ -262,6 +304,38 @@ fn bench_clusterj_grouping(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_clusterj_large_single_locus(c: &mut Criterion) {
+    let mut group = c.benchmark_group("clusterj_large");
+    group.sample_size(10);
+
+    let refs_len = 200usize;
+    let reads_len = 20_000usize;
+    let (refs, reads) = make_clusterj_single_locus_inputs(4, refs_len, reads_len, 100_000);
+    group.bench_with_input(
+        BenchmarkId::new(
+            "clusterj_simple_merge",
+            format!("{refs_len}_refs_{reads_len}_reads"),
+        ),
+        &(refs, reads),
+        |bench, (refs, reads)| {
+            bench.iter(|| {
+                let result = clusterj::clusterj_with_name2_mode(
+                    black_box(reads),
+                    Some(black_box(refs)),
+                    1,
+                    11,
+                    0,
+                    1,
+                    clusterj::Name2Mode::Full,
+                );
+                black_box(result.isoforms.len());
+            });
+        },
+    );
+
+    group.finish();
+}
+
 fn bench_cluster_overlap_synthetic_locus(c: &mut Criterion) {
     let mut group = c.benchmark_group("cluster_overlap");
     group.sample_size(10);
@@ -347,6 +421,7 @@ criterion_group!(
     benches,
     bench_interval_sweep_intersect,
     bench_clusterj_grouping,
+    bench_clusterj_large_single_locus,
     bench_cluster_overlap_synthetic_locus
 );
 

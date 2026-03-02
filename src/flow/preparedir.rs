@@ -95,7 +95,7 @@ fn prepare_dir(
     crate::io::bed::write_bed12(&dedup_path, reads_dedup.iter())
         .with_context(|| format!("write {dedup_path:?}"))?;
 
-    // Step 2 (Python: bedtools intersect + tracklist_add_gene)
+    // Step 2 (Python: intersect + tracklist_add_gene)
     let reads_annotated = add_gene_no_dedup(&reads_dedup, &refs, addgene_opts);
 
     // Group references by gene (Python: group_bigg_by_gene(bigg_ref))

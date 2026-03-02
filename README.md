@@ -14,7 +14,7 @@ artifact-write failure seen with newer toolchains in this environment.
 Implemented subcommands:
 - `flow`: one-command end-to-end pipeline (recommended)
 - `preparedir`: split reads into per-gene folders (and write `<prefix>_gene.txt`, `<prefix>_dedup.bed`, `<prefix>_novel.bed`)
-- `clusterj`: junction-chain clustering (fast mode)
+- `clusterj`: junction-chain clustering (fast mode; optimized truncation collapsing for large loci)
 - `cluster`: overlap-based clustering (slower, more permissive)
 - `count`: isoform expression counting
 - `count-multi`: per-sample (and optional per-group) isoform usage from pooled isoforms

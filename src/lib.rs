@@ -1,7 +1,7 @@
 //! Pure-Rust long-read isoform clustering and counting pipeline.
 //!
 //! `trackcluster-rs` replaces the Python TrackCluster with native
-//! sort/intersect/cluster primitives and no runtime `bedtools` dependency.
+//! sort/intersect/cluster primitives and no runtime dependency on external CLI tools.
 //!
 //! # Modules
 //!

@@ -485,7 +485,108 @@ fn get_two_mut<T>(slice: &mut [T], i: usize, j: usize) -> (&mut T, &mut T) {
     }
 }
 
+fn build_junction_suffix_index<'a>(
+    junctions_cache: &'a [Vec<u32>],
+) -> HashMap<&'a [u32], Vec<usize>> {
+    let total_suffixes = junctions_cache
+        .iter()
+        .map(|junctions| junctions.len())
+        .sum();
+    let mut suffix_index: HashMap<&'a [u32], Vec<usize>> = HashMap::with_capacity(total_suffixes);
+
+    for (idx, junctions) in junctions_cache.iter().enumerate() {
+        for start in 0..junctions.len() {
+            suffix_index
+                .entry(&junctions[start..])
+                .or_default()
+                .push(idx);
+        }
+    }
+
+    suffix_index
+}
+
 fn junction_simple_merge(tracks: &mut [Track], sw_score: i64) -> Vec<usize> {
+    let junctions_cache: Vec<Vec<u32>> = tracks
+        .iter()
+        .map(|track| junction_positions(&track.tx))
+        .collect();
+    let exon_lens: Vec<u32> = tracks.iter().map(|track| exon_len(&track.tx)).collect();
+    let is_anno: Vec<bool> = tracks
+        .iter()
+        .map(|track| is_isoform_anno(&track.tx))
+        .collect();
+
+    let suffix_index = build_junction_suffix_index(&junctions_cache);
+
+    let mut dropped: Vec<bool> = vec![false; tracks.len()];
+    for i in 0..tracks.len() {
+        if dropped[i] {
+            continue;
+        }
+
+        let score_i = i64::from(tracks[i].tx.score);
+        if score_i > sw_score {
+            continue;
+        }
+
+        let junctions_i = &junctions_cache[i];
+        let exon_len_i = exon_lens[i];
+        if junctions_i.is_empty() {
+            for j in 0..tracks.len() {
+                if i == j {
+                    continue;
+                }
+                if dropped[j] && !is_anno[j] {
+                    continue;
+                }
+
+                if is_single_exon_in(&tracks[i].tx, &tracks[j].tx, &junctions_cache[j]) {
+                    dropped[i] = true;
+                    let (short, long) = get_two_mut(tracks, i, j);
+                    if is_anno[i] {
+                        long.subreads.insert(short.tx.name.clone());
+                    }
+                    long.subreads.extend(short.subreads.iter().cloned());
+                }
+            }
+            continue;
+        }
+
+        let Some(candidates) = suffix_index.get(junctions_i.as_slice()) else {
+            continue;
+        };
+
+        for &j in candidates {
+            if i == j {
+                continue;
+            }
+            if dropped[j] && !is_anno[j] {
+                continue;
+            }
+
+            if is_junction_inside(junctions_i, exon_len_i, &junctions_cache[j], exon_lens[j]) {
+                dropped[i] = true;
+                let (short, long) = get_two_mut(tracks, i, j);
+                if is_anno[i] {
+                    long.subreads.insert(short.tx.name.clone());
+                }
+                long.subreads.extend(short.subreads.iter().cloned());
+            }
+        }
+    }
+
+    let mut keep_vec: Vec<usize> = Vec::with_capacity(tracks.len());
+    for (idx, _track) in tracks.iter().enumerate() {
+        if !dropped[idx] || is_anno[idx] {
+            keep_vec.push(idx);
+        }
+    }
+    keep_vec
+}
+
+#[cfg(test)]
+fn junction_simple_merge_naive(tracks: &mut [Track], sw_score: i64) -> Vec<usize> {
     let junctions_cache: Vec<Vec<u32>> = tracks
         .iter()
         .map(|track| junction_positions(&track.tx))
@@ -1001,6 +1102,8 @@ pub fn clusterj_with_name2_mode(
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use crate::model::{Bed12Attrs, Coord, Interval, Strand, Transcript};
 
     use super::*;
@@ -1044,6 +1147,120 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    fn make_track(
+        name: &str,
+        strand: Strand,
+        exons: &[(u32, u32)],
+        ttype: &str,
+        score: u32,
+    ) -> Track {
+        let tx = make_tx(name, strand, exons, ttype, score);
+        let mut subreads = HashSet::new();
+        if ttype != "isoform_anno" {
+            subreads.insert(name.to_owned());
+        }
+        Track { tx, subreads }
+    }
+
+    #[test]
+    fn junction_simple_merge_matches_naive_on_suffix_and_equal_cases() {
+        let mut tracks = vec![
+            make_track(
+                "short_equal",
+                Strand::Plus,
+                &[(120, 150), (200, 240)],
+                "nanopore_read",
+                0,
+            ),
+            make_track(
+                "long_equal_1",
+                Strand::Plus,
+                &[(100, 150), (200, 260)],
+                "nanopore_read",
+                0,
+            ),
+            make_track(
+                "long_equal_2",
+                Strand::Plus,
+                &[(90, 150), (200, 270)],
+                "nanopore_read",
+                0,
+            ),
+            make_track(
+                "short_suffix",
+                Strand::Plus,
+                &[(200, 250), (300, 350)],
+                "nanopore_read",
+                0,
+            ),
+            make_track(
+                "long_suffix",
+                Strand::Plus,
+                &[(100, 150), (200, 250), (300, 350)],
+                "nanopore_read",
+                0,
+            ),
+        ];
+
+        let mut naive_tracks = tracks.clone();
+        let keep_naive = junction_simple_merge_naive(&mut naive_tracks, 11);
+
+        let keep_indexed = junction_simple_merge(&mut tracks, 11);
+
+        assert_eq!(keep_indexed, keep_naive);
+        assert_eq!(tracks.len(), naive_tracks.len());
+        for (indexed, naive) in tracks.iter().zip(naive_tracks.iter()) {
+            assert_eq!(indexed.subreads, naive.subreads);
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn junction_simple_merge_matches_naive_on_random_inputs(
+            strand in prop_oneof![Just(Strand::Plus), Just(Strand::Minus)],
+            params in prop::collection::vec(
+                (
+                    1usize..=4,
+                    0u32..=500,
+                    5u32..=50,
+                    0u32..=50,
+                    any::<bool>(),
+                    0u32..=150,
+                ),
+                1..=20,
+            ),
+        ) {
+            let mut tracks = Vec::with_capacity(params.len());
+            for (idx, (exon_count, tx_start, exon_len, gap_len, is_ref, score)) in params.into_iter().enumerate() {
+                let mut exons = Vec::with_capacity(exon_count);
+                let mut cursor = tx_start;
+                for _ in 0..exon_count {
+                    let start = cursor;
+                    let end = cursor + exon_len;
+                    exons.push((start, end));
+                    cursor = end + gap_len;
+                }
+
+                let name = format!("t{idx}");
+                let ttype = if is_ref { "isoform_anno" } else { "nanopore_read" };
+                tracks.push(make_track(&name, strand, &exons, ttype, score));
+            }
+
+            let mut naive_tracks = tracks.clone();
+            let keep_naive = junction_simple_merge_naive(&mut naive_tracks, 11);
+
+            let keep_indexed = junction_simple_merge(&mut tracks, 11);
+
+            prop_assert_eq!(keep_indexed, keep_naive);
+            prop_assert_eq!(tracks.len(), naive_tracks.len());
+            for (indexed, naive) in tracks.iter().zip(naive_tracks.iter()) {
+                prop_assert_eq!(&indexed.subreads, &naive.subreads);
+            }
+        }
     }
 
     #[test]

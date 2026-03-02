@@ -141,6 +141,9 @@ Key flags:
 - `--batch-size`, `--batch-rounds`: bounds for very large genes
 - `--name2-mode`: `coverage` (default), `full`, or `none` (controls isoform `name2` payload size)
 
+Performance note:
+- 5' truncation collapsing is implemented via a junction-suffix index to avoid quadratic scans on large loci; `--batch-size`/`--batch-rounds` remain useful as hard caps for extreme genes.
+
 Example:
 ```bash
 trackcluster clusterj \

@@ -157,6 +157,8 @@ After running, `tracktest/` contains:
 
 `clusterj_batch` iterates over gene folders in `--input-root` and runs junction-mode clustering for each gene.
 
+Internally, 5' truncation collapsing uses a junction-suffix index to avoid quadratic scans on large loci.
+
 For each gene, it writes:
 
 - `*_simple_coveragej.bed` (isoforms)
