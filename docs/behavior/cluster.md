@@ -16,10 +16,14 @@ Legacy Python overlap-mode clustering is implemented in `trackcluster/cluster.py
 6) Merge reads into the retained representative by exon length, with the special-case SL score cutoff (`scorecutoff`, default `11`) controlling some short-read merges.
 
 ## Rust status
-Rust currently provides an overlap-mode `cluster` command implemented in `src/cluster/cluster_overlap.rs`.
+Rust provides overlap-mode clustering in `src/cluster/cluster_overlap.rs`, exposed through:
+- `trackcluster cluster`
+- `trackcluster flow --cluster-mode cluster`
+
+Behavior:
 - It performs locus splitting first (span-based), then applies the same two-pass distance/merge idea using native overlap calculations (no external tools).
-- Parameters are currently fixed to Python defaults:
+- For large loci, flow/CLI can optionally pre-merge reads in batches before the final full two-pass overlap clustering (`--batch-size`, `--batch-rounds`).
+- Parameters default to the Python flow defaults and are configurable from the CLI/flow surface:
   - `cutoff1=0.05`, `cutoff2=0.01`, `intronweight=0.5`, `scorecutoff=11`
 
 This is intended as a starting point; full parity should be validated/adjusted using goldens.
-

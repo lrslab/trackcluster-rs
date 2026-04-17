@@ -16,21 +16,16 @@ cargo test --all --all-features
 
 ## 3) Package checks
 ```bash
-cargo package --allow-dirty --no-verify
+cargo package
 cargo publish --dry-run
 ```
 
 If `cargo publish --dry-run` fails due network/DNS in your environment, run it again from a network-enabled shell.
 
+Do not commit build outputs or release tarballs to `main`; the release workflow uploads them to GitHub Releases as assets.
+
 ## 4) Publish to GitHub
-```bash
-git init
-git add .
-git commit -m "Initial release: trackcluster-rs v0.1.0"
-git branch -M main
-git remote add origin git@github.com:lrslab/trackcluster-rs.git
-git push -u origin main
-```
+Push a clean commit to `main` before tagging. Release artifacts should stay attached to GitHub Releases, not in the repository history.
 
 ## 5) Publish to crates.io
 ```bash
@@ -44,8 +39,8 @@ Linux (x86_64 musl static, ARM64 glibc) and macOS (Apple Silicon)
 automatically when a version tag is pushed:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag vX.Y.Z
+git push origin vX.Y.Z
 ```
 
 This creates a GitHub Release with tarballs attached. Release notes are

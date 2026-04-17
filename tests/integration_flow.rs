@@ -35,6 +35,22 @@ fn normalized_lines(path: &Path) -> Vec<String> {
     lines
 }
 
+fn count_sum(path: &Path) -> f64 {
+    fs::read_to_string(path)
+        .expect("read count csv")
+        .lines()
+        .skip(1)
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            line.split(',')
+                .nth(1)
+                .expect("count column")
+                .parse::<f64>()
+                .expect("parse count")
+        })
+        .sum()
+}
+
 #[test]
 fn flow_runs_end_to_end_and_matches_goldens() {
     let exe = env!("CARGO_BIN_EXE_trackcluster");
@@ -232,4 +248,69 @@ fn flow_manifest_downsamples_gene_over_cutoff_and_writes_scale_factors() {
         .any(|line| line.starts_with("GENEA\t2\t1\t2")));
 
     assert!(out_dir.join("GENEA/downsample.tsv").exists());
+}
+
+#[test]
+fn flow_overlap_mode_runs_end_to_end() {
+    let exe = env!("CARGO_BIN_EXE_trackcluster");
+
+    let reads = {
+        let read1 = fs::read_to_string(repo_path("tests/fixtures/S1.reads.bed")).expect("read S1");
+        let read2 = fs::read_to_string(repo_path("tests/fixtures/S2.reads.bed")).expect("read S2");
+        let path = fresh_temp_dir("flow_overlap_reads").join("reads.bed");
+        fs::write(&path, format!("{read1}{read2}")).expect("write overlap reads");
+        path
+    };
+    let reference = repo_path("tests/fixtures/ref.bed");
+
+    let out_dir = fresh_temp_dir("flow_overlap");
+    let prefix = "sample";
+
+    let status = Command::new(exe)
+        .args([
+            "flow",
+            "--cluster-mode",
+            "cluster",
+            "-s",
+            reads.to_str().unwrap(),
+            "-r",
+            reference.to_str().unwrap(),
+            "-o",
+            out_dir.to_str().unwrap(),
+            "--prefix",
+            prefix,
+            "--threads",
+            "1",
+            "--batch-size",
+            "1",
+            "--batch-rounds",
+            "4",
+            "--force",
+        ])
+        .status()
+        .expect("run flow overlap mode");
+    assert!(status.success());
+
+    let isoform_out = out_dir.join(format!("{prefix}_isoform.bed"));
+    let unused_out = out_dir.join(format!("{prefix}_unused.bed"));
+    let mapping_out = out_dir.join(format!("{prefix}_read_to_isoform.tsv"));
+    let count_out = out_dir.join(format!("{prefix}_isoform_count.csv"));
+
+    assert!(isoform_out.exists());
+    assert!(unused_out.exists());
+    assert!(mapping_out.exists());
+    assert!(count_out.exists());
+
+    assert!(out_dir.join("GENEA/GENEA_simple_coverage.bed").exists());
+    assert!(out_dir.join("cluster_batch_summary.txt").exists());
+
+    let mapping = fs::read_to_string(mapping_out).expect("read merged mapping");
+    assert!(mapping.lines().any(|line| line.starts_with("read_s1\t")));
+    assert!(mapping.lines().any(|line| line.starts_with("read_s2\t")));
+    assert!((count_sum(&count_out) - 2.0).abs() < 1e-9);
+
+    assert!(out_dir.join(format!("{prefix}_desc.txt")).exists());
+    assert!(out_dir.join(format!("{prefix}_class4.txt")).exists());
+    assert!(out_dir.join(format!("{prefix}_fusion.txt")).exists());
+    assert!(out_dir.join(format!("{prefix}_class12.txt")).exists());
 }

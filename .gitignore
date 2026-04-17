@@ -1,5 +1,7 @@
 # Rust build artifacts
 /target/
+/trackcluster-*.tar.gz
+/trackcluster-test-*.tar.gz
 
 # IDEs
 .idea/

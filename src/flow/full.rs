@@ -21,8 +21,68 @@ use crate::io::bed::{read_bed12, BedError};
 use crate::io::manifest::{read_manifest_tsv, SampleRow};
 use crate::model::Transcript;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ClusterMode {
+    #[default]
+    Clusterj,
+    Cluster,
+}
+
+impl ClusterMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Clusterj => "clusterj",
+            Self::Cluster => "cluster",
+        }
+    }
+
+    fn batch_log_label(self) -> &'static str {
+        match self {
+            Self::Clusterj => "clusterj-batch",
+            Self::Cluster => "cluster-batch",
+        }
+    }
+
+    fn batch_file_prefix(self) -> &'static str {
+        match self {
+            Self::Clusterj => "clusterj_batch",
+            Self::Cluster => "cluster_batch",
+        }
+    }
+
+    fn per_gene_isoform_suffix(self) -> &'static str {
+        match self {
+            Self::Clusterj => "_simple_coveragej.bed",
+            Self::Cluster => "_simple_coverage.bed",
+        }
+    }
+}
+
+impl std::fmt::Display for ClusterMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ClusterMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.eq_ignore_ascii_case("clusterj") {
+            return Ok(Self::Clusterj);
+        }
+        if s.eq_ignore_ascii_case("cluster") {
+            return Ok(Self::Cluster);
+        }
+        Err(format!(
+            "invalid cluster mode {s:?}; expected one of: clusterj, cluster"
+        ))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BatchRunOptions {
+    pub cluster_mode: ClusterMode,
     pub prepare_reads: Option<PathBuf>,
     pub prepare_reference: Option<PathBuf>,
     pub prepare_prefix: Option<String>,
@@ -36,6 +96,9 @@ pub struct BatchRunOptions {
     pub batch_size: usize,
     pub batch_rounds: usize,
     pub name2_mode: crate::cluster::clusterj::Name2Mode,
+    pub overlap_cutoff1: f64,
+    pub overlap_cutoff2: f64,
+    pub overlap_intron_weight: f64,
     pub force: bool,
     pub progress_every: usize,
     /// Emit a heartbeat status line every N seconds (0 disables).
@@ -66,6 +129,7 @@ pub struct BatchRunResult {
 
 #[derive(Clone, Debug)]
 pub struct FullFlowOptions {
+    pub cluster_mode: ClusterMode,
     pub reads: Option<PathBuf>,
     pub manifest: Option<PathBuf>,
     pub reference: PathBuf,
@@ -76,6 +140,9 @@ pub struct FullFlowOptions {
     pub batch_size: usize,
     pub batch_rounds: usize,
     pub name2_mode: crate::cluster::clusterj::Name2Mode,
+    pub overlap_cutoff1: f64,
+    pub overlap_cutoff2: f64,
+    pub overlap_intron_weight: f64,
     pub prepare_fraction_read: f64,
     pub prepare_fraction_ref: f64,
     pub emit_pooled_reads: bool,
@@ -343,7 +410,10 @@ fn process_gene(gene: &str, args: &BatchRunOptions) -> anyhow::Result<ProcessGen
     let out_dir = args.output_root.join(gene);
     fs::create_dir_all(&out_dir).with_context(|| format!("create {out_dir:?}"))?;
 
-    let out_isoforms = out_dir.join(format!("{gene}_simple_coveragej.bed"));
+    let out_isoforms = out_dir.join(format!(
+        "{gene}{}",
+        args.cluster_mode.per_gene_isoform_suffix()
+    ));
     let out_unused = out_dir.join(format!("{gene}_unused.bed"));
     let out_mapping = out_dir.join(format!("{gene}_read_to_isoform.tsv"));
 
@@ -385,15 +455,31 @@ fn process_gene(gene: &str, args: &BatchRunOptions) -> anyhow::Result<ProcessGen
         .collect::<Result<Vec<_>, crate::io::bed::BedError>>()
         .with_context(|| format!("parse reference {reference:?}"))?;
 
-    let result = crate::cluster::clusterj::clusterj_with_name2_mode(
-        &reads,
-        Some(&refs),
-        1,
-        args.sw_score,
-        args.batch_size,
-        args.batch_rounds,
-        args.name2_mode,
-    );
+    let result = match args.cluster_mode {
+        ClusterMode::Clusterj => crate::cluster::clusterj::clusterj_with_name2_mode(
+            &reads,
+            Some(&refs),
+            1,
+            args.sw_score,
+            args.batch_size,
+            args.batch_rounds,
+            args.name2_mode,
+        ),
+        ClusterMode::Cluster => crate::cluster::cluster_overlap::cluster_with_options(
+            &reads,
+            Some(&refs),
+            1,
+            crate::cluster::cluster_overlap::ClusterOptions {
+                cutoff1: args.overlap_cutoff1,
+                cutoff2: args.overlap_cutoff2,
+                intron_weight: args.overlap_intron_weight,
+                sw_score: args.sw_score,
+                name2_mode: args.name2_mode,
+                batch_size: args.batch_size,
+                batch_rounds: args.batch_rounds,
+            },
+        ),
+    };
 
     crate::cluster::output::write_isoforms_bed(&out_isoforms, &result.isoforms)
         .with_context(|| format!("write {out_isoforms:?}"))?;
@@ -417,6 +503,9 @@ fn process_gene(gene: &str, args: &BatchRunOptions) -> anyhow::Result<ProcessGen
 pub fn run_clusterj_batch(args: BatchRunOptions) -> anyhow::Result<BatchRunResult> {
     fs::create_dir_all(&args.output_root)
         .with_context(|| format!("create {:?}", args.output_root))?;
+
+    let batch_log_label = args.cluster_mode.batch_log_label();
+    let batch_file_prefix = args.cluster_mode.batch_file_prefix();
 
     let prepared = if args.prepare_reads.is_some()
         || args.prepare_reference.is_some()
@@ -474,15 +563,21 @@ pub fn run_clusterj_batch(args: BatchRunOptions) -> anyhow::Result<BatchRunResul
 
     let started = Instant::now();
     eprintln!(
-        "clusterj-batch: {} genes, {} worker threads",
+        "{batch_log_label}: {} genes, {} worker threads",
         total,
         args.threads.max(1)
     );
 
     if args.threads > 1 && args.max_reads_per_gene == 0 {
         eprintln!(
-            "clusterj-batch: note: --threads > 1 with --max-reads-per-gene=0 can use a lot of memory on large genes; \
+            "{batch_log_label}: note: --threads > 1 with --max-reads-per-gene=0 can use a lot of memory on large genes; \
 consider --max-reads-per-gene and/or --name2-mode coverage"
+        );
+    }
+    if args.cluster_mode == ClusterMode::Cluster && args.batch_size == 0 {
+        eprintln!(
+            "{batch_log_label}: note: overlap mode batching is disabled because --batch-size=0; \
+each gene will run one full two-pass overlap merge"
         );
     }
 
@@ -694,17 +789,27 @@ consider --max-reads-per-gene and/or --name2-mode coverage"
         elapsed
     );
 
-    let summary_path = args.output_root.join("clusterj_batch_summary.txt");
+    let summary_path = args
+        .output_root
+        .join(format!("{batch_file_prefix}_summary.txt"));
     let mut summary =
         fs::File::create(&summary_path).with_context(|| format!("write {summary_path:?}"))?;
     writeln!(summary, "input_root\t{:?}", args.input_root)?;
     writeln!(summary, "gene_list\t{:?}", args.gene_list)?;
     writeln!(summary, "output_root\t{:?}", args.output_root)?;
+    writeln!(summary, "cluster_mode\t{}", args.cluster_mode)?;
     writeln!(summary, "threads\t{}", args.threads)?;
     writeln!(summary, "sw_score\t{}", args.sw_score)?;
     writeln!(summary, "batch_size\t{}", args.batch_size)?;
     writeln!(summary, "batch_rounds\t{}", args.batch_rounds)?;
     writeln!(summary, "name2_mode\t{}", args.name2_mode)?;
+    writeln!(summary, "overlap_cutoff1\t{}", args.overlap_cutoff1)?;
+    writeln!(summary, "overlap_cutoff2\t{}", args.overlap_cutoff2)?;
+    writeln!(
+        summary,
+        "overlap_intron_weight\t{}",
+        args.overlap_intron_weight
+    )?;
     writeln!(summary, "force\t{}", args.force)?;
     writeln!(summary, "progress_every\t{}", args.progress_every)?;
     writeln!(summary, "heartbeat_seconds\t{}", args.heartbeat_seconds)?;
@@ -726,7 +831,9 @@ consider --max-reads-per-gene and/or --name2-mode coverage"
     writeln!(summary, "errors\t{}", errors)?;
     writeln!(summary, "elapsed_seconds\t{}", elapsed.as_secs_f64())?;
 
-    let error_path = args.output_root.join("clusterj_batch_errors.txt");
+    let error_path = args
+        .output_root
+        .join(format!("{batch_file_prefix}_errors.txt"));
     let error_lines = error_lines
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -740,7 +847,9 @@ consider --max-reads-per-gene and/or --name2-mode coverage"
         let _ = fs::remove_file(&error_path);
     }
 
-    let downsample_path = args.output_root.join("clusterj_batch_downsample.tsv");
+    let downsample_path = args
+        .output_root
+        .join(format!("{batch_file_prefix}_downsample.tsv"));
     let mut downsample_records = downsample_records
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -992,6 +1101,7 @@ pub fn run_full_flow(opts: FullFlowOptions) -> anyhow::Result<FullFlowResult> {
 
     let batch = match (&opts.reads, &opts.manifest) {
         (Some(reads), None) => run_clusterj_batch(BatchRunOptions {
+            cluster_mode: opts.cluster_mode,
             prepare_reads: Some(reads.clone()),
             prepare_reference: Some(opts.reference.clone()),
             prepare_prefix: Some(opts.prefix.clone()),
@@ -1005,6 +1115,9 @@ pub fn run_full_flow(opts: FullFlowOptions) -> anyhow::Result<FullFlowResult> {
             batch_size: opts.batch_size,
             batch_rounds: opts.batch_rounds,
             name2_mode: opts.name2_mode,
+            overlap_cutoff1: opts.overlap_cutoff1,
+            overlap_cutoff2: opts.overlap_cutoff2,
+            overlap_intron_weight: opts.overlap_intron_weight,
             force: opts.force,
             progress_every: opts.progress_every,
             heartbeat_seconds: opts.heartbeat_seconds,
@@ -1051,6 +1164,7 @@ pub fn run_full_flow(opts: FullFlowOptions) -> anyhow::Result<FullFlowResult> {
             );
 
             let mut batch = run_clusterj_batch(BatchRunOptions {
+                cluster_mode: opts.cluster_mode,
                 prepare_reads: None,
                 prepare_reference: None,
                 prepare_prefix: None,
@@ -1064,6 +1178,9 @@ pub fn run_full_flow(opts: FullFlowOptions) -> anyhow::Result<FullFlowResult> {
                 batch_size: opts.batch_size,
                 batch_rounds: opts.batch_rounds,
                 name2_mode: opts.name2_mode,
+                overlap_cutoff1: opts.overlap_cutoff1,
+                overlap_cutoff2: opts.overlap_cutoff2,
+                overlap_intron_weight: opts.overlap_intron_weight,
                 force: opts.force,
                 progress_every: opts.progress_every,
                 heartbeat_seconds: opts.heartbeat_seconds,
@@ -1097,7 +1214,7 @@ pub fn run_full_flow(opts: FullFlowOptions) -> anyhow::Result<FullFlowResult> {
     merge_gene_outputs(
         &opts.output_root,
         &genes,
-        "_simple_coveragej.bed",
+        opts.cluster_mode.per_gene_isoform_suffix(),
         &isoform_bed,
     )?;
 
@@ -1112,7 +1229,7 @@ pub fn run_full_flow(opts: FullFlowOptions) -> anyhow::Result<FullFlowResult> {
         &read_to_isoform_tsv,
     )?;
 
-    let downsample_path = opts.output_root.join("clusterj_batch_downsample.tsv");
+    let downsample_path = batch.downsample_path.clone();
     let downsample_scales = read_downsample_scales(&downsample_path)
         .with_context(|| format!("read downsample scales {downsample_path:?}"))?;
     let downsample_scales = if downsample_scales.is_empty() {

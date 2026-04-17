@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.7
+- Add legacy overlap/intersection clustering to `flow` via `--cluster-mode cluster`.
+- Add overlap-mode CLI controls for `cluster`/`flow`: `--batch-size`, `--batch-rounds`, `--sw-score`, cutoff tuning, and `--name2-mode`.
+- Keep second-round `SL` reads as their own track when `score == --sw-score`, matching the original TrackCluster boundary behavior.
+- Release hygiene: add checked-in license texts, pin CI/release builds to Rust `1.90.0`, and keep release tarballs out of the main branch.
+
 ## 0.1.6
 - Performance: speed up `clusterj` 5' truncation collapsing on large loci by indexing junction suffixes (avoids quadratic scans).
 - Bench: add a large single-locus `clusterj` benchmark to track this workload.

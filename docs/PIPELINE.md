@@ -40,7 +40,7 @@ Notes:
 `trackcluster flow` runs the legacy-style end-to-end pipeline in one command:
 
 1. prepare per-gene folders (dedup + gene assignment)
-2. run `clusterj_batch` internally (cluster per gene in parallel)
+2. run per-gene clustering internally (`clusterj` by default, or overlap-mode `cluster` with `--cluster-mode cluster`)
 3. merge per-gene isoforms/unused reads into `<prefix>_isoform.bed` and `<prefix>_unused.bed`
 4. run `count` and `desc` on the merged isoforms
 
@@ -56,9 +56,23 @@ trackcluster flow \
 ```
 
 Defaults:
+- `--cluster-mode clusterj` (junction mode). Use `--cluster-mode cluster` for the legacy overlap/intersection path.
 - `--sw-score 11` (collapse 5' truncations); use `--sw-score -1` to disable.
 - `--name2-mode coverage` (memory-friendly). Use `--name2-mode full` to embed read IDs in the isoform BED (larger outputs); otherwise rely on `*_read_to_isoform.tsv` for counting.
 - `--max-reads-per-gene 50000` (memory-friendly cap; set `0` to disable). Counts/usage tables are scaled when downsampling occurs.
+
+Overlap-mode example:
+
+```bash
+trackcluster flow \
+  --cluster-mode cluster \
+  --reads reads.bed \
+  --reference ref.bed \
+  --output-root out \
+  --prefix sample \
+  --batch-size 500 \
+  --batch-rounds 100
+```
 
 ### Multi-sample pooled command
 
@@ -100,9 +114,9 @@ In manifest mode:
 
 The batch runner also writes:
 
-- `clusterj_batch_summary.txt`
-- `clusterj_batch_errors.txt`
-- `clusterj_batch_downsample.tsv` (only when downsampling occurs)
+- `clusterj_batch_summary.txt` / `cluster_batch_summary.txt`
+- `clusterj_batch_errors.txt` / `cluster_batch_errors.txt`
+- `clusterj_batch_downsample.tsv` / `cluster_batch_downsample.tsv` (only when downsampling occurs)
 
 ## Step 0 - Validate inputs (optional but recommended)
 

@@ -34,6 +34,7 @@ Run the full pipeline as a single command:
 5) when `--manifest` is used: run per-sample `count-multi` outputs from the pooled isoforms
 
 Key flags:
+- `--cluster-mode`: `clusterj` (default) or `cluster` (overlap/intersection mode)
 - `--reads/-s`: reads BED (single-sample mode; mutually exclusive with `--manifest`)
 - `--manifest`: sample manifest TSV for pooled clustering + per-sample usage
 - `--reference/-r`: reference BED
@@ -41,8 +42,9 @@ Key flags:
 - `--prefix`: output prefix (used for merged outputs like `<prefix>_isoform.bed`)
 - `--threads/-t`: number of worker threads (parallel across genes)
 - `--sw-score`: Smith-Waterman cutoff for 5' truncation collapsing (default: `11`; set to `-1` to disable)
-- `--batch-size`, `--batch-rounds`: bounds for very large genes
+- `--batch-size`, `--batch-rounds`: bounds for very large genes; in overlap mode these control iterative pre-merging rounds before the final two-pass overlap clustering
 - `--name2-mode`: `coverage` (default), `full`, or `none` (controls isoform `name2` payload size; mapping TSVs are used for counting)
+- `--overlap-cutoff1`, `--overlap-cutoff2`, `--overlap-intron-weight`: overlap-mode controls used when `--cluster-mode cluster`
 - `--prepare-fraction-read`, `--prepare-fraction-ref`: overlap thresholds for gene assignment
 - `--emit-pooled-reads`: when using `--manifest`, also write `<prefix>_pooled_reads.bed`
 - `--max-reads-per-gene` (default: `50000`; set `0` to disable), `--downsample-gene`, `--downsample-seed`: per-gene downsampling (writes `clusterj_batch_downsample.tsv` and scales counts)
@@ -55,8 +57,8 @@ Outputs (under `--output-root`):
 - `<prefix>_read_to_isoform.tsv`
 - `<prefix>_isoform_count.csv`
 - `<prefix>_desc.txt`, `<prefix>_class4.txt`, `<prefix>_class12.txt`, `<prefix>_fusion.txt`
-- `clusterj_batch_summary.txt`, `clusterj_batch_errors.txt`
-- `clusterj_batch_downsample.tsv` (only when downsampling occurs)
+- `clusterj_batch_summary.txt` / `cluster_batch_summary.txt` and matching `*_errors.txt`
+- `clusterj_batch_downsample.tsv` / `cluster_batch_downsample.tsv` (only when downsampling occurs)
 - `<prefix>_pooled_reads.bed` (manifest mode + `--emit-pooled-reads`)
 - `<prefix>.isoform_usage.long.tsv` (manifest mode only)
 - `<prefix>.isoform_counts.matrix.tsv` (manifest mode only)
@@ -70,6 +72,18 @@ trackcluster flow \
   --output-root out \
   --prefix sample \
   --threads 8
+```
+
+Overlap-mode example:
+```bash
+trackcluster flow \
+  --cluster-mode cluster \
+  --reads reads.bed \
+  --reference ref.bed \
+  --output-root out \
+  --prefix sample \
+  --batch-size 500 \
+  --batch-rounds 100
 ```
 
 Manifest example:
@@ -158,6 +172,15 @@ Overlap-based clustering (slower, more permissive).
 
 Outputs are the same as `clusterj`:
 - isoform BED, mapping TSV, unused BED (derived from the `--out` prefix).
+
+Key flags:
+- `--reads/-s`, `--reference/-r`, `--out/-o`
+- `--threads/-t`: number of worker threads
+- `--batch-size`, `--batch-rounds`: optional overlap batching for large loci (`--batch-size 0` disables intermediate batching)
+- `--sw-score`: Smith-Waterman cutoff for 5' truncation collapsing in pass 2 (default: `11`; set to `-1` to disable)
+- `--cutoff1`, `--cutoff2`: overlap pass 1 / pass 2 cutoffs (default: `0.05`, `0.01`)
+- `--intron-weight`: intron contribution to the combined overlap distance (default: `0.5`)
+- `--name2-mode`: `coverage` (default), `full`, or `none`
 
 Example:
 ```bash

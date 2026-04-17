@@ -95,6 +95,8 @@ mod tests {
         let cli = Cli::try_parse_from([
             "trackcluster",
             "flow",
+            "--cluster-mode",
+            "cluster",
             "-s",
             "reads.bed",
             "-r",
@@ -112,6 +114,7 @@ mod tests {
 
         match cli.command {
             Commands::Flow(args) => {
+                assert_eq!(args.cluster_mode, crate::flow::full::ClusterMode::Cluster);
                 assert_eq!(args.reads, Some(PathBuf::from("reads.bed")));
                 assert_eq!(args.manifest, None);
                 assert_eq!(args.reference, PathBuf::from("ref.bed"));
@@ -121,6 +124,39 @@ mod tests {
                 assert_eq!(args.sw_score, -1);
             }
             _ => panic!("expected flow args"),
+        }
+    }
+
+    #[test]
+    fn parses_cluster_flags() {
+        let cli = Cli::try_parse_from([
+            "trackcluster",
+            "cluster",
+            "-s",
+            "reads.bed",
+            "-r",
+            "ref.bed",
+            "--batch-size",
+            "50",
+            "--batch-rounds",
+            "7",
+            "--name2-mode",
+            "none",
+            "--sw-score",
+            "-1",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Cluster(args) => {
+                assert_eq!(args.reads, PathBuf::from("reads.bed"));
+                assert_eq!(args.reference, PathBuf::from("ref.bed"));
+                assert_eq!(args.batch_size, 50);
+                assert_eq!(args.batch_rounds, 7);
+                assert_eq!(args.name2_mode, crate::cluster::clusterj::Name2Mode::None);
+                assert_eq!(args.sw_score, -1);
+            }
+            _ => panic!("expected cluster args"),
         }
     }
 

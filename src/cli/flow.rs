@@ -2,6 +2,10 @@ use std::path::PathBuf;
 
 #[derive(clap::Args, Debug)]
 pub struct Args {
+    /// Clustering algorithm used inside flow: `clusterj` (junction mode) or `cluster` (overlap mode)
+    #[arg(long = "cluster-mode", default_value_t = crate::flow::full::ClusterMode::Clusterj)]
+    pub cluster_mode: crate::flow::full::ClusterMode,
+
     /// Reads BED (single-sample mode; mutually exclusive with --manifest)
     #[arg(short = 's', long = "reads")]
     pub reads: Option<PathBuf>,
@@ -41,6 +45,18 @@ pub struct Args {
     /// name2 output mode: full read list + coverage, coverage only, or none
     #[arg(long = "name2-mode", default_value_t = crate::cluster::clusterj::Name2Mode::Coverage)]
     pub name2_mode: crate::cluster::clusterj::Name2Mode,
+
+    /// Overlap-mode pass 1 cutoff (`cluster-mode=cluster` only)
+    #[arg(long = "overlap-cutoff1", default_value_t = crate::cluster::cluster_overlap::DEFAULT_CUTOFF1)]
+    pub overlap_cutoff1: f64,
+
+    /// Overlap-mode pass 2 cutoff (`cluster-mode=cluster` only)
+    #[arg(long = "overlap-cutoff2", default_value_t = crate::cluster::cluster_overlap::DEFAULT_CUTOFF2)]
+    pub overlap_cutoff2: f64,
+
+    /// Overlap-mode intron weighting (`cluster-mode=cluster` only)
+    #[arg(long = "overlap-intron-weight", default_value_t = crate::cluster::cluster_overlap::DEFAULT_INTRON_WEIGHT)]
+    pub overlap_intron_weight: f64,
 
     /// Prepare step: minimum fraction of read span overlapping a reference span
     #[arg(long = "prepare-fraction-read", default_value_t = 0.01)]
@@ -93,6 +109,7 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     }
 
     let result = crate::flow::full::run_full_flow(crate::flow::full::FullFlowOptions {
+        cluster_mode: args.cluster_mode,
         reads: args.reads,
         manifest: args.manifest,
         reference: args.reference,
@@ -103,6 +120,9 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         batch_size: args.batch_size,
         batch_rounds: args.batch_rounds,
         name2_mode: args.name2_mode,
+        overlap_cutoff1: args.overlap_cutoff1,
+        overlap_cutoff2: args.overlap_cutoff2,
+        overlap_intron_weight: args.overlap_intron_weight,
         prepare_fraction_read: args.prepare_fraction_read,
         prepare_fraction_ref: args.prepare_fraction_ref,
         emit_pooled_reads: args.emit_pooled_reads,

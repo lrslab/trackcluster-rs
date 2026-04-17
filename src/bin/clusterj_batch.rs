@@ -96,6 +96,7 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     trackcluster_rs::flow::full::run_clusterj_batch(
         trackcluster_rs::flow::full::BatchRunOptions {
+            cluster_mode: trackcluster_rs::flow::full::ClusterMode::Clusterj,
             prepare_reads: args.prepare_reads,
             prepare_reference: args.prepare_reference,
             prepare_prefix: args.prepare_prefix,
@@ -109,6 +110,9 @@ fn main() -> anyhow::Result<()> {
             batch_size: args.batch_size,
             batch_rounds: args.batch_rounds,
             name2_mode: args.name2_mode,
+            overlap_cutoff1: trackcluster_rs::cluster::cluster_overlap::DEFAULT_CUTOFF1,
+            overlap_cutoff2: trackcluster_rs::cluster::cluster_overlap::DEFAULT_CUTOFF2,
+            overlap_intron_weight: trackcluster_rs::cluster::cluster_overlap::DEFAULT_INTRON_WEIGHT,
             force: args.force,
             progress_every: args.progress_every,
             heartbeat_seconds: args.heartbeat_seconds,

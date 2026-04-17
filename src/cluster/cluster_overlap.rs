@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::cluster::result::ClusterResult;
+use crate::cluster::{clusterj::Name2Mode, result::ClusterResult};
 use crate::interval::{cluster_by_span, exonic_overlap_bp, sort_by_coord, StrandMode};
 use crate::model::{Interval, Strand, Transcript};
 
@@ -42,6 +42,36 @@ enum DistanceMode {
 struct PartitionKey {
     chrom: String,
     strand: Strand,
+}
+
+pub const DEFAULT_CUTOFF1: f64 = 0.05;
+pub const DEFAULT_CUTOFF2: f64 = 0.01;
+pub const DEFAULT_INTRON_WEIGHT: f64 = 0.5;
+pub const DEFAULT_SW_SCORE: i64 = 11;
+
+#[derive(Clone, Copy, Debug)]
+pub struct ClusterOptions {
+    pub cutoff1: f64,
+    pub cutoff2: f64,
+    pub intron_weight: f64,
+    pub sw_score: i64,
+    pub name2_mode: Name2Mode,
+    pub batch_size: usize,
+    pub batch_rounds: usize,
+}
+
+impl Default for ClusterOptions {
+    fn default() -> Self {
+        Self {
+            cutoff1: DEFAULT_CUTOFF1,
+            cutoff2: DEFAULT_CUTOFF2,
+            intron_weight: DEFAULT_INTRON_WEIGHT,
+            sw_score: DEFAULT_SW_SCORE,
+            name2_mode: Name2Mode::Full,
+            batch_size: 0,
+            batch_rounds: 100,
+        }
+    }
 }
 
 const NAME2_COL: usize = 0;
@@ -128,6 +158,38 @@ fn merge_subreads(src: usize, dst: usize, tracks: &mut [Track]) {
     tracks[dst].subreads.extend(subs);
 }
 
+fn merge_tracks_by_name(tracks: Vec<Track>) -> Vec<Track> {
+    let mut merged: Vec<Track> = Vec::with_capacity(tracks.len());
+    let mut positions: HashMap<String, usize> = HashMap::new();
+
+    for track in tracks {
+        if let Some(&idx) = positions.get(track.tx.name.as_str()) {
+            merged[idx].subreads.extend(track.subreads);
+            continue;
+        }
+
+        positions.insert(track.tx.name.clone(), merged.len());
+        merged.push(track);
+    }
+
+    merged
+}
+
+fn split_reference_and_read_tracks(tracks: Vec<Track>) -> (Vec<Track>, Vec<Track>) {
+    let mut refs: Vec<Track> = Vec::new();
+    let mut reads: Vec<Track> = Vec::new();
+
+    for track in tracks {
+        if is_isoform_anno(&track.tx) {
+            refs.push(track);
+        } else {
+            reads.push(track);
+        }
+    }
+
+    (refs, reads)
+}
+
 fn readall(tracks: &[Track]) -> HashSet<String> {
     let mut names: HashSet<String> = HashSet::new();
     for track in tracks {
@@ -156,7 +218,7 @@ fn filter_pass(
     mode: DistanceMode,
     cutoff: f64,
     intron_weight: f64,
-    sw_score: u32,
+    sw_score: i64,
 ) -> Vec<Track> {
     let mut tracks = tracks;
     let mut drop: HashSet<usize> = HashSet::new();
@@ -172,7 +234,7 @@ fn filter_pass(
             let lj = tracks[j].exon_len;
             match li.cmp(&lj) {
                 std::cmp::Ordering::Less => {
-                    if mode == DistanceMode::Ratio || tracks[i].tx.score <= sw_score {
+                    if mode == DistanceMode::Ratio || i64::from(tracks[i].tx.score) < sw_score {
                         drop.insert(i);
                         merge_subreads(i, j, &mut tracks);
                     }
@@ -182,7 +244,7 @@ fn filter_pass(
                     merge_subreads(i, j, &mut tracks);
                 }
                 std::cmp::Ordering::Greater => {
-                    if mode == DistanceMode::Ratio || tracks[j].tx.score <= sw_score {
+                    if mode == DistanceMode::Ratio || i64::from(tracks[j].tx.score) < sw_score {
                         drop.insert(j);
                         merge_subreads(j, i, &mut tracks);
                     }
@@ -243,7 +305,14 @@ fn build_read_to_isoform(isoforms: &[Track], ref_names: &HashSet<String>) -> Vec
     pairs
 }
 
-fn update_name2_with_coverage(isoforms: &mut [Track], ref_names: &HashSet<String>) {
+fn update_name2(isoforms: &mut [Track], ref_names: &HashSet<String>, mode: Name2Mode) {
+    if mode == Name2Mode::None {
+        for track in isoforms.iter_mut() {
+            set_extra(&mut track.tx, NAME2_COL, "none".to_owned());
+        }
+        return;
+    }
+
     let values: Vec<String> = {
         let mut occurrence: HashMap<&str, u32> = HashMap::new();
         for track in isoforms.iter() {
@@ -257,22 +326,28 @@ fn update_name2_with_coverage(isoforms: &mut [Track], ref_names: &HashSet<String
         isoforms
             .iter()
             .map(|track| {
-                let mut subreads: Vec<&str> = track.subreads.iter().map(|s| s.as_str()).collect();
-                subreads.sort_unstable();
-                let joined = subreads.join(",");
-
                 let mut coverage = 0.0f64;
-                for name in &subreads {
-                    if ref_names.contains(*name) {
+                for name in &track.subreads {
+                    if ref_names.contains(name) {
                         continue;
                     }
-                    let denom = occurrence.get(*name).copied().unwrap_or(0);
+                    let denom = occurrence.get(name.as_str()).copied().unwrap_or(0);
                     if denom > 0 {
                         coverage += 1.0f64 / denom as f64;
                     }
                 }
 
-                format!("{joined},|{coverage}")
+                match mode {
+                    Name2Mode::Full => {
+                        let mut subreads: Vec<&str> =
+                            track.subreads.iter().map(|s| s.as_str()).collect();
+                        subreads.sort_unstable();
+                        let joined = subreads.join(",");
+                        format!("{joined},|{coverage}")
+                    }
+                    Name2Mode::Coverage => format!("|{coverage}"),
+                    Name2Mode::None => unreachable!("handled above"),
+                }
             })
             .collect()
     };
@@ -293,12 +368,71 @@ struct WorkItem {
     read_indices: Vec<usize>,
 }
 
+fn cluster_once(tracks: Vec<Track>, options: ClusterOptions) -> Vec<Track> {
+    let tracks = merge_tracks_by_name(tracks);
+    let tracks = filter_pass(
+        tracks,
+        DistanceMode::Ratio,
+        options.cutoff1,
+        options.intron_weight,
+        options.sw_score,
+    );
+    filter_pass(
+        tracks,
+        DistanceMode::RatioShort,
+        options.cutoff2,
+        options.intron_weight,
+        options.sw_score,
+    )
+}
+
+fn batch_overlap_merge(tracks: Vec<Track>, options: ClusterOptions) -> Vec<Track> {
+    if options.batch_size == 0 {
+        return cluster_once(tracks, options);
+    }
+
+    let batch_size = options.batch_size.max(1);
+    let max_rounds = options.batch_rounds;
+
+    let tracks = merge_tracks_by_name(tracks);
+    let (mut anchors, mut pending_reads) = split_reference_and_read_tracks(tracks);
+
+    let mut rounds = 0usize;
+    while rounds < max_rounds && pending_reads.len() > batch_size {
+        let remainder = pending_reads.split_off(batch_size);
+        let batch = std::mem::replace(&mut pending_reads, remainder);
+
+        let mut combined: Vec<Track> = Vec::with_capacity(anchors.len() + batch.len());
+        combined.extend(anchors.iter().cloned());
+        combined.extend(batch);
+
+        let merged_batch = cluster_once(combined, options);
+        let (next_anchors, batch_reads) = split_reference_and_read_tracks(merged_batch);
+
+        anchors = merge_tracks_by_name(next_anchors);
+
+        let mut next_pending: Vec<Track> =
+            Vec::with_capacity(batch_reads.len() + pending_reads.len());
+        next_pending.extend(batch_reads);
+        next_pending.extend(std::mem::take(&mut pending_reads));
+        pending_reads = merge_tracks_by_name(next_pending);
+
+        rounds += 1;
+    }
+
+    let mut combined: Vec<Track> = Vec::with_capacity(anchors.len() + pending_reads.len());
+    combined.extend(anchors);
+    combined.extend(pending_reads);
+    cluster_once(combined, options)
+}
+
 fn process_partition(
     references: &[Transcript],
     reads: &[Transcript],
     ref_indices: &[usize],
     read_indices: &[usize],
     ref_names: &HashSet<String>,
+    options: ClusterOptions,
 ) -> PartitionResult {
     let mut records: Vec<Transcript> = Vec::with_capacity(ref_indices.len() + read_indices.len());
     for &idx in ref_indices {
@@ -322,10 +456,9 @@ fn process_partition(
             tracks.push(Track::new(tx));
         }
 
-        let tracks = filter_pass(tracks, DistanceMode::Ratio, 0.05, 0.5, 11);
-        let mut tracks = filter_pass(tracks, DistanceMode::RatioShort, 0.01, 0.5, 11);
+        let mut tracks = batch_overlap_merge(tracks, options);
 
-        update_name2_with_coverage(&mut tracks, ref_names);
+        update_name2(&mut tracks, ref_names, options.name2_mode);
         pairs.extend(build_read_to_isoform(&tracks, ref_names));
         isoforms.extend(tracks.into_iter().map(|track| track.tx));
     }
@@ -337,6 +470,15 @@ pub fn cluster(
     reads: &[Transcript],
     references: Option<&[Transcript]>,
     threads: usize,
+) -> ClusterResult {
+    cluster_with_options(reads, references, threads, ClusterOptions::default())
+}
+
+pub fn cluster_with_options(
+    reads: &[Transcript],
+    references: Option<&[Transcript]>,
+    threads: usize,
+    options: ClusterOptions,
 ) -> ClusterResult {
     let references = match references {
         Some(references) => references,
@@ -400,6 +542,7 @@ pub fn cluster(
                 &item.ref_indices,
                 &item.read_indices,
                 &ref_names,
+                options,
             ));
         }
     } else {
@@ -430,6 +573,7 @@ pub fn cluster(
                         &item.ref_indices,
                         &item.read_indices,
                         &ref_names,
+                        options,
                     );
                     if tx.send((item.index, result)).is_err() {
                         break;
@@ -525,5 +669,223 @@ mod tests {
 
         let result = cluster(&reads, Some(&refs), 1);
         assert!(!result.isoforms.is_empty());
+    }
+
+    #[test]
+    fn name2_mode_coverage_writes_only_coverage_but_keeps_mapping() {
+        let refs = vec![make_tx(
+            "ref",
+            Strand::Plus,
+            &[(100, 110), (120, 130), (140, 150)],
+            "isoform_anno",
+            100,
+        )];
+        let reads = vec![make_tx(
+            "read1",
+            Strand::Plus,
+            &[(100, 110), (120, 130), (140, 150)],
+            "nanopore_read",
+            0,
+        )];
+
+        let result = cluster_with_options(
+            &reads,
+            Some(&refs),
+            1,
+            ClusterOptions {
+                name2_mode: Name2Mode::Coverage,
+                ..ClusterOptions::default()
+            },
+        );
+
+        assert_eq!(result.read_to_isoform.len(), 1);
+        let ref_isoform = result
+            .isoforms
+            .iter()
+            .find(|tx| tx.name == "ref")
+            .expect("reference isoform retained");
+        let name2 = ref_isoform
+            .extra_fields
+            .first()
+            .expect("name2 payload present");
+        assert!(name2.starts_with('|'));
+        assert!(!name2.contains("read1"));
+    }
+
+    #[test]
+    fn sw_score_minus_one_disables_ratio_short_truncation_merge() {
+        use std::collections::HashSet;
+
+        let refs = vec![make_tx(
+            "ref",
+            Strand::Plus,
+            &[(100, 110), (120, 130), (140, 150)],
+            "isoform_anno",
+            100,
+        )];
+        let reads = vec![
+            make_tx(
+                "read_long",
+                Strand::Plus,
+                &[(100, 110), (120, 130), (140, 150)],
+                "nanopore_read",
+                20,
+            ),
+            make_tx(
+                "read_short",
+                Strand::Plus,
+                &[(120, 130), (140, 150)],
+                "nanopore_read",
+                0,
+            ),
+        ];
+
+        let merged = cluster_with_options(&reads, Some(&refs), 1, ClusterOptions::default());
+        let no_merge = cluster_with_options(
+            &reads,
+            Some(&refs),
+            1,
+            ClusterOptions {
+                sw_score: -1,
+                ..ClusterOptions::default()
+            },
+        );
+
+        let merged_reads: HashSet<&str> = merged
+            .read_to_isoform
+            .iter()
+            .map(|(read_id, _)| read_id.as_str())
+            .collect();
+        let no_merge_reads: HashSet<&str> = no_merge
+            .read_to_isoform
+            .iter()
+            .map(|(read_id, _)| read_id.as_str())
+            .collect();
+        assert_eq!(merged_reads.len(), 2);
+        assert_eq!(no_merge_reads.len(), 2);
+
+        let no_merge_targets: HashSet<&str> = no_merge
+            .read_to_isoform
+            .iter()
+            .map(|(_, isoform_id)| isoform_id.as_str())
+            .collect();
+
+        assert_eq!(no_merge_targets.len(), 2);
+
+        let merged_short_targets: HashSet<&str> = merged
+            .read_to_isoform
+            .iter()
+            .filter(|(read_id, _)| read_id == "read_short")
+            .map(|(_, isoform_id)| isoform_id.as_str())
+            .collect();
+        let no_merge_short_targets: HashSet<&str> = no_merge
+            .read_to_isoform
+            .iter()
+            .filter(|(read_id, _)| read_id == "read_short")
+            .map(|(_, isoform_id)| isoform_id.as_str())
+            .collect();
+
+        assert_eq!(merged_short_targets.len(), 2);
+        assert!(merged_short_targets.contains("read_long"));
+        assert!(merged_short_targets.contains("ref"));
+        assert_eq!(no_merge_short_targets.len(), 1);
+        assert!(no_merge_short_targets.contains("read_short"));
+    }
+
+    #[test]
+    fn sw_score_equal_to_cutoff_keeps_sl_read_as_its_own_track() {
+        use std::collections::HashSet;
+
+        let refs = vec![make_tx(
+            "ref",
+            Strand::Plus,
+            &[(100, 110), (120, 130), (140, 150)],
+            "isoform_anno",
+            100,
+        )];
+        let reads = vec![
+            make_tx(
+                "read_long",
+                Strand::Plus,
+                &[(100, 110), (120, 130), (140, 150)],
+                "nanopore_read",
+                20,
+            ),
+            make_tx(
+                "read_sl",
+                Strand::Plus,
+                &[(120, 130), (140, 150)],
+                "nanopore_read",
+                DEFAULT_SW_SCORE as u32,
+            ),
+        ];
+
+        let result = cluster_with_options(&reads, Some(&refs), 1, ClusterOptions::default());
+
+        let sl_targets: HashSet<&str> = result
+            .read_to_isoform
+            .iter()
+            .filter(|(read_id, _)| read_id == "read_sl")
+            .map(|(_, isoform_id)| isoform_id.as_str())
+            .collect();
+
+        assert_eq!(sl_targets.len(), 1);
+        assert!(sl_targets.contains("read_sl"));
+    }
+
+    #[test]
+    fn overlap_batching_matches_unbatched_on_simple_locus() {
+        let refs = vec![make_tx(
+            "ref",
+            Strand::Plus,
+            &[(100, 110), (120, 130), (140, 150)],
+            "isoform_anno",
+            100,
+        )];
+        let reads = vec![
+            make_tx(
+                "read1",
+                Strand::Plus,
+                &[(100, 110), (120, 130), (140, 150)],
+                "nanopore_read",
+                0,
+            ),
+            make_tx(
+                "read2",
+                Strand::Plus,
+                &[(100, 110), (120, 130), (140, 150)],
+                "nanopore_read",
+                0,
+            ),
+            make_tx(
+                "read3",
+                Strand::Plus,
+                &[(120, 130), (140, 150)],
+                "nanopore_read",
+                0,
+            ),
+        ];
+
+        let single_pass = cluster_with_options(&reads, Some(&refs), 1, ClusterOptions::default());
+        let batched = cluster_with_options(
+            &reads,
+            Some(&refs),
+            1,
+            ClusterOptions {
+                batch_size: 1,
+                batch_rounds: 10,
+                ..ClusterOptions::default()
+            },
+        );
+
+        assert_eq!(single_pass.read_to_isoform, batched.read_to_isoform);
+
+        let single_names: Vec<&str> = single_pass
+            .isoforms
+            .iter()
+            .map(|tx| tx.name.as_str())
+            .collect();
+        let batch_names: Vec<&str> = batched.isoforms.iter().map(|tx| tx.name.as_str()).collect();
+        assert_eq!(single_names, batch_names);
     }
 }
