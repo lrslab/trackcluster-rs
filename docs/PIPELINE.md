@@ -4,9 +4,9 @@ This document walks through the **end-to-end** Rust workflow, step by step, with
 
 You can run the whole pipeline in three ways:
 
-1. **One-command mode (recommended)**: run `trackcluster flow` (does `preparedir` + `clusterj_batch` + merge + `count` + `desc`).
+1. **One-command mode (recommended)**: run `trackcluster flow` (does `preparedir` + per-gene clustering + merge + `count` + `desc`).
 2. **Single-file mode**: run `trackcluster clusterj|cluster` directly on `reads.bed` + `ref.bed` (good for small inputs).
-3. **Manual gene-batched mode**: run `preparedir` -> `clusterj_batch` -> combine outputs -> `count` + `desc`.
+3. **Manual gene-batched mode**: run `preparedir` -> `clusterj_batch` -> combine outputs -> `count` + `desc` (junction-mode batch runner).
 
 For multi-sample/condition studies, `flow` and `count-multi` support pooled isoform discovery with per-sample usage outputs.
 
@@ -70,9 +70,15 @@ trackcluster flow \
   --reference ref.bed \
   --output-root out \
   --prefix sample \
+  --sw-score 11 \
   --batch-size 500 \
   --batch-rounds 100
 ```
+
+Notes for overlap mode:
+- `flow` writes per-gene overlap isoforms as `*_simple_coverage.bed` under the gene folders, then merges them into `<prefix>_isoform.bed`.
+- Run summaries switch to `cluster_batch_summary.txt`, `cluster_batch_errors.txt`, and `cluster_batch_downsample.tsv`.
+- In the second overlap pass, a short read is collapsed only when `score < --sw-score`; `score == --sw-score` stays as its own track.
 
 ### Multi-sample pooled command
 
@@ -129,7 +135,9 @@ trackcluster validate-bed --input ref.bed
 
 If parsing fails, fix the BED12/bigGenePred formatting first (see `docs/FORMATS.md`).
 
-## Option B - Manual gene-batched mode
+## Option B - Manual gene-batched mode (`clusterj_batch`, junction mode)
+
+This manual batched workflow is for `clusterj`. There is currently no separate `cluster_batch` binary; use `trackcluster flow --cluster-mode cluster` when you want the overlap-mode batched path.
 
 ### Step 1 - Prepare per-gene folders (`preparedir`)
 
@@ -266,6 +274,7 @@ If your dataset is small, you can cluster without the gene-batched folder struct
 
 ```bash
 trackcluster clusterj --reads reads.bed --reference ref.bed --out isoform.bed --threads 8
+trackcluster cluster --reads reads.bed --reference ref.bed --out isoform.bed --threads 8
 trackcluster count --reads reads.bed --reference ref.bed --isoform isoform.bed --read-to-isoform isoform.read_to_isoform.tsv --out isoform_count.csv
 ```
 
@@ -274,6 +283,7 @@ If you also want `desc`, make sure isoforms have gene names first:
 ```bash
 trackcluster addgene --reads reads.bed --reference ref.bed --out reads_gene.bed
 trackcluster clusterj --reads reads_gene.bed --reference ref.bed --out isoform.bed
+trackcluster cluster --reads reads_gene.bed --reference ref.bed --out isoform.bed
 trackcluster desc --isoform isoform.bed --reference ref.bed --out sample
 ```
 

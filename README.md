@@ -23,7 +23,7 @@ Implemented subcommands:
 - `validate-bed`: basic BED12/bigGenePred input validation
 
 Extra binary:
-- `clusterj_batch`: run `clusterj` per gene folder in parallel (can also run `preparedir` first)
+- `clusterj_batch`: run `clusterj` per gene folder in parallel (manual junction-mode batched runner; overlap-mode batching is exposed through `trackcluster flow --cluster-mode cluster`)
 
 ## Install
 
@@ -57,7 +57,7 @@ clusterj_batch --help
 
 ## Quickstart (tiny fixtures)
 ```bash
-# One-line flow: prepare per-gene inputs, run clusterj batch, merge outputs, count, and desc
+# One-line flow: prepare per-gene inputs, run per-gene clustering, merge outputs, count, and desc
 trackcluster flow -s tests/fixtures/reads.bed -r tests/fixtures/ref.bed -o out --prefix sample
 # Tip: disable the default per-gene downsampling cap with `--max-reads-per-gene 0` (uses more memory).
 
@@ -66,6 +66,12 @@ trackcluster validate-bed -i tests/fixtures/minimal.bed
 
 # Junction-mode clustering (writes isoform.bed + mapping + unused)
 trackcluster clusterj -s tests/fixtures/reads.bed -r tests/fixtures/ref.bed -o isoform.bed
+
+# Overlap-mode clustering (legacy-style two-round exon/intron overlap mode)
+trackcluster cluster -s tests/fixtures/reads.bed -r tests/fixtures/ref.bed -o isoform.bed
+
+# Full flow in overlap mode
+trackcluster flow --cluster-mode cluster -s tests/fixtures/reads.bed -r tests/fixtures/ref.bed -o out --prefix sample
 
 # Count isoforms
 trackcluster count -s tests/fixtures/reads.bed -r tests/fixtures/ref.bed -i isoform.bed --read-to-isoform isoform.read_to_isoform.tsv -o isoform_count.csv
@@ -98,6 +104,8 @@ trackcluster count-multi --manifest samples.tsv -r tests/fixtures/ref.bed -i out
 ```
 
 Tip: with default `--name2-mode coverage` (or `none`), use `--read-to-isoform out/pooled_read_to_isoform.tsv` (or keep the TSV next to the isoform BED for auto-discovery).
+
+For overlap-mode pooled clustering, add `--cluster-mode cluster` to the `flow` command above.
 
 `count-multi` writes:
 - `out/pooled.isoform_usage.long.tsv`

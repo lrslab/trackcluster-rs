@@ -28,7 +28,7 @@ trackcluster validate-bed --input reads.bed
 ### `trackcluster flow`
 Run the full pipeline as a single command:
 1) `preparedir` (dedup + gene assignment into per-gene folders)
-2) `clusterj_batch` (cluster per gene in parallel)
+2) internal per-gene clustering (`clusterj` by default, or overlap-mode `cluster` with `--cluster-mode cluster`)
 3) merge per-gene outputs into `<prefix>_isoform.bed` and `<prefix>_unused.bed`
 4) `count` and `desc` on the merged isoforms
 5) when `--manifest` is used: run per-sample `count-multi` outputs from the pooled isoforms
@@ -41,13 +41,13 @@ Key flags:
 - `--output-root/-o`: output directory (created if missing)
 - `--prefix`: output prefix (used for merged outputs like `<prefix>_isoform.bed`)
 - `--threads/-t`: number of worker threads (parallel across genes)
-- `--sw-score`: Smith-Waterman cutoff for 5' truncation collapsing (default: `11`; set to `-1` to disable)
+- `--sw-score`: Smith-Waterman cutoff for 5' truncation collapsing (default: `11`; set to `-1` to disable). In overlap mode, the second pass only collapses a short read when `score < --sw-score`; a read at the exact cutoff remains its own track.
 - `--batch-size`, `--batch-rounds`: bounds for very large genes; in overlap mode these control iterative pre-merging rounds before the final two-pass overlap clustering
 - `--name2-mode`: `coverage` (default), `full`, or `none` (controls isoform `name2` payload size; mapping TSVs are used for counting)
 - `--overlap-cutoff1`, `--overlap-cutoff2`, `--overlap-intron-weight`: overlap-mode controls used when `--cluster-mode cluster`
 - `--prepare-fraction-read`, `--prepare-fraction-ref`: overlap thresholds for gene assignment
 - `--emit-pooled-reads`: when using `--manifest`, also write `<prefix>_pooled_reads.bed`
-- `--max-reads-per-gene` (default: `50000`; set `0` to disable), `--downsample-gene`, `--downsample-seed`: per-gene downsampling (writes `clusterj_batch_downsample.tsv` and scales counts)
+- `--max-reads-per-gene` (default: `50000`; set `0` to disable), `--downsample-gene`, `--downsample-seed`: per-gene downsampling (writes `clusterj_batch_downsample.tsv` or `cluster_batch_downsample.tsv` and scales counts)
 - `--force`: overwrite existing per-gene outputs (otherwise genes with existing outputs are skipped)
 - `--heartbeat-seconds`, `--heartbeat-top`: periodic status line (and which gene(s) are currently in-flight when progress is not moving)
 
@@ -82,6 +82,7 @@ trackcluster flow \
   --reference ref.bed \
   --output-root out \
   --prefix sample \
+  --sw-score 11 \
   --batch-size 500 \
   --batch-rounds 100
 ```
@@ -107,6 +108,7 @@ Split one reads BED + one reference BED into per-gene folders.
 
 When to use:
 - For manual gene-batched mode before running `clusterj_batch`.
+- Overlap-mode batching is not exposed as a separate `cluster_batch` binary; use `trackcluster flow --cluster-mode cluster` for that path.
 
 Key flags:
 - `--reads/-s`: reads BED
@@ -168,7 +170,7 @@ trackcluster clusterj \
 ```
 
 ### `trackcluster cluster`
-Overlap-based clustering (slower, more permissive).
+Overlap-based clustering (slower, more permissive; intended to mimic the legacy two-round TrackCluster overlap/intersection path).
 
 Outputs are the same as `clusterj`:
 - isoform BED, mapping TSV, unused BED (derived from the `--out` prefix).
@@ -177,10 +179,15 @@ Key flags:
 - `--reads/-s`, `--reference/-r`, `--out/-o`
 - `--threads/-t`: number of worker threads
 - `--batch-size`, `--batch-rounds`: optional overlap batching for large loci (`--batch-size 0` disables intermediate batching)
-- `--sw-score`: Smith-Waterman cutoff for 5' truncation collapsing in pass 2 (default: `11`; set to `-1` to disable)
+- `--sw-score`: Smith-Waterman cutoff for 5' truncation collapsing in pass 2 (default: `11`; set to `-1` to disable). In pass 2, a short read is only collapsed when `score < --sw-score`; `score == --sw-score` remains a separate track.
 - `--cutoff1`, `--cutoff2`: overlap pass 1 / pass 2 cutoffs (default: `0.05`, `0.01`)
 - `--intron-weight`: intron contribution to the combined overlap distance (default: `0.5`)
 - `--name2-mode`: `coverage` (default), `full`, or `none`
+
+Behavior summary:
+- Pass 1 uses the `ratio` distance (`1 - overlap / union_len`) with `--cutoff1`.
+- Pass 2 uses the `ratio_short` distance (`1 - overlap / min_len`) with `--cutoff2`.
+- Exon and intron distances are combined with `--intron-weight`.
 
 Example:
 ```bash
@@ -267,6 +274,10 @@ trackcluster desc \
 
 ## `clusterj_batch`
 Run `clusterj` per gene folder in parallel (optionally run `preparedir` first).
+
+Scope:
+- This binary is junction-mode only.
+- For overlap-mode batched clustering, use `trackcluster flow --cluster-mode cluster` or `trackcluster cluster` directly on a single reads/reference pair.
 
 Useful flags:
 - `--sw-score`: Smith-Waterman cutoff for 5' truncation collapsing (default: `11`; set to `-1` to disable)
