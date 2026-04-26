@@ -386,6 +386,10 @@ fn discover_genes(root: &Path) -> anyhow::Result<Vec<String>> {
     Ok(genes)
 }
 
+fn per_gene_outputs_complete(out_isoforms: &Path, out_unused: &Path, out_mapping: &Path) -> bool {
+    out_isoforms.exists() && out_unused.exists() && out_mapping.exists()
+}
+
 fn process_gene(gene: &str, args: &BatchRunOptions) -> anyhow::Result<ProcessGeneResult> {
     let gene_dir = args.input_root.join(gene);
     let reads = gene_dir.join(format!("{gene}_nano.bed"));
@@ -417,7 +421,7 @@ fn process_gene(gene: &str, args: &BatchRunOptions) -> anyhow::Result<ProcessGen
     let out_unused = out_dir.join(format!("{gene}_unused.bed"));
     let out_mapping = out_dir.join(format!("{gene}_read_to_isoform.tsv"));
 
-    if !args.force && out_isoforms.exists() {
+    if !args.force && per_gene_outputs_complete(&out_isoforms, &out_unused, &out_mapping) {
         return Ok(ProcessGeneResult {
             outcome: GeneOutcome::Skipped,
             downsample: None,

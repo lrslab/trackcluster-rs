@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.8
+- Fix overlap `cluster` reference handling so plain BED12 references are protected by input source instead of requiring `ttype=isoform_anno`.
+- Report overlap-mode reads with no matching reference chromosome, strand, or locus in `unused.bed` instead of silently dropping them.
+- Speed up large overlap loci with sparse exon-overlap candidate generation while preserving exact all-pairs behavior for small or high-cutoff cases.
+- Fix `flow --cluster-mode cluster` reruns so per-gene outputs are regenerated unless isoform BED, unused BED, and read-to-isoform TSV are all present.
+- Add overlap-mode goldens, unused-read regressions, deterministic threading coverage, and batch-size benchmarks.
+
 ## 0.1.7
 - Add legacy overlap/intersection clustering to `flow` via `--cluster-mode cluster`.
 - Add overlap-mode CLI controls for `cluster`/`flow`: `--batch-size`, `--batch-rounds`, `--sw-score`, cutoff tuning, and `--name2-mode`.

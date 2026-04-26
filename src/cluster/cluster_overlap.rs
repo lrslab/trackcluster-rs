@@ -1,12 +1,63 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::cluster::{clusterj::Name2Mode, result::ClusterResult};
-use crate::interval::{cluster_by_span, exonic_overlap_bp, sort_by_coord, StrandMode};
+use crate::interval::{cluster_by_span, exonic_overlap_bp, StrandMode};
 use crate::model::{Interval, Strand, Transcript};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum TrackSource {
+    Reference,
+    Read,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct TrackPair {
+    left: usize,
+    right: usize,
+}
+
+impl TrackPair {
+    fn new(a: usize, b: usize) -> Self {
+        if a <= b {
+            Self { left: a, right: b }
+        } else {
+            Self { left: b, right: a }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PairOverlap {
+    pair: TrackPair,
+    exon_overlap: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ExonRecord {
+    track_idx: usize,
+    interval: Interval,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FilterParams {
+    mode: DistanceMode,
+    cutoff: f64,
+    intron_weight: f64,
+    sw_score: i64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PairDistance {
+    left: usize,
+    right: usize,
+    exon_overlap: u32,
+    intron_overlap: u32,
+}
 
 #[derive(Clone, Debug)]
 struct Track {
     tx: Transcript,
+    source: TrackSource,
     subreads: HashSet<String>,
     exon_len: u32,
     introns: Vec<Interval>,
@@ -14,9 +65,9 @@ struct Track {
 }
 
 impl Track {
-    fn new(tx: Transcript) -> Self {
+    fn new(tx: Transcript, source: TrackSource) -> Self {
         let mut subreads: HashSet<String> = HashSet::new();
-        if !is_isoform_anno(&tx) {
+        if source == TrackSource::Read {
             subreads.insert(tx.name.clone());
         }
         let exon_len = tx.exons.iter().map(|exon| exon.len()).sum();
@@ -24,11 +75,20 @@ impl Track {
         let intron_len = introns.iter().map(|intron| intron.len()).sum();
         Self {
             tx,
+            source,
             subreads,
             exon_len,
             introns,
             intron_len,
         }
+    }
+
+    fn is_reference(&self) -> bool {
+        self.source == TrackSource::Reference
+    }
+
+    fn is_read(&self) -> bool {
+        self.source == TrackSource::Read
     }
 }
 
@@ -48,6 +108,7 @@ pub const DEFAULT_CUTOFF1: f64 = 0.05;
 pub const DEFAULT_CUTOFF2: f64 = 0.01;
 pub const DEFAULT_INTRON_WEIGHT: f64 = 0.5;
 pub const DEFAULT_SW_SCORE: i64 = 11;
+const SPARSE_PAIR_THRESHOLD: usize = 512;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ClusterOptions {
@@ -75,21 +136,12 @@ impl Default for ClusterOptions {
 }
 
 const NAME2_COL: usize = 0;
-const TTYPE_COL: usize = 4;
 
 fn set_extra(tx: &mut Transcript, idx: usize, value: String) {
     if tx.extra_fields.len() <= idx {
         tx.extra_fields.resize(idx + 1, "none".to_owned());
     }
     tx.extra_fields[idx] = value;
-}
-
-fn ttype(tx: &Transcript) -> Option<&str> {
-    tx.extra_fields.get(TTYPE_COL).map(|value| value.as_str())
-}
-
-fn is_isoform_anno(tx: &Transcript) -> bool {
-    matches!(ttype(tx), Some("isoform_anno"))
 }
 
 fn overlap_bp(a: &[Interval], b: &[Interval]) -> u32 {
@@ -122,8 +174,15 @@ fn overlap_bp(a: &[Interval], b: &[Interval]) -> u32 {
     total
 }
 
-fn combined_distance(a: &Track, b: &Track, mode: DistanceMode, intron_weight: f64) -> f64 {
-    let exon_overlap = exonic_overlap_bp(&a.tx, &b.tx) as f64;
+fn combined_distance_from_overlaps(
+    a: &Track,
+    b: &Track,
+    mode: DistanceMode,
+    intron_weight: f64,
+    exon_overlap: u32,
+    intron_overlap: u32,
+) -> f64 {
+    let exon_overlap = exon_overlap as f64;
     let a_exon_len = a.exon_len as f64;
     let b_exon_len = b.exon_len as f64;
 
@@ -133,7 +192,7 @@ fn combined_distance(a: &Track, b: &Track, mode: DistanceMode, intron_weight: f6
     };
     let exon_dist = 1.0 - (exon_overlap / exon_denom);
 
-    let intron_overlap = overlap_bp(&a.introns, &b.introns) as f64;
+    let intron_overlap = intron_overlap as f64;
     let a_intron_len = a.intron_len as f64;
     let b_intron_len = b.intron_len as f64;
 
@@ -150,9 +209,105 @@ fn combined_distance(a: &Track, b: &Track, mode: DistanceMode, intron_weight: f6
     (exon_dist + intron_weight * intron_dist) / (1.0 + intron_weight)
 }
 
+fn exon_record_cmp(left: &ExonRecord, right: &ExonRecord, tracks: &[Track]) -> std::cmp::Ordering {
+    let left_tx = &tracks[left.track_idx].tx;
+    let right_tx = &tracks[right.track_idx].tx;
+
+    left_tx
+        .chrom
+        .cmp(&right_tx.chrom)
+        .then_with(|| strand_rank(left_tx.strand).cmp(&strand_rank(right_tx.strand)))
+        .then_with(|| left.interval.start.cmp(&right.interval.start))
+        .then_with(|| left.interval.end.cmp(&right.interval.end))
+        .then_with(|| left.track_idx.cmp(&right.track_idx))
+}
+
+fn same_exon_partition(left: &ExonRecord, right: &ExonRecord, tracks: &[Track]) -> bool {
+    let left_tx = &tracks[left.track_idx].tx;
+    let right_tx = &tracks[right.track_idx].tx;
+    left_tx.chrom == right_tx.chrom && left_tx.strand == right_tx.strand
+}
+
+fn exon_overlap_pair_candidates(tracks: &[Track]) -> Vec<PairOverlap> {
+    let mut exons: Vec<ExonRecord> = Vec::new();
+    for (track_idx, track) in tracks.iter().enumerate() {
+        for &interval in &track.tx.exons {
+            if !interval.is_empty() {
+                exons.push(ExonRecord {
+                    track_idx,
+                    interval,
+                });
+            }
+        }
+    }
+
+    exons.sort_by(|left, right| exon_record_cmp(left, right, tracks));
+
+    let mut active: Vec<usize> = Vec::new();
+    let mut overlaps: Vec<PairOverlap> = Vec::new();
+
+    for current_idx in 0..exons.len() {
+        let current = exons[current_idx];
+        active.retain(|&active_idx| {
+            let previous = exons[active_idx];
+            same_exon_partition(&previous, &current, tracks)
+                && previous.interval.end > current.interval.start
+        });
+
+        for &active_idx in &active {
+            let previous = exons[active_idx];
+            if previous.track_idx == current.track_idx {
+                continue;
+            }
+
+            let overlap = previous.interval.overlap_len(current.interval);
+            if overlap == 0 {
+                continue;
+            }
+
+            let pair = TrackPair::new(previous.track_idx, current.track_idx);
+            overlaps.push(PairOverlap {
+                pair,
+                exon_overlap: overlap,
+            });
+        }
+
+        active.push(current_idx);
+    }
+
+    overlaps.sort_by(|left, right| left.pair.cmp(&right.pair));
+
+    let mut pairs: Vec<PairOverlap> = Vec::with_capacity(overlaps.len());
+    for overlap in overlaps {
+        if let Some(last) = pairs.last_mut() {
+            if last.pair == overlap.pair {
+                last.exon_overlap += overlap.exon_overlap;
+                continue;
+            }
+        }
+        pairs.push(overlap);
+    }
+
+    pairs
+}
+
+fn can_skip_no_exon_overlap(cutoff: f64, intron_weight: f64) -> bool {
+    if !cutoff.is_finite() || !intron_weight.is_finite() || intron_weight < 0.0 {
+        return false;
+    }
+
+    cutoff <= 1.0 / (1.0 + intron_weight)
+}
+
+fn should_use_sparse_pair_candidates(tracks_len: usize, cutoff: f64, intron_weight: f64) -> bool {
+    tracks_len >= SPARSE_PAIR_THRESHOLD && can_skip_no_exon_overlap(cutoff, intron_weight)
+}
+
 fn merge_subreads(src: usize, dst: usize, tracks: &mut [Track]) {
-    let name = tracks[src].tx.name.clone();
-    tracks[dst].subreads.insert(name);
+    if tracks[src].is_read() {
+        let name = tracks[src].tx.name.clone();
+        tracks[dst].subreads.insert(name);
+    }
 
     let subs: Vec<String> = tracks[src].subreads.iter().cloned().collect();
     tracks[dst].subreads.extend(subs);
@@ -160,15 +315,16 @@ fn merge_subreads(src: usize, dst: usize, tracks: &mut [Track]) {
 
 fn merge_tracks_by_name(tracks: Vec<Track>) -> Vec<Track> {
     let mut merged: Vec<Track> = Vec::with_capacity(tracks.len());
-    let mut positions: HashMap<String, usize> = HashMap::new();
+    let mut positions: HashMap<(TrackSource, String), usize> = HashMap::new();
 
     for track in tracks {
-        if let Some(&idx) = positions.get(track.tx.name.as_str()) {
+        let key = (track.source, track.tx.name.clone());
+        if let Some(&idx) = positions.get(&key) {
             merged[idx].subreads.extend(track.subreads);
             continue;
         }
 
-        positions.insert(track.tx.name.clone(), merged.len());
+        positions.insert(key, merged.len());
         merged.push(track);
     }
 
@@ -180,7 +336,7 @@ fn split_reference_and_read_tracks(tracks: Vec<Track>) -> (Vec<Track>, Vec<Track
     let mut reads: Vec<Track> = Vec::new();
 
     for track in tracks {
-        if is_isoform_anno(&track.tx) {
+        if track.is_reference() {
             refs.push(track);
         } else {
             reads.push(track);
@@ -213,6 +369,68 @@ fn readall_subset(tracks: &[Track], keep: &HashSet<usize>) -> HashSet<String> {
     names
 }
 
+fn should_drop_read(track: &Track, mode: DistanceMode, sw_score: i64) -> bool {
+    mode == DistanceMode::Ratio || i64::from(track.tx.score) < sw_score
+}
+
+fn filter_pair(
+    tracks: &mut [Track],
+    drop: &mut HashSet<usize>,
+    pair: PairDistance,
+    params: FilterParams,
+) {
+    let i = pair.left;
+    let j = pair.right;
+    let distance = combined_distance_from_overlaps(
+        &tracks[i],
+        &tracks[j],
+        params.mode,
+        params.intron_weight,
+        pair.exon_overlap,
+        pair.intron_overlap,
+    );
+    if distance >= params.cutoff {
+        return;
+    }
+
+    let li = tracks[i].exon_len;
+    let lj = tracks[j].exon_len;
+
+    match (tracks[i].is_reference(), tracks[j].is_reference()) {
+        (true, true) => {}
+        (true, false) => {
+            if should_drop_read(&tracks[j], params.mode, params.sw_score) {
+                drop.insert(j);
+                merge_subreads(j, i, tracks);
+            }
+        }
+        (false, true) => {
+            if should_drop_read(&tracks[i], params.mode, params.sw_score) {
+                drop.insert(i);
+                merge_subreads(i, j, tracks);
+            }
+        }
+        (false, false) => match li.cmp(&lj) {
+            std::cmp::Ordering::Less => {
+                if should_drop_read(&tracks[i], params.mode, params.sw_score) {
+                    drop.insert(i);
+                    merge_subreads(i, j, tracks);
+                }
+            }
+            std::cmp::Ordering::Equal => {
+                drop.insert(i);
+                merge_subreads(i, j, tracks);
+            }
+            std::cmp::Ordering::Greater => {
+                if should_drop_read(&tracks[j], params.mode, params.sw_score) {
+                    drop.insert(j);
+                    merge_subreads(j, i, tracks);
+                }
+            }
+        },
+    }
+}
+
 fn filter_pass(
     tracks: Vec<Track>,
     mode: DistanceMode,
@@ -222,33 +440,46 @@ fn filter_pass(
 ) -> Vec<Track> {
     let mut tracks = tracks;
     let mut drop: HashSet<usize> = HashSet::new();
+    let params = FilterParams {
+        mode,
+        cutoff,
+        intron_weight,
+        sw_score,
+    };
 
-    for i in 0..tracks.len() {
-        for j in (i + 1)..tracks.len() {
-            let distance = combined_distance(&tracks[i], &tracks[j], mode, intron_weight);
-            if distance >= cutoff {
-                continue;
-            }
-
-            let li = tracks[i].exon_len;
-            let lj = tracks[j].exon_len;
-            match li.cmp(&lj) {
-                std::cmp::Ordering::Less => {
-                    if mode == DistanceMode::Ratio || i64::from(tracks[i].tx.score) < sw_score {
-                        drop.insert(i);
-                        merge_subreads(i, j, &mut tracks);
-                    }
-                }
-                std::cmp::Ordering::Equal => {
-                    drop.insert(i);
-                    merge_subreads(i, j, &mut tracks);
-                }
-                std::cmp::Ordering::Greater => {
-                    if mode == DistanceMode::Ratio || i64::from(tracks[j].tx.score) < sw_score {
-                        drop.insert(j);
-                        merge_subreads(j, i, &mut tracks);
-                    }
-                }
+    if should_use_sparse_pair_candidates(tracks.len(), cutoff, intron_weight) {
+        for candidate in exon_overlap_pair_candidates(&tracks) {
+            let i = candidate.pair.left;
+            let j = candidate.pair.right;
+            let intron_overlap = overlap_bp(&tracks[i].introns, &tracks[j].introns);
+            filter_pair(
+                &mut tracks,
+                &mut drop,
+                PairDistance {
+                    left: i,
+                    right: j,
+                    exon_overlap: candidate.exon_overlap,
+                    intron_overlap,
+                },
+                params,
+            );
+        }
+    } else {
+        for i in 0..tracks.len() {
+            for j in (i + 1)..tracks.len() {
+                let exon_overlap = exonic_overlap_bp(&tracks[i].tx, &tracks[j].tx);
+                let intron_overlap = overlap_bp(&tracks[i].introns, &tracks[j].introns);
+                filter_pair(
+                    &mut tracks,
+                    &mut drop,
+                    PairDistance {
+                        left: i,
+                        right: j,
+                        exon_overlap,
+                        intron_overlap,
+                    },
+                    params,
+                );
             }
         }
     }
@@ -259,7 +490,7 @@ fn filter_pass(
     }
 
     for (idx, track) in tracks.iter().enumerate() {
-        if is_isoform_anno(&track.tx) {
+        if track.is_reference() {
             keep.insert(idx);
         }
     }
@@ -274,7 +505,9 @@ fn filter_pass(
     if !missed.is_empty() {
         let mut pos: HashMap<String, usize> = HashMap::new();
         for (idx, track) in tracks.iter().enumerate() {
-            pos.insert(track.tx.name.clone(), idx);
+            if track.is_read() {
+                pos.insert(track.tx.name.clone(), idx);
+            }
         }
         for name in missed {
             if let Some(idx) = pos.get(&name).copied() {
@@ -292,20 +525,18 @@ fn filter_pass(
         .collect()
 }
 
-fn build_read_to_isoform(isoforms: &[Track], ref_names: &HashSet<String>) -> Vec<(String, String)> {
+fn build_read_to_isoform(isoforms: &[Track]) -> Vec<(String, String)> {
     let mut pairs: Vec<(String, String)> = Vec::new();
     for track in isoforms {
         for subread in &track.subreads {
-            if !ref_names.contains(subread) {
-                pairs.push((subread.clone(), track.tx.name.clone()));
-            }
+            pairs.push((subread.clone(), track.tx.name.clone()));
         }
     }
     pairs.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     pairs
 }
 
-fn update_name2(isoforms: &mut [Track], ref_names: &HashSet<String>, mode: Name2Mode) {
+fn update_name2(isoforms: &mut [Track], mode: Name2Mode) {
     if mode == Name2Mode::None {
         for track in isoforms.iter_mut() {
             set_extra(&mut track.tx, NAME2_COL, "none".to_owned());
@@ -317,9 +548,7 @@ fn update_name2(isoforms: &mut [Track], ref_names: &HashSet<String>, mode: Name2
         let mut occurrence: HashMap<&str, u32> = HashMap::new();
         for track in isoforms.iter() {
             for name in &track.subreads {
-                if !ref_names.contains(name) {
-                    *occurrence.entry(name.as_str()).or_insert(0) += 1;
-                }
+                *occurrence.entry(name.as_str()).or_insert(0) += 1;
             }
         }
 
@@ -328,9 +557,6 @@ fn update_name2(isoforms: &mut [Track], ref_names: &HashSet<String>, mode: Name2
             .map(|track| {
                 let mut coverage = 0.0f64;
                 for name in &track.subreads {
-                    if ref_names.contains(name) {
-                        continue;
-                    }
                     let denom = occurrence.get(name.as_str()).copied().unwrap_or(0);
                     if denom > 0 {
                         coverage += 1.0f64 / denom as f64;
@@ -360,12 +586,32 @@ fn update_name2(isoforms: &mut [Track], ref_names: &HashSet<String>, mode: Name2
 struct PartitionResult {
     isoforms: Vec<Transcript>,
     pairs: Vec<(String, String)>,
+    unused: Vec<Transcript>,
 }
 
 struct WorkItem {
     index: usize,
     ref_indices: Vec<usize>,
     read_indices: Vec<usize>,
+}
+
+fn strand_rank(strand: Strand) -> u8 {
+    match strand {
+        Strand::Plus => 0,
+        Strand::Minus => 1,
+        Strand::Unknown => 2,
+    }
+}
+
+fn sort_tracks_by_coord(tracks: &mut [Track]) {
+    tracks.sort_by(|left, right| {
+        left.tx
+            .chrom
+            .cmp(&right.tx.chrom)
+            .then_with(|| left.tx.tx_start.cmp(&right.tx.tx_start))
+            .then_with(|| left.tx.tx_end.cmp(&right.tx.tx_end))
+            .then_with(|| strand_rank(left.tx.strand).cmp(&strand_rank(right.tx.strand)))
+    });
 }
 
 fn cluster_once(tracks: Vec<Track>, options: ClusterOptions) -> Vec<Track> {
@@ -392,6 +638,11 @@ fn batch_overlap_merge(tracks: Vec<Track>, options: ClusterOptions) -> Vec<Track
     }
 
     let batch_size = options.batch_size.max(1);
+    let read_count = tracks.iter().filter(|track| track.is_read()).count();
+    if read_count <= batch_size {
+        return cluster_once(tracks, options);
+    }
+
     let max_rounds = options.batch_rounds;
 
     let tracks = merge_tracks_by_name(tracks);
@@ -431,39 +682,48 @@ fn process_partition(
     reads: &[Transcript],
     ref_indices: &[usize],
     read_indices: &[usize],
-    ref_names: &HashSet<String>,
     options: ClusterOptions,
 ) -> PartitionResult {
-    let mut records: Vec<Transcript> = Vec::with_capacity(ref_indices.len() + read_indices.len());
+    let mut records: Vec<Track> = Vec::with_capacity(ref_indices.len() + read_indices.len());
     for &idx in ref_indices {
-        records.push(references[idx].clone());
+        records.push(Track::new(references[idx].clone(), TrackSource::Reference));
     }
     for &idx in read_indices {
-        records.push(reads[idx].clone());
+        records.push(Track::new(reads[idx].clone(), TrackSource::Read));
     }
 
-    sort_by_coord(&mut records);
-    let loci = cluster_by_span(&records, StrandMode::Match);
-    let mut records: Vec<Option<Transcript>> = records.into_iter().map(Some).collect();
+    sort_tracks_by_coord(&mut records);
+    let locus_records: Vec<Transcript> = records.iter().map(|track| track.tx.clone()).collect();
+    let loci = cluster_by_span(&locus_records, StrandMode::Match);
+    let mut records: Vec<Option<Track>> = records.into_iter().map(Some).collect();
 
     let mut isoforms: Vec<Transcript> = Vec::new();
     let mut pairs: Vec<(String, String)> = Vec::new();
+    let mut unused: Vec<Transcript> = Vec::new();
 
     for locus in loci {
         let mut tracks: Vec<Track> = Vec::with_capacity(locus.members.len());
         for idx in locus.members {
-            let tx = records[idx].take().expect("record already consumed");
-            tracks.push(Track::new(tx));
+            tracks.push(records[idx].take().expect("record already consumed"));
+        }
+
+        if !tracks.iter().any(Track::is_reference) {
+            unused.extend(tracks.into_iter().map(|track| track.tx));
+            continue;
         }
 
         let mut tracks = batch_overlap_merge(tracks, options);
 
-        update_name2(&mut tracks, ref_names, options.name2_mode);
-        pairs.extend(build_read_to_isoform(&tracks, ref_names));
+        update_name2(&mut tracks, options.name2_mode);
+        pairs.extend(build_read_to_isoform(&tracks));
         isoforms.extend(tracks.into_iter().map(|track| track.tx));
     }
 
-    PartitionResult { isoforms, pairs }
+    PartitionResult {
+        isoforms,
+        pairs,
+        unused,
+    }
 }
 
 pub fn cluster(
@@ -486,14 +746,12 @@ pub fn cluster_with_options(
             return ClusterResult {
                 isoforms: Vec::new(),
                 read_to_isoform: Vec::new(),
-                unused: Vec::new(),
+                unused: reads.to_vec(),
             }
         }
     };
 
     let threads = threads.max(1);
-    let ref_names: std::sync::Arc<HashSet<String>> =
-        std::sync::Arc::new(references.iter().map(|tx| tx.name.clone()).collect());
 
     let mut refs_by_key: HashMap<PartitionKey, Vec<usize>> = HashMap::new();
     for (idx, tx) in references.iter().enumerate() {
@@ -507,12 +765,14 @@ pub fn cluster_with_options(
     }
 
     let mut reads_by_key: HashMap<PartitionKey, Vec<usize>> = HashMap::new();
+    let mut unmatched_reads: Vec<Transcript> = Vec::new();
     for (idx, read) in reads.iter().enumerate() {
         let key = PartitionKey {
             chrom: read.chrom.clone(),
             strand: read.strand,
         };
         if !refs_by_key.contains_key(&key) {
+            unmatched_reads.push(read.clone());
             continue;
         }
         reads_by_key.entry(key).or_default().push(idx);
@@ -520,6 +780,7 @@ pub fn cluster_with_options(
 
     let mut all_isoforms: Vec<Transcript> = Vec::new();
     let mut all_pairs: Vec<(String, String)> = Vec::new();
+    let mut all_unused: Vec<Transcript> = unmatched_reads;
 
     let mut keys: Vec<PartitionKey> = refs_by_key.keys().cloned().collect();
     keys.sort_by(|a, b| a.chrom.cmp(&b.chrom).then_with(|| a.strand.cmp(&b.strand)));
@@ -541,7 +802,6 @@ pub fn cluster_with_options(
                 reads,
                 &item.ref_indices,
                 &item.read_indices,
-                &ref_names,
                 options,
             ));
         }
@@ -556,7 +816,6 @@ pub fn cluster_with_options(
             for _ in 0..worker_count {
                 let queue = Arc::clone(&queue);
                 let tx = tx.clone();
-                let ref_names = Arc::clone(&ref_names);
 
                 scope.spawn(move || loop {
                     let item = {
@@ -572,7 +831,6 @@ pub fn cluster_with_options(
                         reads,
                         &item.ref_indices,
                         &item.read_indices,
-                        &ref_names,
                         options,
                     );
                     if tx.send((item.index, result)).is_err() {
@@ -592,6 +850,7 @@ pub fn cluster_with_options(
     for part in parts.into_iter().flatten() {
         all_isoforms.extend(part.isoforms);
         all_pairs.extend(part.pairs);
+        all_unused.extend(part.unused);
     }
 
     all_pairs.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
@@ -599,7 +858,7 @@ pub fn cluster_with_options(
     ClusterResult {
         isoforms: all_isoforms,
         read_to_isoform: all_pairs,
-        unused: Vec::new(),
+        unused: all_unused,
     }
 }
 
@@ -616,6 +875,17 @@ mod tests {
         ttype: &str,
         score: u32,
     ) -> Transcript {
+        make_tx_on("chr1", name, strand, exons, ttype, score)
+    }
+
+    fn make_tx_on(
+        chrom: &str,
+        name: &str,
+        strand: Strand,
+        exons: &[(u32, u32)],
+        ttype: &str,
+        score: u32,
+    ) -> Transcript {
         let tx_start = exons.iter().map(|(s, _)| *s).min().unwrap_or(0);
         let tx_end = exons.iter().map(|(_, e)| *e).max().unwrap_or(0);
         let exons = exons
@@ -624,7 +894,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         Transcript::new(
-            "chr1".to_owned(),
+            chrom.to_owned(),
             strand,
             Coord::new(tx_start),
             Coord::new(tx_end),
@@ -645,6 +915,38 @@ mod tests {
                     "none".to_owned(),
                     "none".to_owned(),
                 ],
+            },
+        )
+        .unwrap()
+    }
+
+    fn make_plain_bed12_tx(
+        chrom: &str,
+        name: &str,
+        strand: Strand,
+        exons: &[(u32, u32)],
+        score: u32,
+    ) -> Transcript {
+        let tx_start = exons.iter().map(|(s, _)| *s).min().unwrap_or(0);
+        let tx_end = exons.iter().map(|(_, e)| *e).max().unwrap_or(0);
+        let exons = exons
+            .iter()
+            .map(|(s, e)| Interval::new(Coord::new(*s), Coord::new(*e)).unwrap())
+            .collect::<Vec<_>>();
+
+        Transcript::new(
+            chrom.to_owned(),
+            strand,
+            Coord::new(tx_start),
+            Coord::new(tx_end),
+            name.to_owned(),
+            exons,
+            Bed12Attrs {
+                score,
+                thick_start: Coord::new(0),
+                thick_end: Coord::new(0),
+                item_rgb: "0".to_owned(),
+                extra_fields: Vec::new(),
             },
         )
         .unwrap()
@@ -710,6 +1012,104 @@ mod tests {
             .expect("name2 payload present");
         assert!(name2.starts_with('|'));
         assert!(!name2.contains("read1"));
+    }
+
+    #[test]
+    fn plain_bed12_reference_is_protected_by_source_not_ttype() {
+        let refs = vec![make_plain_bed12_tx(
+            "chr1",
+            "ref",
+            Strand::Plus,
+            &[(100, 110), (120, 130), (140, 150)],
+            100,
+        )];
+        let reads = vec![make_tx(
+            "read",
+            Strand::Plus,
+            &[(100, 110), (120, 130), (140, 150)],
+            "nanopore_read",
+            0,
+        )];
+
+        let result = cluster_with_options(
+            &reads,
+            Some(&refs),
+            1,
+            ClusterOptions {
+                name2_mode: Name2Mode::Coverage,
+                ..ClusterOptions::default()
+            },
+        );
+
+        assert!(result.isoforms.iter().any(|tx| tx.name == "ref"));
+        assert!(!result.isoforms.iter().any(|tx| tx.name == "read"));
+        assert_eq!(
+            result.read_to_isoform,
+            vec![("read".to_owned(), "ref".to_owned())]
+        );
+        assert!(result.unused.is_empty());
+    }
+
+    #[test]
+    fn unmatched_reads_are_reported_as_unused() {
+        let refs = vec![make_plain_bed12_tx(
+            "chr1",
+            "ref",
+            Strand::Plus,
+            &[(100, 110), (120, 130)],
+            100,
+        )];
+        let reads = vec![
+            make_tx(
+                "read_match",
+                Strand::Plus,
+                &[(100, 110), (120, 130)],
+                "nanopore_read",
+                0,
+            ),
+            make_tx(
+                "read_disjoint",
+                Strand::Plus,
+                &[(500, 510), (520, 530)],
+                "nanopore_read",
+                0,
+            ),
+            make_tx(
+                "read_wrong_strand",
+                Strand::Minus,
+                &[(100, 110), (120, 130)],
+                "nanopore_read",
+                0,
+            ),
+            make_tx_on(
+                "chr2",
+                "read_wrong_chrom",
+                Strand::Plus,
+                &[(100, 110), (120, 130)],
+                "nanopore_read",
+                0,
+            ),
+        ];
+
+        let result = cluster_with_options(
+            &reads,
+            Some(&refs),
+            1,
+            ClusterOptions {
+                name2_mode: Name2Mode::Coverage,
+                ..ClusterOptions::default()
+            },
+        );
+
+        assert_eq!(
+            result.read_to_isoform,
+            vec![("read_match".to_owned(), "ref".to_owned())]
+        );
+        let unused: HashSet<&str> = result.unused.iter().map(|tx| tx.name.as_str()).collect();
+        assert_eq!(unused.len(), 3);
+        assert!(unused.contains("read_disjoint"));
+        assert!(unused.contains("read_wrong_strand"));
+        assert!(unused.contains("read_wrong_chrom"));
     }
 
     #[test]
@@ -785,8 +1185,7 @@ mod tests {
             .map(|(_, isoform_id)| isoform_id.as_str())
             .collect();
 
-        assert_eq!(merged_short_targets.len(), 2);
-        assert!(merged_short_targets.contains("read_long"));
+        assert_eq!(merged_short_targets.len(), 1);
         assert!(merged_short_targets.contains("ref"));
         assert_eq!(no_merge_short_targets.len(), 1);
         assert!(no_merge_short_targets.contains("read_short"));
@@ -834,6 +1233,170 @@ mod tests {
     }
 
     #[test]
+    fn sw_score_above_cutoff_keeps_sl_read_as_its_own_track() {
+        use std::collections::HashSet;
+
+        let refs = vec![make_tx(
+            "ref",
+            Strand::Plus,
+            &[(100, 110), (120, 130), (140, 150)],
+            "isoform_anno",
+            100,
+        )];
+        let reads = vec![
+            make_tx(
+                "read_long",
+                Strand::Plus,
+                &[(100, 110), (120, 130), (140, 150)],
+                "nanopore_read",
+                20,
+            ),
+            make_tx(
+                "read_sl",
+                Strand::Plus,
+                &[(120, 130), (140, 150)],
+                "nanopore_read",
+                DEFAULT_SW_SCORE as u32 + 1,
+            ),
+        ];
+
+        let result = cluster_with_options(&reads, Some(&refs), 1, ClusterOptions::default());
+
+        let sl_targets: HashSet<&str> = result
+            .read_to_isoform
+            .iter()
+            .filter(|(read_id, _)| read_id == "read_sl")
+            .map(|(_, isoform_id)| isoform_id.as_str())
+            .collect();
+
+        assert_eq!(sl_targets.len(), 1);
+        assert!(sl_targets.contains("read_sl"));
+    }
+
+    #[test]
+    fn exon_candidate_generation_is_sparse_and_ordered() {
+        let tracks = vec![
+            Track::new(
+                make_tx(
+                    "ref",
+                    Strand::Plus,
+                    &[(100, 110), (120, 130)],
+                    "isoform_anno",
+                    100,
+                ),
+                TrackSource::Reference,
+            ),
+            Track::new(
+                make_tx(
+                    "read_overlap",
+                    Strand::Plus,
+                    &[(105, 115), (125, 135)],
+                    "nanopore_read",
+                    0,
+                ),
+                TrackSource::Read,
+            ),
+            Track::new(
+                make_tx(
+                    "read_disjoint",
+                    Strand::Plus,
+                    &[(200, 210), (220, 230)],
+                    "nanopore_read",
+                    0,
+                ),
+                TrackSource::Read,
+            ),
+        ];
+
+        let candidates = exon_overlap_pair_candidates(&tracks);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].pair, TrackPair { left: 0, right: 1 });
+        assert_eq!(candidates[0].exon_overlap, 10);
+    }
+
+    #[test]
+    fn high_cutoff_preserves_no_exon_overlap_intron_merge_behavior() {
+        let refs = vec![make_tx(
+            "ref",
+            Strand::Plus,
+            &[(100, 110), (130, 140)],
+            "isoform_anno",
+            100,
+        )];
+        let reads = vec![make_tx(
+            "read_no_exon_overlap",
+            Strand::Plus,
+            &[(111, 120), (140, 150)],
+            "nanopore_read",
+            0,
+        )];
+
+        let result = cluster_with_options(
+            &reads,
+            Some(&refs),
+            1,
+            ClusterOptions {
+                cutoff1: 0.95,
+                name2_mode: Name2Mode::Coverage,
+                ..ClusterOptions::default()
+            },
+        );
+
+        assert_eq!(
+            result.read_to_isoform,
+            vec![("read_no_exon_overlap".to_owned(), "ref".to_owned())]
+        );
+    }
+
+    #[test]
+    fn overlap_cluster_is_deterministic_across_thread_counts() {
+        let refs = vec![
+            make_tx_on(
+                "chr1",
+                "ref1",
+                Strand::Plus,
+                &[(100, 110), (120, 130)],
+                "isoform_anno",
+                100,
+            ),
+            make_tx_on(
+                "chr2",
+                "ref2",
+                Strand::Plus,
+                &[(100, 110), (120, 130)],
+                "isoform_anno",
+                100,
+            ),
+        ];
+        let reads = vec![
+            make_tx_on(
+                "chr1",
+                "read1",
+                Strand::Plus,
+                &[(100, 110), (120, 130)],
+                "nanopore_read",
+                0,
+            ),
+            make_tx_on(
+                "chr2",
+                "read2",
+                Strand::Plus,
+                &[(100, 110), (120, 130)],
+                "nanopore_read",
+                0,
+            ),
+        ];
+
+        let single = cluster_with_options(&reads, Some(&refs), 1, ClusterOptions::default());
+        let multi = cluster_with_options(&reads, Some(&refs), 4, ClusterOptions::default());
+
+        assert_eq!(single.isoforms, multi.isoforms);
+        assert_eq!(single.read_to_isoform, multi.read_to_isoform);
+        assert_eq!(single.unused, multi.unused);
+    }
+
+    #[test]
     fn overlap_batching_matches_unbatched_on_simple_locus() {
         let refs = vec![make_tx(
             "ref",
@@ -877,8 +1440,19 @@ mod tests {
                 ..ClusterOptions::default()
             },
         );
+        let oversized_batch = cluster_with_options(
+            &reads,
+            Some(&refs),
+            1,
+            ClusterOptions {
+                batch_size: 100_000,
+                batch_rounds: 10,
+                ..ClusterOptions::default()
+            },
+        );
 
         assert_eq!(single_pass.read_to_isoform, batched.read_to_isoform);
+        assert_eq!(single_pass.read_to_isoform, oversized_batch.read_to_isoform);
 
         let single_names: Vec<&str> = single_pass
             .isoforms
@@ -886,6 +1460,12 @@ mod tests {
             .map(|tx| tx.name.as_str())
             .collect();
         let batch_names: Vec<&str> = batched.isoforms.iter().map(|tx| tx.name.as_str()).collect();
+        let oversized_names: Vec<&str> = oversized_batch
+            .isoforms
+            .iter()
+            .map(|tx| tx.name.as_str())
+            .collect();
         assert_eq!(single_names, batch_names);
+        assert_eq!(single_names, oversized_names);
     }
 }

@@ -340,7 +340,7 @@ fn bench_cluster_overlap_synthetic_locus(c: &mut Criterion) {
     let mut group = c.benchmark_group("cluster_overlap");
     group.sample_size(10);
 
-    for (refs_len, reads_len) in [(50usize, 200usize), (50, 400)] {
+    for (refs_len, reads_len) in [(50usize, 400usize), (200, 2_000), (500, 5_000)] {
         let (refs, reads) = make_cluster_overlap_inputs(3, refs_len, reads_len, 10_000, 50_000);
         group.bench_with_input(
             BenchmarkId::new(
@@ -352,6 +352,39 @@ fn bench_cluster_overlap_synthetic_locus(c: &mut Criterion) {
                 bench.iter(|| {
                     let result =
                         cluster_overlap::cluster(black_box(reads), Some(black_box(refs)), 1);
+                    black_box(result.isoforms.len());
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_cluster_overlap_batch_sizes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("cluster_overlap_batch_size");
+    group.sample_size(10);
+
+    let refs_len = 500usize;
+    let reads_len = 5_000usize;
+    let (refs, reads) = make_cluster_overlap_inputs(5, refs_len, reads_len, 10_000, 50_000);
+
+    for batch_size in [0usize, 250, 500, 1_000, 100_000] {
+        group.bench_with_input(
+            BenchmarkId::new("batch_size", batch_size),
+            &batch_size,
+            |bench, &batch_size| {
+                bench.iter(|| {
+                    let result = cluster_overlap::cluster_with_options(
+                        black_box(&reads),
+                        Some(black_box(&refs)),
+                        1,
+                        cluster_overlap::ClusterOptions {
+                            batch_size,
+                            name2_mode: clusterj::Name2Mode::Coverage,
+                            ..cluster_overlap::ClusterOptions::default()
+                        },
+                    );
                     black_box(result.isoforms.len());
                 });
             },
@@ -422,7 +455,8 @@ criterion_group!(
     bench_interval_sweep_intersect,
     bench_clusterj_grouping,
     bench_clusterj_large_single_locus,
-    bench_cluster_overlap_synthetic_locus
+    bench_cluster_overlap_synthetic_locus,
+    bench_cluster_overlap_batch_sizes
 );
 
 #[cfg(feature = "index-binned")]

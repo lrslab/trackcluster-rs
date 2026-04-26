@@ -301,7 +301,9 @@ fn flow_overlap_mode_runs_end_to_end() {
     assert!(mapping_out.exists());
     assert!(count_out.exists());
 
+    let per_gene_unused = out_dir.join("GENEA/GENEA_unused.bed");
     assert!(out_dir.join("GENEA/GENEA_simple_coverage.bed").exists());
+    assert!(per_gene_unused.exists());
     assert!(out_dir.join("cluster_batch_summary.txt").exists());
 
     let mapping = fs::read_to_string(mapping_out).expect("read merged mapping");
@@ -313,4 +315,34 @@ fn flow_overlap_mode_runs_end_to_end() {
     assert!(out_dir.join(format!("{prefix}_class4.txt")).exists());
     assert!(out_dir.join(format!("{prefix}_fusion.txt")).exists());
     assert!(out_dir.join(format!("{prefix}_class12.txt")).exists());
+
+    fs::remove_file(&per_gene_unused).expect("remove per-gene unused");
+    let status = Command::new(exe)
+        .args([
+            "flow",
+            "--cluster-mode",
+            "cluster",
+            "-s",
+            reads.to_str().unwrap(),
+            "-r",
+            reference.to_str().unwrap(),
+            "-o",
+            out_dir.to_str().unwrap(),
+            "--prefix",
+            prefix,
+            "--threads",
+            "1",
+            "--batch-size",
+            "1",
+            "--batch-rounds",
+            "4",
+        ])
+        .status()
+        .expect("rerun flow overlap mode");
+    assert!(status.success());
+    assert!(per_gene_unused.exists());
+
+    let summary = fs::read_to_string(out_dir.join("cluster_batch_summary.txt"))
+        .expect("read cluster summary");
+    assert!(summary.lines().any(|line| line == "processed\t1"));
 }
