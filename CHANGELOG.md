@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.9
+- Add SL-aware junction merge controls for `clusterj`, `flow`, and `clusterj_batch`: `--sl-partial-5prime-offset`, `--sl-same-junction-5prime-offset`, `--sl-5prime-cluster-offset`, and `--sl-5prime-min-support`.
+- Keep supported alternative SL 5' clusters as candidate isoforms while still merging singleton likely-degradation reads.
+- Honor `--sw-score -1` during batched junction merging so truncation collapsing is fully disabled when requested.
+- Record SL merge settings in batch summary files and add regression coverage for the new merge boundaries.
+- Add an ignored large overlap speed probe for manual 100k+ read performance checks.
+
 ## 0.1.8
 - Fix overlap `cluster` reference handling so plain BED12 references are protected by input source instead of requiring `ttype=isoform_anno`.
 - Report overlap-mode reads with no matching reference chromosome, strand, or locus in `unused.bed` instead of silently dropping them.

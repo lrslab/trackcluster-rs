@@ -44,6 +44,7 @@ Key flags:
 - `--sw-score`: Smith-Waterman cutoff for 5' truncation collapsing (default: `11`; set to `-1` to disable). In overlap mode, the second pass only collapses a short read when `score < --sw-score`; a read at the exact cutoff remains its own track.
 - `--batch-size`, `--batch-rounds`: bounds for very large genes; in overlap mode these control iterative pre-merging rounds before the final two-pass overlap clustering
 - `--name2-mode`: `coverage` (default), `full`, or `none` (controls isoform `name2` payload size; mapping TSVs are used for counting)
+- `--sl-partial-5prime-offset` (default: `15`), `--sl-same-junction-5prime-offset` (default: `25`), `--sl-5prime-cluster-offset` (default: `15`), `--sl-5prime-min-support` (default: `2`): junction-mode SL 5' merge controls
 - `--overlap-cutoff1`, `--overlap-cutoff2`, `--overlap-intron-weight`: overlap-mode controls used when `--cluster-mode cluster`
 - `--prepare-fraction-read`, `--prepare-fraction-ref`: overlap thresholds for gene assignment
 - `--emit-pooled-reads`: when using `--manifest`, also write `<prefix>_pooled_reads.bed`
@@ -156,9 +157,11 @@ Key flags:
 - `--sw-score`: Smith-Waterman cutoff for 5' truncation collapsing (default: `11`; set to `-1` to disable)
 - `--batch-size`, `--batch-rounds`: bounds for very large genes
 - `--name2-mode`: `coverage` (default), `full`, or `none` (controls isoform `name2` payload size)
+- `--sl-partial-5prime-offset` (default: `15`), `--sl-same-junction-5prime-offset` (default: `25`), `--sl-5prime-cluster-offset` (default: `15`), `--sl-5prime-min-support` (default: `2`): SL 5' merge controls
 
 Performance note:
 - 5' truncation collapsing is implemented via a junction-suffix index to avoid quadratic scans on large loci; `--batch-size`/`--batch-rounds` remain useful as hard caps for extreme genes.
+- SL-supported reads with enough nearby 5' support can be protected as alternative isoforms; singleton likely-degradation reads can still merge into compatible longer/reference tracks.
 
 Example:
 ```bash
@@ -283,6 +286,7 @@ Useful flags:
 - `--sw-score`: Smith-Waterman cutoff for 5' truncation collapsing (default: `11`; set to `-1` to disable)
 - `--batch-size`, `--batch-rounds`: bounds for very large genes
 - `--name2-mode`: `coverage` (default), `full`, or `none` (controls isoform `name2` payload size)
+- `--sl-partial-5prime-offset` (default: `15`), `--sl-same-junction-5prime-offset` (default: `25`), `--sl-5prime-cluster-offset` (default: `15`), `--sl-5prime-min-support` (default: `2`): SL 5' merge controls
 - `--heartbeat-seconds`, `--heartbeat-top`: periodic status line (and which gene(s) are currently in-flight when progress is not moving)
 - `--max-reads-per-gene` (default: `50000`; set `0` to disable), `--downsample-gene`, `--downsample-seed`: per-gene downsampling (writes `clusterj_batch_downsample.tsv`)
 
@@ -294,6 +298,8 @@ clusterj_batch \
   --threads 8 \
   --force
 ```
+
+`clusterj_batch` writes the active SL settings into `clusterj_batch_summary.txt` for reproducibility.
 
 One-command convenience (prepare + batch):
 ```bash

@@ -59,6 +59,7 @@ Defaults:
 - `--cluster-mode clusterj` (junction mode). Use `--cluster-mode cluster` for the legacy overlap/intersection path.
 - `--sw-score 11` (collapse 5' truncations); use `--sw-score -1` to disable.
 - `--name2-mode coverage` (memory-friendly). Use `--name2-mode full` to embed read IDs in the isoform BED (larger outputs); otherwise rely on `*_read_to_isoform.tsv` for counting.
+- SL-supported junction-mode 5' merge controls default to `--sl-partial-5prime-offset 15`, `--sl-same-junction-5prime-offset 25`, `--sl-5prime-cluster-offset 15`, and `--sl-5prime-min-support 2`.
 - `--max-reads-per-gene 50000` (memory-friendly cap; set `0` to disable). Counts/usage tables are scaled when downsampling occurs.
 
 Overlap-mode example:
@@ -180,6 +181,7 @@ After running, `tracktest/` contains:
 `clusterj_batch` iterates over gene folders in `--input-root` and runs junction-mode clustering for each gene.
 
 Internally, 5' truncation collapsing uses a junction-suffix index to avoid quadratic scans on large loci.
+Supported alternative SL 5' clusters can be protected from merging with the `--sl-*` controls exposed by `trackcluster clusterj`, `trackcluster flow`, and `clusterj_batch`.
 
 For each gene, it writes:
 

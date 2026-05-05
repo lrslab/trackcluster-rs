@@ -18,7 +18,38 @@ struct PartitionKey {
 
 const NAME2_COL: usize = 0;
 const TTYPE_COL: usize = 4;
-const DEFAULT_SW_SCORE: i64 = 11;
+pub const DEFAULT_SW_SCORE: i64 = 11;
+pub const DEFAULT_SL_PARTIAL_FIVE_PRIME_END_OFFSET: u32 = 15;
+pub const DEFAULT_SL_SAME_JUNCTION_FIVE_PRIME_END_OFFSET: u32 = 25;
+pub const DEFAULT_SL_FIVE_PRIME_CLUSTER_OFFSET: u32 = 15;
+pub const DEFAULT_MIN_SL_FIVE_PRIME_CLUSTER_SUPPORT: usize = 2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SlMergeOptions {
+    pub partial_five_prime_end_offset: u32,
+    pub same_junction_five_prime_end_offset: u32,
+    pub five_prime_cluster_offset: u32,
+    pub min_five_prime_cluster_support: usize,
+}
+
+impl Default for SlMergeOptions {
+    fn default() -> Self {
+        Self {
+            partial_five_prime_end_offset: DEFAULT_SL_PARTIAL_FIVE_PRIME_END_OFFSET,
+            same_junction_five_prime_end_offset: DEFAULT_SL_SAME_JUNCTION_FIVE_PRIME_END_OFFSET,
+            five_prime_cluster_offset: DEFAULT_SL_FIVE_PRIME_CLUSTER_OFFSET,
+            min_five_prime_cluster_support: DEFAULT_MIN_SL_FIVE_PRIME_CLUSTER_SUPPORT,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MergeKind {
+    SameJunction,
+    FivePrimeTruncation,
+    SingleExonContained,
+    SingleExonSameFivePrime,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Name2Mode {
@@ -408,25 +439,21 @@ fn is_junction_5primer(missed_order: &[usize]) -> bool {
     groups.len() == 1
 }
 
-fn is_junction_inside(
-    short_junctions: &[u32],
-    short_exon_len: u32,
-    long_junctions: &[u32],
-    long_exon_len: u32,
-) -> bool {
+fn junction_merge_kind(short_junctions: &[u32], long_junctions: &[u32]) -> Option<MergeKind> {
     if short_junctions.is_empty() {
-        return false;
+        return None;
     }
 
     if junctions_equal(short_junctions, long_junctions, 0) {
-        return short_exon_len < long_exon_len;
+        return Some(MergeKind::SameJunction);
     }
 
     let (missed_order, extra_order) = compare_ei_by_boundary(short_junctions, long_junctions, 0);
     if missed_order.is_empty() {
-        return false;
+        return None;
     }
-    is_junction_5primer(&missed_order) && extra_order.is_empty()
+    (is_junction_5primer(&missed_order) && extra_order.is_empty())
+        .then_some(MergeKind::FivePrimeTruncation)
 }
 
 fn is_single_exon_in(single: &Transcript, other: &Transcript, other_junctions: &[u32]) -> bool {
@@ -474,6 +501,212 @@ fn is_single_exon_in(single: &Transcript, other: &Transcript, other_junctions: &
     }
 }
 
+fn five_prime_end_delta(a: &Transcript, b: &Transcript) -> Option<u32> {
+    if a.chrom != b.chrom || a.strand != b.strand {
+        return None;
+    }
+
+    match a.strand {
+        Strand::Plus => Some(a.tx_start.get().abs_diff(b.tx_start.get())),
+        Strand::Minus => Some(a.tx_end.get().abs_diff(b.tx_end.get())),
+        Strand::Unknown => None,
+    }
+}
+
+fn five_prime_ends_match(a: &Transcript, b: &Transcript, offset: u32) -> bool {
+    five_prime_end_delta(a, b).is_some_and(|delta| delta <= offset)
+}
+
+fn is_sl_supported_read(tx: &Transcript, sw_score: i64) -> bool {
+    sw_score >= 0 && !is_isoform_anno(tx) && i64::from(tx.score) > sw_score
+}
+
+fn track_read_support(track: &Track) -> usize {
+    if is_isoform_anno(&track.tx) {
+        0
+    } else {
+        track.subreads.len().max(1)
+    }
+}
+
+fn build_sl_five_prime_cluster_support(
+    tracks: &[Track],
+    junctions_cache: &[Vec<u32>],
+    sw_score: i64,
+    sl_options: SlMergeOptions,
+) -> Vec<usize> {
+    let mut support = vec![0usize; tracks.len()];
+    if sw_score < 0 {
+        return support;
+    }
+
+    for (i, track_i) in tracks.iter().enumerate() {
+        if !is_sl_supported_read(&track_i.tx, sw_score) {
+            continue;
+        }
+
+        for (j, track_j) in tracks.iter().enumerate() {
+            if !is_sl_supported_read(&track_j.tx, sw_score) {
+                continue;
+            }
+            if junctions_cache[i] != junctions_cache[j] {
+                continue;
+            }
+            if !five_prime_ends_match(
+                &track_i.tx,
+                &track_j.tx,
+                sl_options.five_prime_cluster_offset,
+            ) {
+                continue;
+            }
+
+            support[i] += track_read_support(track_j);
+        }
+    }
+
+    support
+}
+
+fn sl_protected_from_merge(
+    short: &Transcript,
+    long: &Transcript,
+    kind: MergeKind,
+    sw_score: i64,
+    sl_cluster_support: usize,
+    sl_options: SlMergeOptions,
+) -> bool {
+    if !is_sl_supported_read(short, sw_score) {
+        return false;
+    }
+    if sl_cluster_support < sl_options.min_five_prime_cluster_support {
+        return false;
+    }
+
+    let offset = match kind {
+        MergeKind::SameJunction => sl_options.same_junction_five_prime_end_offset,
+        MergeKind::FivePrimeTruncation
+        | MergeKind::SingleExonContained
+        | MergeKind::SingleExonSameFivePrime => sl_options.partial_five_prime_end_offset,
+    };
+
+    !five_prime_ends_match(short, long, offset)
+}
+
+fn is_single_exon_same_5prime_in(
+    single: &Transcript,
+    other: &Transcript,
+    other_junctions: &[u32],
+    sl_options: SlMergeOptions,
+) -> bool {
+    if !other_junctions.is_empty()
+        || !five_prime_ends_match(single, other, sl_options.partial_five_prime_end_offset)
+    {
+        return false;
+    }
+
+    match single.strand {
+        Strand::Plus => single.tx_end <= other.tx_end,
+        Strand::Minus => single.tx_start >= other.tx_start,
+        Strand::Unknown => false,
+    }
+}
+
+fn single_exon_merge_kind(
+    single: &Transcript,
+    other: &Transcript,
+    other_junctions: &[u32],
+    sl_options: SlMergeOptions,
+) -> Option<MergeKind> {
+    if is_single_exon_in(single, other, other_junctions) {
+        return Some(MergeKind::SingleExonContained);
+    }
+    if is_single_exon_same_5prime_in(single, other, other_junctions, sl_options) {
+        return Some(MergeKind::SingleExonSameFivePrime);
+    }
+    None
+}
+
+fn target_is_preferred_container(
+    source_idx: usize,
+    target_idx: usize,
+    kind: MergeKind,
+    source_exon_len: u32,
+    target_exon_len: u32,
+    is_anno: &[bool],
+) -> bool {
+    if is_anno[source_idx] {
+        return false;
+    }
+    if is_anno[target_idx] {
+        return true;
+    }
+
+    match kind {
+        MergeKind::SameJunction => {
+            target_exon_len > source_exon_len
+                || (target_exon_len == source_exon_len && target_idx > source_idx)
+        }
+        MergeKind::FivePrimeTruncation
+        | MergeKind::SingleExonContained
+        | MergeKind::SingleExonSameFivePrime => true,
+    }
+}
+
+struct MergeContext<'a> {
+    tracks: &'a [Track],
+    junctions_cache: &'a [Vec<u32>],
+    exon_lens: &'a [u32],
+    is_anno: &'a [bool],
+    sl_cluster_support: &'a [usize],
+    sw_score: i64,
+    sl_options: SlMergeOptions,
+}
+
+impl MergeContext<'_> {
+    fn should_merge_into(&self, source_idx: usize, target_idx: usize) -> bool {
+        if source_idx == target_idx {
+            return false;
+        }
+
+        let source_junctions = &self.junctions_cache[source_idx];
+        let kind = if source_junctions.is_empty() {
+            let target_junctions = &self.junctions_cache[target_idx];
+            let Some(kind) = single_exon_merge_kind(
+                &self.tracks[source_idx].tx,
+                &self.tracks[target_idx].tx,
+                target_junctions,
+                self.sl_options,
+            ) else {
+                return false;
+            };
+            kind
+        } else {
+            let Some(kind) =
+                junction_merge_kind(source_junctions, &self.junctions_cache[target_idx])
+            else {
+                return false;
+            };
+            kind
+        };
+
+        target_is_preferred_container(
+            source_idx,
+            target_idx,
+            kind,
+            self.exon_lens[source_idx],
+            self.exon_lens[target_idx],
+            self.is_anno,
+        ) && !sl_protected_from_merge(
+            &self.tracks[source_idx].tx,
+            &self.tracks[target_idx].tx,
+            kind,
+            self.sw_score,
+            self.sl_cluster_support[source_idx],
+            self.sl_options,
+        )
+    }
+}
+
 fn get_two_mut<T>(slice: &mut [T], i: usize, j: usize) -> (&mut T, &mut T) {
     assert!(i != j, "indices must be distinct");
     if i < j {
@@ -506,7 +739,20 @@ fn build_junction_suffix_index<'a>(
     suffix_index
 }
 
+#[cfg(test)]
 fn junction_simple_merge(tracks: &mut [Track], sw_score: i64) -> Vec<usize> {
+    junction_simple_merge_with_options(tracks, sw_score, SlMergeOptions::default())
+}
+
+fn junction_simple_merge_with_options(
+    tracks: &mut [Track],
+    sw_score: i64,
+    sl_options: SlMergeOptions,
+) -> Vec<usize> {
+    if sw_score < 0 {
+        return (0..tracks.len()).collect();
+    }
+
     let junctions_cache: Vec<Vec<u32>> = tracks
         .iter()
         .map(|track| junction_positions(&track.tx))
@@ -516,6 +762,8 @@ fn junction_simple_merge(tracks: &mut [Track], sw_score: i64) -> Vec<usize> {
         .iter()
         .map(|track| is_isoform_anno(&track.tx))
         .collect();
+    let sl_cluster_support =
+        build_sl_five_prime_cluster_support(tracks, &junctions_cache, sw_score, sl_options);
 
     let suffix_index = build_junction_suffix_index(&junctions_cache);
 
@@ -525,13 +773,7 @@ fn junction_simple_merge(tracks: &mut [Track], sw_score: i64) -> Vec<usize> {
             continue;
         }
 
-        let score_i = i64::from(tracks[i].tx.score);
-        if score_i > sw_score {
-            continue;
-        }
-
         let junctions_i = &junctions_cache[i];
-        let exon_len_i = exon_lens[i];
         if junctions_i.is_empty() {
             for j in 0..tracks.len() {
                 if i == j {
@@ -541,12 +783,22 @@ fn junction_simple_merge(tracks: &mut [Track], sw_score: i64) -> Vec<usize> {
                     continue;
                 }
 
-                if is_single_exon_in(&tracks[i].tx, &tracks[j].tx, &junctions_cache[j]) {
+                let should_merge = {
+                    let ctx = MergeContext {
+                        tracks,
+                        junctions_cache: &junctions_cache,
+                        exon_lens: &exon_lens,
+                        is_anno: &is_anno,
+                        sl_cluster_support: &sl_cluster_support,
+                        sw_score,
+                        sl_options,
+                    };
+                    ctx.should_merge_into(i, j)
+                };
+
+                if should_merge {
                     dropped[i] = true;
                     let (short, long) = get_two_mut(tracks, i, j);
-                    if is_anno[i] {
-                        long.subreads.insert(short.tx.name.clone());
-                    }
                     long.subreads.extend(short.subreads.iter().cloned());
                 }
             }
@@ -565,12 +817,22 @@ fn junction_simple_merge(tracks: &mut [Track], sw_score: i64) -> Vec<usize> {
                 continue;
             }
 
-            if is_junction_inside(junctions_i, exon_len_i, &junctions_cache[j], exon_lens[j]) {
+            let should_merge = {
+                let ctx = MergeContext {
+                    tracks,
+                    junctions_cache: &junctions_cache,
+                    exon_lens: &exon_lens,
+                    is_anno: &is_anno,
+                    sl_cluster_support: &sl_cluster_support,
+                    sw_score,
+                    sl_options,
+                };
+                ctx.should_merge_into(i, j)
+            };
+
+            if should_merge {
                 dropped[i] = true;
                 let (short, long) = get_two_mut(tracks, i, j);
-                if is_anno[i] {
-                    long.subreads.insert(short.tx.name.clone());
-                }
                 long.subreads.extend(short.subreads.iter().cloned());
             }
         }
@@ -587,11 +849,30 @@ fn junction_simple_merge(tracks: &mut [Track], sw_score: i64) -> Vec<usize> {
 
 #[cfg(test)]
 fn junction_simple_merge_naive(tracks: &mut [Track], sw_score: i64) -> Vec<usize> {
+    junction_simple_merge_naive_with_options(tracks, sw_score, SlMergeOptions::default())
+}
+
+#[cfg(test)]
+fn junction_simple_merge_naive_with_options(
+    tracks: &mut [Track],
+    sw_score: i64,
+    sl_options: SlMergeOptions,
+) -> Vec<usize> {
+    if sw_score < 0 {
+        return (0..tracks.len()).collect();
+    }
+
     let junctions_cache: Vec<Vec<u32>> = tracks
         .iter()
         .map(|track| junction_positions(&track.tx))
         .collect();
     let exon_lens: Vec<u32> = tracks.iter().map(|track| exon_len(&track.tx)).collect();
+    let is_anno: Vec<bool> = tracks
+        .iter()
+        .map(|track| is_isoform_anno(&track.tx))
+        .collect();
+    let sl_cluster_support =
+        build_sl_five_prime_cluster_support(tracks, &junctions_cache, sw_score, sl_options);
 
     let mut dropped: Vec<bool> = vec![false; tracks.len()];
     for i in 0..tracks.len() {
@@ -599,37 +880,30 @@ fn junction_simple_merge_naive(tracks: &mut [Track], sw_score: i64) -> Vec<usize
             continue;
         }
 
-        let score_i = i64::from(tracks[i].tx.score);
-        if score_i > sw_score {
-            continue;
-        }
-
-        let junctions_i = &junctions_cache[i];
-        let exon_len_i = exon_lens[i];
         for j in 0..tracks.len() {
             if i == j {
                 continue;
             }
-            if dropped[j] && !is_isoform_anno(&tracks[j].tx) {
+            if dropped[j] && !is_anno[j] {
                 continue;
             }
 
-            if junctions_i.is_empty() {
-                if is_single_exon_in(&tracks[i].tx, &tracks[j].tx, &junctions_cache[j]) {
-                    dropped[i] = true;
-                    let (short, long) = get_two_mut(tracks, i, j);
-                    if is_isoform_anno(&short.tx) {
-                        long.subreads.insert(short.tx.name.clone());
-                    }
-                    long.subreads.extend(short.subreads.iter().cloned());
-                }
-            } else if is_junction_inside(junctions_i, exon_len_i, &junctions_cache[j], exon_lens[j])
-            {
+            let should_merge = {
+                let ctx = MergeContext {
+                    tracks,
+                    junctions_cache: &junctions_cache,
+                    exon_lens: &exon_lens,
+                    is_anno: &is_anno,
+                    sl_cluster_support: &sl_cluster_support,
+                    sw_score,
+                    sl_options,
+                };
+                ctx.should_merge_into(i, j)
+            };
+
+            if should_merge {
                 dropped[i] = true;
                 let (short, long) = get_two_mut(tracks, i, j);
-                if is_isoform_anno(&short.tx) {
-                    long.subreads.insert(short.tx.name.clone());
-                }
                 long.subreads.extend(short.subreads.iter().cloned());
             }
         }
@@ -692,8 +966,12 @@ fn split_reference_and_read_tracks(tracks: Vec<Track>) -> (Vec<Track>, Vec<Track
     (refs, reads)
 }
 
-fn merge_one_batch(mut tracks: Vec<Track>, sw_score: i64) -> Vec<Track> {
-    let keep_indices = junction_simple_merge(&mut tracks, sw_score);
+fn merge_one_batch(
+    mut tracks: Vec<Track>,
+    sw_score: i64,
+    sl_options: SlMergeOptions,
+) -> Vec<Track> {
+    let keep_indices = junction_simple_merge_with_options(&mut tracks, sw_score, sl_options);
     select_tracks_by_keep_indices(tracks, keep_indices)
 }
 
@@ -702,6 +980,7 @@ fn merge_read_batches(
     read_tracks: Vec<Track>,
     batch_size: usize,
     sw_score: i64,
+    sl_options: SlMergeOptions,
 ) -> (Vec<Track>, bool) {
     let mut anchors: Vec<Track> = ref_tracks.to_vec();
     let mut changed = false;
@@ -712,7 +991,7 @@ fn merge_read_batches(
         batch.extend(chunk.iter().cloned());
 
         let before_len = batch.len();
-        let merged = merge_one_batch(batch, sw_score);
+        let merged = merge_one_batch(batch, sw_score, sl_options);
         if merged.len() < before_len {
             changed = true;
         }
@@ -728,6 +1007,7 @@ fn batch_junction_simple_merge(
     sw_score: i64,
     batch_size: usize,
     max_rounds: usize,
+    sl_options: SlMergeOptions,
 ) -> Vec<Track> {
     let batch_size = batch_size.max(1);
     let max_rounds = max_rounds.max(1);
@@ -736,19 +1016,19 @@ fn batch_junction_simple_merge(
     let mut rounds = 0usize;
     let mut previous_len = tracks.len();
 
-    // Match TrackCluster Python `process_one_junction_corrected_try` behavior:
-    // - Intermediate merges always use the default SW cutoff (11) even if `sw_score` is -1.
-    // - Read batching always keeps references available as potential containers.
+    // Read batching always keeps references available as potential containers.
+    // Use the caller's SW cutoff for every round so `--sw-score -1` fully disables
+    // truncation collapsing even when batching is enabled.
     while rounds < max_rounds {
         let (refs, reads) = split_reference_and_read_tracks(tracks);
         if reads.len() <= batch_size {
             let mut combined: Vec<Track> = Vec::with_capacity(refs.len() + reads.len());
             combined.extend(refs);
             combined.extend(reads);
-            return merge_one_batch(combined, sw_score);
+            return merge_one_batch(combined, sw_score, sl_options);
         }
 
-        let (merged, changed) = merge_read_batches(&refs, reads, batch_size, DEFAULT_SW_SCORE);
+        let (merged, changed) = merge_read_batches(&refs, reads, batch_size, sw_score, sl_options);
         tracks = merged;
 
         if !changed || tracks.len() >= previous_len {
@@ -763,10 +1043,10 @@ fn batch_junction_simple_merge(
         let mut combined: Vec<Track> = Vec::with_capacity(refs.len() + reads.len());
         combined.extend(refs);
         combined.extend(reads);
-        return merge_one_batch(combined, sw_score);
+        return merge_one_batch(combined, sw_score, sl_options);
     }
 
-    let (merged, _) = merge_read_batches(&refs, reads, batch_size, sw_score);
+    let (merged, _) = merge_read_batches(&refs, reads, batch_size, sw_score, sl_options);
     merged
 }
 
@@ -902,6 +1182,7 @@ fn process_partition(
     batch_size: usize,
     batch_rounds: usize,
     name2_mode: Name2Mode,
+    sl_options: SlMergeOptions,
 ) -> PartitionResult {
     let mut tracks: Vec<Track> = Vec::with_capacity(ref_indices.len() + read_indices.len());
     for &idx in ref_indices {
@@ -924,10 +1205,17 @@ fn process_partition(
     let mut kept: Vec<Track> = Vec::new();
     for mut locus_tracks in loci {
         let mut locus_kept = if batch_size == 0 {
-            let keep_indices = junction_simple_merge(&mut locus_tracks, sw_score);
+            let keep_indices =
+                junction_simple_merge_with_options(&mut locus_tracks, sw_score, sl_options);
             select_tracks_by_keep_indices(locus_tracks, keep_indices)
         } else {
-            batch_junction_simple_merge(locus_tracks, sw_score, batch_size, batch_rounds)
+            batch_junction_simple_merge(
+                locus_tracks,
+                sw_score,
+                batch_size,
+                batch_rounds,
+                sl_options,
+            )
         };
         kept.append(&mut locus_kept);
     }
@@ -970,6 +1258,29 @@ pub fn clusterj_with_name2_mode(
     batch_size: usize,
     batch_rounds: usize,
     name2_mode: Name2Mode,
+) -> ClusterResult {
+    clusterj_with_options(
+        reads,
+        references,
+        threads,
+        sw_score,
+        batch_size,
+        batch_rounds,
+        name2_mode,
+        SlMergeOptions::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn clusterj_with_options(
+    reads: &[Transcript],
+    references: Option<&[Transcript]>,
+    threads: usize,
+    sw_score: i64,
+    batch_size: usize,
+    batch_rounds: usize,
+    name2_mode: Name2Mode,
+    sl_options: SlMergeOptions,
 ) -> ClusterResult {
     let references = match references {
         Some(references) => references,
@@ -1038,6 +1349,7 @@ pub fn clusterj_with_name2_mode(
                 batch_size,
                 batch_rounds,
                 name2_mode,
+                sl_options,
             ));
         }
     } else {
@@ -1072,6 +1384,7 @@ pub fn clusterj_with_name2_mode(
                         batch_size,
                         batch_rounds,
                         name2_mode,
+                        sl_options,
                     );
                     if tx.send((item.index, result)).is_err() {
                         break;
@@ -1515,6 +1828,256 @@ mod tests {
 
         assert!(subread_sets.get("ref_a").unwrap().contains("read_trunc"));
         assert!(subread_sets.get("ref_b").unwrap().contains("read_trunc"));
+    }
+
+    #[test]
+    fn sl_supported_same_5prime_single_exon_reads_still_merge() {
+        let mut tracks = vec![
+            make_track("long_sl", Strand::Plus, &[(100, 200)], "nanopore_read", 12),
+            make_track("short_sl", Strand::Plus, &[(105, 180)], "nanopore_read", 12),
+            make_track("same_sl", Strand::Plus, &[(100, 200)], "nanopore_read", 12),
+        ];
+
+        let keep = junction_simple_merge(&mut tracks, 11);
+
+        assert_eq!(keep, vec![2]);
+        assert!(tracks[2].subreads.contains("long_sl"));
+        assert!(tracks[2].subreads.contains("short_sl"));
+        assert!(tracks[2].subreads.contains("same_sl"));
+    }
+
+    #[test]
+    fn sl_supported_same_junction_reads_merge_with_small_5prime_offset() {
+        let mut tracks = vec![
+            make_track(
+                "long_sl",
+                Strand::Plus,
+                &[(100, 110), (120, 130), (140, 160)],
+                "nanopore_read",
+                12,
+            ),
+            make_track(
+                "short_sl",
+                Strand::Plus,
+                &[(105, 110), (120, 130), (140, 150)],
+                "nanopore_read",
+                12,
+            ),
+        ];
+
+        let keep = junction_simple_merge(&mut tracks, 11);
+
+        assert_eq!(keep, vec![0]);
+        assert!(tracks[0].subreads.contains("long_sl"));
+        assert!(tracks[0].subreads.contains("short_sl"));
+    }
+
+    #[test]
+    fn sl_supported_same_junction_singleton_large_5prime_offset_merges() {
+        let mut tracks = vec![
+            make_track(
+                "long_sl",
+                Strand::Plus,
+                &[(50, 110), (120, 130), (140, 160)],
+                "nanopore_read",
+                12,
+            ),
+            make_track(
+                "short_sl",
+                Strand::Plus,
+                &[(85, 110), (120, 130), (140, 150)],
+                "nanopore_read",
+                12,
+            ),
+        ];
+
+        let keep = junction_simple_merge(&mut tracks, 11);
+
+        assert_eq!(keep, vec![0]);
+        assert!(tracks[0].subreads.contains("short_sl"));
+    }
+
+    #[test]
+    fn sl_supported_same_junction_cluster_with_large_5prime_offset_is_retained() {
+        let refs = vec![make_tx(
+            "ref",
+            Strand::Plus,
+            &[(100, 110), (120, 130), (140, 150)],
+            "isoform_anno",
+            100,
+        )];
+        let reads = vec![
+            make_tx(
+                "alt_sl_a",
+                Strand::Plus,
+                &[(50, 110), (120, 130), (140, 150)],
+                "nanopore_read",
+                12,
+            ),
+            make_tx(
+                "alt_sl_b",
+                Strand::Plus,
+                &[(52, 110), (120, 130), (140, 150)],
+                "nanopore_read",
+                12,
+            ),
+        ];
+
+        let result = clusterj_with_name2_mode(&reads, Some(&refs), 1, 11, 0, 1, Name2Mode::Full);
+        let iso_names: HashSet<_> = result.isoforms.iter().map(|tx| tx.name.as_str()).collect();
+
+        assert!(iso_names.contains("ref"));
+        assert!(iso_names.contains("alt_sl_a"));
+        assert!(!iso_names.contains("alt_sl_b"));
+    }
+
+    #[test]
+    fn same_junction_read_merges_into_reference_when_read_is_longer() {
+        let refs = vec![make_tx(
+            "ref",
+            Strand::Plus,
+            &[(100, 110), (120, 130), (140, 150)],
+            "isoform_anno",
+            100,
+        )];
+        let reads = vec![make_tx(
+            "read_longer",
+            Strand::Plus,
+            &[(97, 110), (120, 130), (140, 153)],
+            "nanopore_read",
+            12,
+        )];
+
+        let result = clusterj_with_name2_mode(&reads, Some(&refs), 1, 11, 0, 1, Name2Mode::Full);
+        let iso_names: HashSet<_> = result.isoforms.iter().map(|tx| tx.name.as_str()).collect();
+
+        assert!(iso_names.contains("ref"));
+        assert!(!iso_names.contains("read_longer"));
+
+        let ref_tx = result
+            .isoforms
+            .iter()
+            .find(|tx| tx.name == "ref")
+            .expect("ref isoform missing");
+        assert!(ref_tx
+            .extra_fields
+            .first()
+            .is_some_and(|name2| name2.contains("read_longer")));
+    }
+
+    #[test]
+    fn sl_supported_same_junction_read_merges_within_wide_5prime_offset() {
+        let refs = vec![make_tx(
+            "ref",
+            Strand::Plus,
+            &[(100, 110), (120, 130), (140, 150)],
+            "isoform_anno",
+            100,
+        )];
+        let reads = vec![make_tx(
+            "read_19bp_offset",
+            Strand::Plus,
+            &[(81, 110), (120, 130), (140, 150)],
+            "nanopore_read",
+            12,
+        )];
+
+        let result = clusterj_with_name2_mode(&reads, Some(&refs), 1, 11, 0, 1, Name2Mode::Full);
+        let iso_names: HashSet<_> = result.isoforms.iter().map(|tx| tx.name.as_str()).collect();
+
+        assert!(iso_names.contains("ref"));
+        assert!(!iso_names.contains("read_19bp_offset"));
+    }
+
+    #[test]
+    fn sl_supported_singleton_5prime_junction_variant_merges_as_possible_degradation() {
+        let refs = vec![make_tx(
+            "ref",
+            Strand::Plus,
+            &[(100, 110), (120, 130), (140, 150)],
+            "isoform_anno",
+            100,
+        )];
+        let reads = vec![make_tx(
+            "read_sl_trunc",
+            Strand::Plus,
+            &[(120, 130), (140, 150)],
+            "nanopore_read",
+            12,
+        )];
+
+        let result = clusterj_with_name2_mode(&reads, Some(&refs), 1, 11, 0, 1, Name2Mode::Full);
+        let iso_names: HashSet<_> = result.isoforms.iter().map(|tx| tx.name.as_str()).collect();
+
+        assert!(iso_names.contains("ref"));
+        assert!(!iso_names.contains("read_sl_trunc"));
+    }
+
+    #[test]
+    fn sl_supported_5prime_junction_variant_cluster_is_retained() {
+        let refs = vec![make_tx(
+            "ref",
+            Strand::Plus,
+            &[(100, 110), (120, 130), (140, 150)],
+            "isoform_anno",
+            100,
+        )];
+        let reads = vec![
+            make_tx(
+                "read_sl_trunc_a",
+                Strand::Plus,
+                &[(120, 130), (140, 150)],
+                "nanopore_read",
+                12,
+            ),
+            make_tx(
+                "read_sl_trunc_b",
+                Strand::Plus,
+                &[(120, 130), (140, 150)],
+                "nanopore_read",
+                12,
+            ),
+        ];
+
+        let result = clusterj_with_name2_mode(&reads, Some(&refs), 1, 11, 0, 1, Name2Mode::Full);
+        let iso_names: HashSet<_> = result.isoforms.iter().map(|tx| tx.name.as_str()).collect();
+
+        assert!(iso_names.contains("ref"));
+        assert!(iso_names.contains("read_sl_trunc_b"));
+    }
+
+    #[test]
+    fn sw_score_minus_one_disables_batched_junction_merge() {
+        let refs = vec![make_tx(
+            "ref",
+            Strand::Plus,
+            &[(100, 110), (120, 130), (140, 150)],
+            "isoform_anno",
+            100,
+        )];
+        let reads = vec![
+            make_tx(
+                "read_trunc",
+                Strand::Plus,
+                &[(120, 130), (140, 150)],
+                "nanopore_read",
+                1,
+            ),
+            make_tx(
+                "read_full",
+                Strand::Plus,
+                &[(100, 110), (120, 130), (140, 150)],
+                "nanopore_read",
+                1,
+            ),
+        ];
+
+        let result = clusterj_with_name2_mode(&reads, Some(&refs), 1, -1, 1, 10, Name2Mode::Full);
+        let iso_names: HashSet<_> = result.isoforms.iter().map(|tx| tx.name.as_str()).collect();
+
+        assert!(iso_names.contains("ref"));
+        assert!(iso_names.contains("read_trunc"));
+        assert!(iso_names.contains("read_full"));
     }
 
     #[test]

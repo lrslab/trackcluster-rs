@@ -96,6 +96,7 @@ pub struct BatchRunOptions {
     pub batch_size: usize,
     pub batch_rounds: usize,
     pub name2_mode: crate::cluster::clusterj::Name2Mode,
+    pub sl_options: crate::cluster::clusterj::SlMergeOptions,
     pub overlap_cutoff1: f64,
     pub overlap_cutoff2: f64,
     pub overlap_intron_weight: f64,
@@ -140,6 +141,7 @@ pub struct FullFlowOptions {
     pub batch_size: usize,
     pub batch_rounds: usize,
     pub name2_mode: crate::cluster::clusterj::Name2Mode,
+    pub sl_options: crate::cluster::clusterj::SlMergeOptions,
     pub overlap_cutoff1: f64,
     pub overlap_cutoff2: f64,
     pub overlap_intron_weight: f64,
@@ -460,7 +462,7 @@ fn process_gene(gene: &str, args: &BatchRunOptions) -> anyhow::Result<ProcessGen
         .with_context(|| format!("parse reference {reference:?}"))?;
 
     let result = match args.cluster_mode {
-        ClusterMode::Clusterj => crate::cluster::clusterj::clusterj_with_name2_mode(
+        ClusterMode::Clusterj => crate::cluster::clusterj::clusterj_with_options(
             &reads,
             Some(&refs),
             1,
@@ -468,6 +470,7 @@ fn process_gene(gene: &str, args: &BatchRunOptions) -> anyhow::Result<ProcessGen
             args.batch_size,
             args.batch_rounds,
             args.name2_mode,
+            args.sl_options,
         ),
         ClusterMode::Cluster => crate::cluster::cluster_overlap::cluster_with_options(
             &reads,
@@ -807,6 +810,26 @@ each gene will run one full two-pass overlap merge"
     writeln!(summary, "batch_size\t{}", args.batch_size)?;
     writeln!(summary, "batch_rounds\t{}", args.batch_rounds)?;
     writeln!(summary, "name2_mode\t{}", args.name2_mode)?;
+    writeln!(
+        summary,
+        "sl_partial_5prime_offset\t{}",
+        args.sl_options.partial_five_prime_end_offset
+    )?;
+    writeln!(
+        summary,
+        "sl_same_junction_5prime_offset\t{}",
+        args.sl_options.same_junction_five_prime_end_offset
+    )?;
+    writeln!(
+        summary,
+        "sl_5prime_cluster_offset\t{}",
+        args.sl_options.five_prime_cluster_offset
+    )?;
+    writeln!(
+        summary,
+        "sl_5prime_min_support\t{}",
+        args.sl_options.min_five_prime_cluster_support
+    )?;
     writeln!(summary, "overlap_cutoff1\t{}", args.overlap_cutoff1)?;
     writeln!(summary, "overlap_cutoff2\t{}", args.overlap_cutoff2)?;
     writeln!(
@@ -1119,6 +1142,7 @@ pub fn run_full_flow(opts: FullFlowOptions) -> anyhow::Result<FullFlowResult> {
             batch_size: opts.batch_size,
             batch_rounds: opts.batch_rounds,
             name2_mode: opts.name2_mode,
+            sl_options: opts.sl_options,
             overlap_cutoff1: opts.overlap_cutoff1,
             overlap_cutoff2: opts.overlap_cutoff2,
             overlap_intron_weight: opts.overlap_intron_weight,
@@ -1182,6 +1206,7 @@ pub fn run_full_flow(opts: FullFlowOptions) -> anyhow::Result<FullFlowResult> {
                 batch_size: opts.batch_size,
                 batch_rounds: opts.batch_rounds,
                 name2_mode: opts.name2_mode,
+                sl_options: opts.sl_options,
                 overlap_cutoff1: opts.overlap_cutoff1,
                 overlap_cutoff2: opts.overlap_cutoff2,
                 overlap_intron_weight: opts.overlap_intron_weight,

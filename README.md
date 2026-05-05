@@ -14,7 +14,7 @@ artifact-write failure seen with newer toolchains in this environment.
 Implemented subcommands:
 - `flow`: one-command end-to-end pipeline (recommended)
 - `preparedir`: split reads into per-gene folders (and write `<prefix>_gene.txt`, `<prefix>_dedup.bed`, `<prefix>_novel.bed`)
-- `clusterj`: junction-chain clustering (fast mode; optimized truncation collapsing for large loci)
+- `clusterj`: junction-chain clustering (fast mode; SL-aware 5' merge controls; optimized truncation collapsing for large loci)
 - `cluster`: overlap-based clustering (slower, more permissive)
 - `count`: isoform expression counting
 - `count-multi`: per-sample (and optional per-group) isoform usage from pooled isoforms
@@ -66,6 +66,9 @@ trackcluster validate-bed -i tests/fixtures/minimal.bed
 
 # Junction-mode clustering (writes isoform.bed + mapping + unused)
 trackcluster clusterj -s tests/fixtures/reads.bed -r tests/fixtures/ref.bed -o isoform.bed
+# SL 5' merge behavior can be tuned with --sl-partial-5prime-offset,
+# --sl-same-junction-5prime-offset, --sl-5prime-cluster-offset, and
+# --sl-5prime-min-support.
 
 # Overlap-mode clustering (legacy-style two-round exon/intron overlap mode)
 trackcluster cluster -s tests/fixtures/reads.bed -r tests/fixtures/ref.bed -o isoform.bed

@@ -35,3 +35,13 @@ Current CLI exposure:
 - There is no separate `cluster_batch` binary; the dedicated batch binary remains `clusterj_batch` for junction mode.
 
 This is intended as a starting point; full parity should be validated/adjusted using goldens.
+
+## Junction-mode SL 5' merge controls
+
+Junction-mode clustering (`clusterj`, `flow` default mode, and `clusterj_batch`) exposes SL-aware 5' merge controls:
+- `--sl-partial-5prime-offset` (default `15`)
+- `--sl-same-junction-5prime-offset` (default `25`)
+- `--sl-5prime-cluster-offset` (default `15`)
+- `--sl-5prime-min-support` (default `2`)
+
+Reads with score greater than `--sw-score` are treated as SL-supported. A supported candidate with enough nearby same-junction 5' support is protected from merging when its biological 5' end is outside the relevant offset from the longer/reference track. Singleton supported reads can still merge as likely degradation. Setting `--sw-score -1` disables junction truncation collapsing, including batched merging.

@@ -76,6 +76,14 @@ mod tests {
             "out.bed",
             "-t",
             "4",
+            "--sl-partial-5prime-offset",
+            "16",
+            "--sl-same-junction-5prime-offset",
+            "26",
+            "--sl-5prime-cluster-offset",
+            "17",
+            "--sl-5prime-min-support",
+            "3",
         ])
         .unwrap();
 
@@ -85,6 +93,10 @@ mod tests {
                 assert_eq!(args.reference, PathBuf::from("ref.bed"));
                 assert_eq!(args.out, PathBuf::from("out.bed"));
                 assert_eq!(args.threads, 4);
+                assert_eq!(args.sl_partial_5prime_offset, 16);
+                assert_eq!(args.sl_same_junction_5prime_offset, 26);
+                assert_eq!(args.sl_5prime_cluster_offset, 17);
+                assert_eq!(args.sl_5prime_min_support, 3);
             }
             _ => panic!("expected clusterj args"),
         }
