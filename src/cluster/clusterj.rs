@@ -513,6 +513,14 @@ fn five_prime_end_delta(a: &Transcript, b: &Transcript) -> Option<u32> {
     }
 }
 
+fn five_prime_position(tx: &Transcript) -> Option<u32> {
+    match tx.strand {
+        Strand::Plus => Some(tx.tx_start.get()),
+        Strand::Minus => Some(tx.tx_end.get()),
+        Strand::Unknown => None,
+    }
+}
+
 fn five_prime_ends_match(a: &Transcript, b: &Transcript, offset: u32) -> bool {
     five_prime_end_delta(a, b).is_some_and(|delta| delta <= offset)
 }
@@ -540,27 +548,72 @@ fn build_sl_five_prime_cluster_support(
         return support;
     }
 
+    #[derive(Clone, Copy, Debug)]
+    struct SlSupportEntry {
+        five_prime_pos: u32,
+        idx: usize,
+        read_support: usize,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    struct SlSupportKey<'a> {
+        chrom: &'a str,
+        strand: Strand,
+        junctions: &'a [u32],
+    }
+
+    let mut groups: HashMap<SlSupportKey<'_>, Vec<SlSupportEntry>> = HashMap::new();
     for (i, track_i) in tracks.iter().enumerate() {
         if !is_sl_supported_read(&track_i.tx, sw_score) {
             continue;
         }
+        let Some(five_prime_pos) = five_prime_position(&track_i.tx) else {
+            continue;
+        };
 
-        for (j, track_j) in tracks.iter().enumerate() {
-            if !is_sl_supported_read(&track_j.tx, sw_score) {
-                continue;
+        groups
+            .entry(SlSupportKey {
+                chrom: track_i.tx.chrom.as_str(),
+                strand: track_i.tx.strand,
+                junctions: junctions_cache[i].as_slice(),
+            })
+            .or_default()
+            .push(SlSupportEntry {
+                five_prime_pos,
+                idx: i,
+                read_support: track_read_support(track_i),
+            });
+    }
+
+    for entries in groups.values_mut() {
+        entries.sort_by_key(|entry| (entry.five_prime_pos, entry.idx));
+
+        let mut prefix_support = Vec::with_capacity(entries.len() + 1);
+        prefix_support.push(0usize);
+        for entry in entries.iter() {
+            let previous = *prefix_support.last().expect("prefix has initial zero");
+            prefix_support.push(previous + entry.read_support);
+        }
+
+        let mut left = 0usize;
+        let mut right = 0usize;
+        for idx in 0..entries.len() {
+            let center = entries[idx].five_prime_pos;
+            while entries[left]
+                .five_prime_pos
+                .saturating_add(sl_options.five_prime_cluster_offset)
+                < center
+            {
+                left += 1;
             }
-            if junctions_cache[i] != junctions_cache[j] {
-                continue;
-            }
-            if !five_prime_ends_match(
-                &track_i.tx,
-                &track_j.tx,
-                sl_options.five_prime_cluster_offset,
-            ) {
-                continue;
+            while right < entries.len()
+                && entries[right].five_prime_pos
+                    <= center.saturating_add(sl_options.five_prime_cluster_offset)
+            {
+                right += 1;
             }
 
-            support[i] += track_read_support(track_j);
+            support[entries[idx].idx] = prefix_support[right] - prefix_support[left];
         }
     }
 
@@ -720,14 +773,20 @@ fn get_two_mut<T>(slice: &mut [T], i: usize, j: usize) -> (&mut T, &mut T) {
 
 fn build_junction_suffix_index<'a>(
     junctions_cache: &'a [Vec<u32>],
+    target_eligible: &[bool],
 ) -> HashMap<&'a [u32], Vec<usize>> {
     let total_suffixes = junctions_cache
         .iter()
-        .map(|junctions| junctions.len())
+        .zip(target_eligible.iter().copied())
+        .filter(|(_, eligible)| *eligible)
+        .map(|(junctions, _)| junctions.len())
         .sum();
     let mut suffix_index: HashMap<&'a [u32], Vec<usize>> = HashMap::with_capacity(total_suffixes);
 
     for (idx, junctions) in junctions_cache.iter().enumerate() {
+        if !target_eligible[idx] {
+            continue;
+        }
         for start in 0..junctions.len() {
             suffix_index
                 .entry(&junctions[start..])
@@ -737,6 +796,57 @@ fn build_junction_suffix_index<'a>(
     }
 
     suffix_index
+}
+
+fn build_exact_duplicate_representatives<'a>(
+    tracks: &'a [Track],
+    junctions_cache: &'a [Vec<u32>],
+    is_anno: &[bool],
+) -> Vec<Option<usize>> {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    struct ExactDuplicateKey<'a> {
+        chrom: &'a str,
+        strand: Strand,
+        tx_start: u32,
+        tx_end: u32,
+        junctions: &'a [u32],
+    }
+
+    let mut groups: HashMap<ExactDuplicateKey<'_>, Vec<usize>> = HashMap::new();
+    for (idx, track) in tracks.iter().enumerate() {
+        if is_anno[idx] {
+            continue;
+        }
+
+        groups
+            .entry(ExactDuplicateKey {
+                chrom: track.tx.chrom.as_str(),
+                strand: track.tx.strand,
+                tx_start: track.tx.tx_start.get(),
+                tx_end: track.tx.tx_end.get(),
+                junctions: junctions_cache[idx].as_slice(),
+            })
+            .or_default()
+            .push(idx);
+    }
+
+    let mut representatives = vec![None; tracks.len()];
+    for group in groups.values() {
+        if group.len() <= 1 {
+            continue;
+        }
+
+        // Same-junction equal-length tie breaking keeps the latest read, so use the
+        // last exact duplicate as the only non-reference target for this group.
+        let representative = *group.last().expect("non-empty group");
+        for &idx in group {
+            if idx != representative {
+                representatives[idx] = Some(representative);
+            }
+        }
+    }
+
+    representatives
 }
 
 #[cfg(test)]
@@ -762,10 +872,16 @@ fn junction_simple_merge_with_options(
         .iter()
         .map(|track| is_isoform_anno(&track.tx))
         .collect();
+    let exact_duplicate_representative =
+        build_exact_duplicate_representatives(tracks, &junctions_cache, &is_anno);
+    let target_eligible: Vec<bool> = exact_duplicate_representative
+        .iter()
+        .map(Option::is_none)
+        .collect();
     let sl_cluster_support =
         build_sl_five_prime_cluster_support(tracks, &junctions_cache, sw_score, sl_options);
 
-    let suffix_index = build_junction_suffix_index(&junctions_cache);
+    let suffix_index = build_junction_suffix_index(&junctions_cache, &target_eligible);
 
     let mut dropped: Vec<bool> = vec![false; tracks.len()];
     for i in 0..tracks.len() {
@@ -780,6 +896,9 @@ fn junction_simple_merge_with_options(
                     continue;
                 }
                 if dropped[j] && !is_anno[j] {
+                    continue;
+                }
+                if !target_eligible[j] {
                     continue;
                 }
 
@@ -816,6 +935,7 @@ fn junction_simple_merge_with_options(
             if dropped[j] && !is_anno[j] {
                 continue;
             }
+            debug_assert!(target_eligible[j]);
 
             let should_merge = {
                 let ctx = MergeContext {
@@ -1526,6 +1646,49 @@ mod tests {
         assert_eq!(tracks.len(), naive_tracks.len());
         for (indexed, naive) in tracks.iter().zip(naive_tracks.iter()) {
             assert_eq!(indexed.subreads, naive.subreads);
+        }
+    }
+
+    #[test]
+    fn exact_duplicate_target_pruning_matches_naive_kept_outputs() {
+        let mut tracks = vec![
+            make_track(
+                "dup_a",
+                Strand::Plus,
+                &[(100, 110), (120, 130), (140, 150)],
+                "nanopore_read",
+                0,
+            ),
+            make_track(
+                "longer_same_junction",
+                Strand::Plus,
+                &[(90, 110), (120, 130), (140, 160)],
+                "nanopore_read",
+                0,
+            ),
+            make_track(
+                "dup_b",
+                Strand::Plus,
+                &[(100, 110), (120, 130), (140, 150)],
+                "nanopore_read",
+                0,
+            ),
+            make_track(
+                "ref_same_junction",
+                Strand::Plus,
+                &[(95, 110), (120, 130), (140, 155)],
+                "isoform_anno",
+                100,
+            ),
+        ];
+
+        let mut naive_tracks = tracks.clone();
+        let keep_naive = junction_simple_merge_naive(&mut naive_tracks, 11);
+        let keep_indexed = junction_simple_merge(&mut tracks, 11);
+
+        assert_eq!(keep_indexed, keep_naive);
+        for idx in keep_indexed {
+            assert_eq!(tracks[idx].subreads, naive_tracks[idx].subreads);
         }
     }
 
