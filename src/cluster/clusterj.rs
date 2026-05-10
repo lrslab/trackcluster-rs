@@ -19,10 +19,27 @@ struct PartitionKey {
 const NAME2_COL: usize = 0;
 const TTYPE_COL: usize = 4;
 pub const DEFAULT_SW_SCORE: i64 = 11;
+pub const DEFAULT_JUNCTION_CORRECTION_MIN_SUPPORT: u32 = 2;
+pub const DEFAULT_JUNCTION_CORRECTION_OFFSET: u32 = 10;
 pub const DEFAULT_SL_PARTIAL_FIVE_PRIME_END_OFFSET: u32 = 15;
 pub const DEFAULT_SL_SAME_JUNCTION_FIVE_PRIME_END_OFFSET: u32 = 25;
 pub const DEFAULT_SL_FIVE_PRIME_CLUSTER_OFFSET: u32 = 15;
 pub const DEFAULT_MIN_SL_FIVE_PRIME_CLUSTER_SUPPORT: usize = 2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JunctionCorrectionOptions {
+    pub min_support: u32,
+    pub offset: u32,
+}
+
+impl Default for JunctionCorrectionOptions {
+    fn default() -> Self {
+        Self {
+            min_support: DEFAULT_JUNCTION_CORRECTION_MIN_SUPPORT,
+            offset: DEFAULT_JUNCTION_CORRECTION_OFFSET,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SlMergeOptions {
@@ -41,6 +58,109 @@ impl Default for SlMergeOptions {
             min_five_prime_cluster_support: DEFAULT_MIN_SL_FIVE_PRIME_CLUSTER_SUPPORT,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolvedPlatformOptions {
+    pub junction_correction: JunctionCorrectionOptions,
+    pub sl_options: SlMergeOptions,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PlatformPreset {
+    #[default]
+    Generic,
+    Rna002,
+    Rna004,
+}
+
+impl PlatformPreset {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Generic => "generic",
+            Self::Rna002 => "rna002",
+            Self::Rna004 => "rna004",
+        }
+    }
+
+    pub fn options(self) -> ResolvedPlatformOptions {
+        match self {
+            Self::Generic | Self::Rna004 => ResolvedPlatformOptions {
+                junction_correction: JunctionCorrectionOptions::default(),
+                sl_options: SlMergeOptions::default(),
+            },
+            Self::Rna002 => ResolvedPlatformOptions {
+                junction_correction: JunctionCorrectionOptions {
+                    min_support: DEFAULT_JUNCTION_CORRECTION_MIN_SUPPORT,
+                    offset: 15,
+                },
+                sl_options: SlMergeOptions {
+                    partial_five_prime_end_offset: 20,
+                    same_junction_five_prime_end_offset:
+                        DEFAULT_SL_SAME_JUNCTION_FIVE_PRIME_END_OFFSET,
+                    five_prime_cluster_offset: 20,
+                    min_five_prime_cluster_support: DEFAULT_MIN_SL_FIVE_PRIME_CLUSTER_SUPPORT,
+                },
+            },
+        }
+    }
+}
+
+impl std::fmt::Display for PlatformPreset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for PlatformPreset {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.eq_ignore_ascii_case("generic") {
+            return Ok(Self::Generic);
+        }
+        if s.eq_ignore_ascii_case("rna002") {
+            return Ok(Self::Rna002);
+        }
+        if s.eq_ignore_ascii_case("rna004") {
+            return Ok(Self::Rna004);
+        }
+        Err(format!(
+            "invalid platform preset {s:?}; expected one of: generic, rna002, rna004"
+        ))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_platform_options(
+    platform_preset: PlatformPreset,
+    junction_correction_offset: Option<u32>,
+    junction_correction_min_support: Option<u32>,
+    sl_partial_five_prime_offset: Option<u32>,
+    sl_same_junction_five_prime_offset: Option<u32>,
+    sl_five_prime_cluster_offset: Option<u32>,
+    sl_five_prime_min_support: Option<usize>,
+) -> ResolvedPlatformOptions {
+    let mut options = platform_preset.options();
+    if let Some(offset) = junction_correction_offset {
+        options.junction_correction.offset = offset;
+    }
+    if let Some(min_support) = junction_correction_min_support {
+        options.junction_correction.min_support = min_support;
+    }
+    if let Some(offset) = sl_partial_five_prime_offset {
+        options.sl_options.partial_five_prime_end_offset = offset;
+    }
+    if let Some(offset) = sl_same_junction_five_prime_offset {
+        options.sl_options.same_junction_five_prime_end_offset = offset;
+    }
+    if let Some(offset) = sl_five_prime_cluster_offset {
+        options.sl_options.five_prime_cluster_offset = offset;
+    }
+    if let Some(min_support) = sl_five_prime_min_support {
+        options.sl_options.min_five_prime_cluster_support = min_support;
+    }
+    options
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1303,6 +1423,7 @@ fn process_partition(
     batch_rounds: usize,
     name2_mode: Name2Mode,
     sl_options: SlMergeOptions,
+    junction_correction: JunctionCorrectionOptions,
 ) -> PartitionResult {
     let mut tracks: Vec<Track> = Vec::with_capacity(ref_indices.len() + read_indices.len());
     for &idx in ref_indices {
@@ -1318,7 +1439,11 @@ fn process_partition(
         tracks.push(Track { tx, subreads });
     }
 
-    let (corrected, rare) = flow_junction_correct(tracks, 2, 10);
+    let (corrected, rare) = flow_junction_correct(
+        tracks,
+        junction_correction.min_support,
+        junction_correction.offset,
+    );
     let unused: Vec<Transcript> = rare.into_iter().map(|track| track.tx).collect();
 
     let loci = split_tracks_into_loci(corrected);
@@ -1388,6 +1513,7 @@ pub fn clusterj_with_name2_mode(
         batch_rounds,
         name2_mode,
         SlMergeOptions::default(),
+        JunctionCorrectionOptions::default(),
     )
 }
 
@@ -1401,6 +1527,7 @@ pub fn clusterj_with_options(
     batch_rounds: usize,
     name2_mode: Name2Mode,
     sl_options: SlMergeOptions,
+    junction_correction: JunctionCorrectionOptions,
 ) -> ClusterResult {
     let references = match references {
         Some(references) => references,
@@ -1470,6 +1597,7 @@ pub fn clusterj_with_options(
                 batch_rounds,
                 name2_mode,
                 sl_options,
+                junction_correction,
             ));
         }
     } else {
@@ -1505,6 +1633,7 @@ pub fn clusterj_with_options(
                         batch_rounds,
                         name2_mode,
                         sl_options,
+                        junction_correction,
                     );
                     if tx.send((item.index, result)).is_err() {
                         break;
@@ -1824,6 +1953,128 @@ mod tests {
         assert!(!corrected
             .iter()
             .any(|track| track.tx.name == "read_uncorrectable"));
+    }
+
+    #[test]
+    fn clusterj_junction_correction_offset_controls_nearby_snap() {
+        let refs = vec![make_tx(
+            "ref",
+            Strand::Plus,
+            &[(100, 110), (200, 250)],
+            "isoform_anno",
+            100,
+        )];
+        let reads = vec![make_tx(
+            "read_near",
+            Strand::Plus,
+            &[(100, 123), (213, 250)],
+            "nanopore_read",
+            1,
+        )];
+
+        let default_offset = clusterj_with_options(
+            &reads,
+            Some(&refs),
+            1,
+            11,
+            0,
+            1,
+            Name2Mode::Full,
+            SlMergeOptions::default(),
+            JunctionCorrectionOptions {
+                min_support: 2,
+                offset: 10,
+            },
+        );
+        assert!(default_offset
+            .unused
+            .iter()
+            .any(|tx| tx.name == "read_near"));
+
+        let widened_offset = clusterj_with_options(
+            &reads,
+            Some(&refs),
+            1,
+            11,
+            0,
+            1,
+            Name2Mode::Full,
+            SlMergeOptions::default(),
+            JunctionCorrectionOptions {
+                min_support: 2,
+                offset: 15,
+            },
+        );
+        assert!(widened_offset.unused.is_empty());
+        assert!(widened_offset
+            .read_to_isoform
+            .iter()
+            .any(|(read, _)| read == "read_near"));
+    }
+
+    #[test]
+    fn clusterj_junction_correction_min_support_controls_novel_junction_retention() {
+        let refs = vec![make_tx(
+            "ref",
+            Strand::Plus,
+            &[(100, 110), (200, 250)],
+            "isoform_anno",
+            100,
+        )];
+        let reads = vec![
+            make_tx(
+                "read_novel_a",
+                Strand::Plus,
+                &[(100, 150), (250, 300)],
+                "nanopore_read",
+                1,
+            ),
+            make_tx(
+                "read_novel_b",
+                Strand::Plus,
+                &[(100, 150), (250, 300)],
+                "nanopore_read",
+                1,
+            ),
+        ];
+
+        let supported = clusterj_with_options(
+            &reads,
+            Some(&refs),
+            1,
+            11,
+            0,
+            1,
+            Name2Mode::Full,
+            SlMergeOptions::default(),
+            JunctionCorrectionOptions {
+                min_support: 2,
+                offset: 10,
+            },
+        );
+        assert!(supported.unused.is_empty());
+
+        let unsupported = clusterj_with_options(
+            &reads,
+            Some(&refs),
+            1,
+            11,
+            0,
+            1,
+            Name2Mode::Full,
+            SlMergeOptions::default(),
+            JunctionCorrectionOptions {
+                min_support: 3,
+                offset: 10,
+            },
+        );
+        let unused_names: HashSet<&str> = unsupported
+            .unused
+            .iter()
+            .map(|tx| tx.name.as_str())
+            .collect();
+        assert!(unused_names.contains("read_novel_a"));
+        assert!(unused_names.contains("read_novel_b"));
     }
 
     #[test]

@@ -34,21 +34,47 @@ pub struct Args {
     #[arg(long = "name2-mode", default_value_t = crate::cluster::clusterj::Name2Mode::Coverage)]
     pub name2_mode: crate::cluster::clusterj::Name2Mode,
 
+    /// Platform preset used to seed junction correction and SL 5' defaults: generic, rna002, or rna004
+    #[arg(long = "platform-preset", default_value_t = crate::cluster::clusterj::PlatformPreset::Generic)]
+    pub platform_preset: crate::cluster::clusterj::PlatformPreset,
+
+    /// Internal junction correction offset in bp; distinct from SL/5' terminal offsets
+    #[arg(long = "junction-correction-offset")]
+    pub junction_correction_offset: Option<u32>,
+
+    /// Minimum weighted support for a junction site to avoid correction/filtering
+    #[arg(long = "junction-correction-min-support")]
+    pub junction_correction_min_support: Option<u32>,
+
     /// SL-supported partial/5' truncation biological 5' offset tolerated for merging
-    #[arg(long = "sl-partial-5prime-offset", default_value_t = crate::cluster::clusterj::DEFAULT_SL_PARTIAL_FIVE_PRIME_END_OFFSET)]
-    pub sl_partial_5prime_offset: u32,
+    #[arg(long = "sl-partial-5prime-offset")]
+    pub sl_partial_5prime_offset: Option<u32>,
 
     /// SL-supported same-junction biological 5' offset tolerated for merging
-    #[arg(long = "sl-same-junction-5prime-offset", default_value_t = crate::cluster::clusterj::DEFAULT_SL_SAME_JUNCTION_FIVE_PRIME_END_OFFSET)]
-    pub sl_same_junction_5prime_offset: u32,
+    #[arg(long = "sl-same-junction-5prime-offset")]
+    pub sl_same_junction_5prime_offset: Option<u32>,
 
     /// Offset used to group SL-supported reads into the same biological 5' cluster
-    #[arg(long = "sl-5prime-cluster-offset", default_value_t = crate::cluster::clusterj::DEFAULT_SL_FIVE_PRIME_CLUSTER_OFFSET)]
-    pub sl_5prime_cluster_offset: u32,
+    #[arg(long = "sl-5prime-cluster-offset")]
+    pub sl_5prime_cluster_offset: Option<u32>,
 
     /// Minimum read support required for an SL 5' cluster to protect a candidate isoform
-    #[arg(long = "sl-5prime-min-support", default_value_t = crate::cluster::clusterj::DEFAULT_MIN_SL_FIVE_PRIME_CLUSTER_SUPPORT)]
-    pub sl_5prime_min_support: usize,
+    #[arg(long = "sl-5prime-min-support")]
+    pub sl_5prime_min_support: Option<usize>,
+}
+
+impl Args {
+    pub fn resolved_platform_options(&self) -> crate::cluster::clusterj::ResolvedPlatformOptions {
+        crate::cluster::clusterj::resolve_platform_options(
+            self.platform_preset,
+            self.junction_correction_offset,
+            self.junction_correction_min_support,
+            self.sl_partial_5prime_offset,
+            self.sl_same_junction_5prime_offset,
+            self.sl_5prime_cluster_offset,
+            self.sl_5prime_min_support,
+        )
+    }
 }
 
 pub fn run(args: Args) -> anyhow::Result<()> {
@@ -56,6 +82,7 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         .collect::<Result<Vec<_>, crate::io::bed::BedError>>()?;
     let refs: Vec<crate::model::Transcript> = crate::io::bed::read_bed12(&args.reference)?
         .collect::<Result<Vec<_>, crate::io::bed::BedError>>()?;
+    let resolved_options = args.resolved_platform_options();
 
     let result = crate::cluster::clusterj::clusterj_with_options(
         &reads,
@@ -65,12 +92,8 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         args.batch_size,
         args.batch_rounds,
         args.name2_mode,
-        crate::cluster::clusterj::SlMergeOptions {
-            partial_five_prime_end_offset: args.sl_partial_5prime_offset,
-            same_junction_five_prime_end_offset: args.sl_same_junction_5prime_offset,
-            five_prime_cluster_offset: args.sl_5prime_cluster_offset,
-            min_five_prime_cluster_support: args.sl_5prime_min_support,
-        },
+        resolved_options.sl_options,
+        resolved_options.junction_correction,
     );
 
     crate::cluster::output::write_isoforms_bed(&args.out, &result.isoforms)?;

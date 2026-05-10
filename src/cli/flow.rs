@@ -46,21 +46,33 @@ pub struct Args {
     #[arg(long = "name2-mode", default_value_t = crate::cluster::clusterj::Name2Mode::Coverage)]
     pub name2_mode: crate::cluster::clusterj::Name2Mode,
 
+    /// Platform preset used to seed junction correction and SL 5' defaults: generic, rna002, or rna004
+    #[arg(long = "platform-preset", default_value_t = crate::cluster::clusterj::PlatformPreset::Generic)]
+    pub platform_preset: crate::cluster::clusterj::PlatformPreset,
+
+    /// Internal junction correction offset in bp; distinct from SL/5' terminal offsets
+    #[arg(long = "junction-correction-offset")]
+    pub junction_correction_offset: Option<u32>,
+
+    /// Minimum weighted support for a junction site to avoid correction/filtering
+    #[arg(long = "junction-correction-min-support")]
+    pub junction_correction_min_support: Option<u32>,
+
     /// SL-supported partial/5' truncation biological 5' offset tolerated for merging
-    #[arg(long = "sl-partial-5prime-offset", default_value_t = crate::cluster::clusterj::DEFAULT_SL_PARTIAL_FIVE_PRIME_END_OFFSET)]
-    pub sl_partial_5prime_offset: u32,
+    #[arg(long = "sl-partial-5prime-offset")]
+    pub sl_partial_5prime_offset: Option<u32>,
 
     /// SL-supported same-junction biological 5' offset tolerated for merging
-    #[arg(long = "sl-same-junction-5prime-offset", default_value_t = crate::cluster::clusterj::DEFAULT_SL_SAME_JUNCTION_FIVE_PRIME_END_OFFSET)]
-    pub sl_same_junction_5prime_offset: u32,
+    #[arg(long = "sl-same-junction-5prime-offset")]
+    pub sl_same_junction_5prime_offset: Option<u32>,
 
     /// Offset used to group SL-supported reads into the same biological 5' cluster
-    #[arg(long = "sl-5prime-cluster-offset", default_value_t = crate::cluster::clusterj::DEFAULT_SL_FIVE_PRIME_CLUSTER_OFFSET)]
-    pub sl_5prime_cluster_offset: u32,
+    #[arg(long = "sl-5prime-cluster-offset")]
+    pub sl_5prime_cluster_offset: Option<u32>,
 
     /// Minimum read support required for an SL 5' cluster to protect a candidate isoform
-    #[arg(long = "sl-5prime-min-support", default_value_t = crate::cluster::clusterj::DEFAULT_MIN_SL_FIVE_PRIME_CLUSTER_SUPPORT)]
-    pub sl_5prime_min_support: usize,
+    #[arg(long = "sl-5prime-min-support")]
+    pub sl_5prime_min_support: Option<usize>,
 
     /// Overlap-mode pass 1 cutoff (`cluster-mode=cluster` only)
     #[arg(long = "overlap-cutoff1", default_value_t = crate::cluster::cluster_overlap::DEFAULT_CUTOFF1)]
@@ -117,12 +129,27 @@ pub struct Args {
     pub downsample_seed: u64,
 }
 
+impl Args {
+    pub fn resolved_platform_options(&self) -> crate::cluster::clusterj::ResolvedPlatformOptions {
+        crate::cluster::clusterj::resolve_platform_options(
+            self.platform_preset,
+            self.junction_correction_offset,
+            self.junction_correction_min_support,
+            self.sl_partial_5prime_offset,
+            self.sl_same_junction_5prime_offset,
+            self.sl_5prime_cluster_offset,
+            self.sl_5prime_min_support,
+        )
+    }
+}
+
 pub fn run(args: Args) -> anyhow::Result<()> {
     match (&args.reads, &args.manifest) {
         (Some(_), Some(_)) => anyhow::bail!("flow: use either --reads or --manifest, not both"),
         (None, None) => anyhow::bail!("flow: one of --reads or --manifest is required"),
         _ => {}
     }
+    let resolved_options = args.resolved_platform_options();
 
     let result = crate::flow::full::run_full_flow(crate::flow::full::FullFlowOptions {
         cluster_mode: args.cluster_mode,
@@ -136,12 +163,9 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         batch_size: args.batch_size,
         batch_rounds: args.batch_rounds,
         name2_mode: args.name2_mode,
-        sl_options: crate::cluster::clusterj::SlMergeOptions {
-            partial_five_prime_end_offset: args.sl_partial_5prime_offset,
-            same_junction_five_prime_end_offset: args.sl_same_junction_5prime_offset,
-            five_prime_cluster_offset: args.sl_5prime_cluster_offset,
-            min_five_prime_cluster_support: args.sl_5prime_min_support,
-        },
+        platform_preset: args.platform_preset,
+        junction_correction_options: resolved_options.junction_correction,
+        sl_options: resolved_options.sl_options,
         overlap_cutoff1: args.overlap_cutoff1,
         overlap_cutoff2: args.overlap_cutoff2,
         overlap_intron_weight: args.overlap_intron_weight,

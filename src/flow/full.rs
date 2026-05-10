@@ -96,6 +96,8 @@ pub struct BatchRunOptions {
     pub batch_size: usize,
     pub batch_rounds: usize,
     pub name2_mode: crate::cluster::clusterj::Name2Mode,
+    pub platform_preset: crate::cluster::clusterj::PlatformPreset,
+    pub junction_correction_options: crate::cluster::clusterj::JunctionCorrectionOptions,
     pub sl_options: crate::cluster::clusterj::SlMergeOptions,
     pub overlap_cutoff1: f64,
     pub overlap_cutoff2: f64,
@@ -141,6 +143,8 @@ pub struct FullFlowOptions {
     pub batch_size: usize,
     pub batch_rounds: usize,
     pub name2_mode: crate::cluster::clusterj::Name2Mode,
+    pub platform_preset: crate::cluster::clusterj::PlatformPreset,
+    pub junction_correction_options: crate::cluster::clusterj::JunctionCorrectionOptions,
     pub sl_options: crate::cluster::clusterj::SlMergeOptions,
     pub overlap_cutoff1: f64,
     pub overlap_cutoff2: f64,
@@ -471,6 +475,7 @@ fn process_gene(gene: &str, args: &BatchRunOptions) -> anyhow::Result<ProcessGen
             args.batch_rounds,
             args.name2_mode,
             args.sl_options,
+            args.junction_correction_options,
         ),
         ClusterMode::Cluster => crate::cluster::cluster_overlap::cluster_with_options(
             &reads,
@@ -810,6 +815,17 @@ each gene will run one full two-pass overlap merge"
     writeln!(summary, "batch_size\t{}", args.batch_size)?;
     writeln!(summary, "batch_rounds\t{}", args.batch_rounds)?;
     writeln!(summary, "name2_mode\t{}", args.name2_mode)?;
+    writeln!(summary, "platform_preset\t{}", args.platform_preset)?;
+    writeln!(
+        summary,
+        "junction_correction_offset\t{}",
+        args.junction_correction_options.offset
+    )?;
+    writeln!(
+        summary,
+        "junction_correction_min_support\t{}",
+        args.junction_correction_options.min_support
+    )?;
     writeln!(
         summary,
         "sl_partial_5prime_offset\t{}",
@@ -1142,6 +1158,8 @@ pub fn run_full_flow(opts: FullFlowOptions) -> anyhow::Result<FullFlowResult> {
             batch_size: opts.batch_size,
             batch_rounds: opts.batch_rounds,
             name2_mode: opts.name2_mode,
+            platform_preset: opts.platform_preset,
+            junction_correction_options: opts.junction_correction_options,
             sl_options: opts.sl_options,
             overlap_cutoff1: opts.overlap_cutoff1,
             overlap_cutoff2: opts.overlap_cutoff2,
@@ -1206,6 +1224,8 @@ pub fn run_full_flow(opts: FullFlowOptions) -> anyhow::Result<FullFlowResult> {
                 batch_size: opts.batch_size,
                 batch_rounds: opts.batch_rounds,
                 name2_mode: opts.name2_mode,
+                platform_preset: opts.platform_preset,
+                junction_correction_options: opts.junction_correction_options,
                 sl_options: opts.sl_options,
                 overlap_cutoff1: opts.overlap_cutoff1,
                 overlap_cutoff2: opts.overlap_cutoff2,

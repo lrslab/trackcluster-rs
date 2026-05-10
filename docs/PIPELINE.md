@@ -181,7 +181,10 @@ After running, `tracktest/` contains:
 `clusterj_batch` iterates over gene folders in `--input-root` and runs junction-mode clustering for each gene.
 
 Internally, 5' truncation collapsing uses a junction-suffix index to avoid quadratic scans on large loci.
-Supported alternative SL 5' clusters can be protected from merging with the `--sl-*` controls exposed by `trackcluster clusterj`, `trackcluster flow`, and `clusterj_batch`.
+Low-support splice-junction sites are corrected before merging with `--junction-correction-offset` and `--junction-correction-min-support`.
+Supported alternative SL 5' clusters can be protected from merging with the separate `--sl-*` terminal controls exposed by `trackcluster clusterj`, `trackcluster flow`, and `clusterj_batch`.
+Use `--platform-preset rna002` for RNA002 reads (junction offset `15`; SL 5' offsets `20/25/20`) and `--platform-preset rna004` for RNA004 reads (conservative defaults: junction offset `10`; SL 5' offsets `15/25/15`). Explicit junction correction and SL options override the preset.
+SL evidence is optional; reads without SL information still use junction correction and normal 5' truncation collapsing, but they are not protected by the SL-cluster rules.
 
 For each gene, it writes:
 

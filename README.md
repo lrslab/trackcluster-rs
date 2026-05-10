@@ -66,9 +66,14 @@ trackcluster validate-bed -i tests/fixtures/minimal.bed
 
 # Junction-mode clustering (writes isoform.bed + mapping + unused)
 trackcluster clusterj -s tests/fixtures/reads.bed -r tests/fixtures/ref.bed -o isoform.bed
+# Platform presets:
+#   --platform-preset rna002  # junction offset 15; SL 5' offsets 20/25/20
+#   --platform-preset rna004  # conservative defaults: junction offset 10; SL 5' offsets 15/25/15
 # SL 5' merge behavior can be tuned with --sl-partial-5prime-offset,
 # --sl-same-junction-5prime-offset, --sl-5prime-cluster-offset, and
 # --sl-5prime-min-support.
+# SL evidence is optional. Reads without SL information use the normal junction
+# correction and 5' truncation collapse path, but are not SL-protected isoforms.
 
 # Overlap-mode clustering (legacy-style two-round exon/intron overlap mode)
 trackcluster cluster -s tests/fixtures/reads.bed -r tests/fixtures/ref.bed -o isoform.bed

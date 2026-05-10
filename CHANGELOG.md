@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.11
+- Add configurable junction correction controls for `clusterj`, `flow`, and `clusterj_batch`: `--junction-correction-offset` and `--junction-correction-min-support`.
+- Add `--platform-preset generic|rna002|rna004`; `generic` preserves current defaults, `rna002` widens junction correction and SL 5' offsets for RNA002/DEI-style workflows, and `rna004` keeps conservative/default RNA004 cutoffs.
+- Let explicit junction correction and SL 5' options override preset values across single-file, flow, and batched clustering.
+- Record the active platform preset and junction correction settings in batch summary files for reproducibility.
+- Document the distinction between internal junction correction offsets and SL/5' terminal merge/protection offsets.
+- Add regression coverage for junction correction offset/min-support behavior, preset expansion, preset override precedence, and summary output.
+
+## 0.1.10
+- Speed up SW-aware `clusterj` merging by grouping SL 5' support by junction chain and avoiding redundant merge-target scans.
+- Add exact-duplicate representative pruning for non-reference reads with identical corrected transcript structure.
+- Add `unc52` regression fixtures for SW-aware junction clustering.
+
 ## 0.1.9
 - Add SL-aware junction merge controls for `clusterj`, `flow`, and `clusterj_batch`: `--sl-partial-5prime-offset`, `--sl-same-junction-5prime-offset`, `--sl-5prime-cluster-offset`, and `--sl-5prime-min-support`.
 - Keep supported alternative SL 5' clusters as candidate isoforms while still merging singleton likely-degradation reads.

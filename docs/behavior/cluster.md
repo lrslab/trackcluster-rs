@@ -36,6 +36,22 @@ Current CLI exposure:
 
 This is intended as a starting point; full parity should be validated/adjusted using goldens.
 
+## Junction-mode correction controls
+
+Junction-mode clustering (`clusterj`, `flow` default mode, and `clusterj_batch`) first corrects low-support splice-junction sites before the SL-aware merge pass:
+- `--junction-correction-offset` (default `10`; `rna002` preset `15`; `rna004` preset `10`)
+- `--junction-correction-min-support` (default `2`)
+
+The correction offset controls internal splice-junction coordinate snapping. It is distinct from the SL/5' terminal offsets below, which protect or merge transcript ends after junction correction. Widening junction correction can reduce rare/unused reads, but it can also erase real nearby splice sites.
+
+`--platform-preset generic|rna002|rna004` seeds both junction correction and SL defaults. `generic` matches the compatibility defaults. `rna002` sets junction correction offset to `15`, SL partial 5' offset to `20`, SL same-junction 5' offset to `25`, SL 5' cluster offset to `20`, and SL 5' minimum support to `2`. `rna004` intentionally uses the conservative default cutoffs: junction correction offset `10`, SL partial 5' offset `15`, SL same-junction 5' offset `25`, SL 5' cluster offset `15`, and SL 5' minimum support `2`. Explicit CLI values override the preset.
+
+| Preset | Junction correction offset | Junction min support | SL partial 5' offset | SL same-junction 5' offset | SL 5' cluster offset | SL min support |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `generic` | `10` | `2` | `15` | `25` | `15` | `2` |
+| `rna002` | `15` | `2` | `20` | `25` | `20` | `2` |
+| `rna004` | `10` | `2` | `15` | `25` | `15` | `2` |
+
 ## Junction-mode SL 5' merge controls
 
 Junction-mode clustering (`clusterj`, `flow` default mode, and `clusterj_batch`) exposes SL-aware 5' merge controls:
@@ -44,4 +60,6 @@ Junction-mode clustering (`clusterj`, `flow` default mode, and `clusterj_batch`)
 - `--sl-5prime-cluster-offset` (default `15`)
 - `--sl-5prime-min-support` (default `2`)
 
-Reads with score greater than `--sw-score` are treated as SL-supported. A supported candidate with enough nearby same-junction 5' support is protected from merging when its biological 5' end is outside the relevant offset from the longer/reference track. Singleton supported reads can still merge as likely degradation. Setting `--sw-score -1` disables junction truncation collapsing, including batched merging.
+Reads with score greater than `--sw-score` are treated as SL-supported. A supported candidate with enough nearby same-junction 5' support is protected from merging when its biological 5' end is outside the relevant offset from the longer/reference track. Singleton supported reads can still merge as likely degradation.
+
+SL information is optional and many datasets do not have it for every read. Reads without SL evidence, or reads whose score is not greater than `--sw-score`, are handled as non-SL-supported reads: they still participate in junction correction and normal 5' truncation collapsing, but they do not receive SL-cluster protection as alternative 5' isoforms. Keep the default `--sw-score 11` for mixed/no-SL datasets unless you intentionally want to disable 5' truncation collapsing; setting `--sw-score -1` disables junction truncation collapsing, including batched merging.

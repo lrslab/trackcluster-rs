@@ -726,7 +726,7 @@ dependencies = [
 
 [[package]]
 name = "trackcluster-rs"
-version = "0.1.9"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "clap",

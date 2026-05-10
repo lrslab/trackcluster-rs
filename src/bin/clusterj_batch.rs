@@ -61,21 +61,33 @@ struct Args {
     #[arg(long = "name2-mode", default_value_t = trackcluster_rs::cluster::clusterj::Name2Mode::Coverage)]
     name2_mode: trackcluster_rs::cluster::clusterj::Name2Mode,
 
+    /// Platform preset used to seed junction correction and SL 5' defaults: generic, rna002, or rna004.
+    #[arg(long = "platform-preset", default_value_t = trackcluster_rs::cluster::clusterj::PlatformPreset::Generic)]
+    platform_preset: trackcluster_rs::cluster::clusterj::PlatformPreset,
+
+    /// Internal junction correction offset in bp; distinct from SL/5' terminal offsets.
+    #[arg(long = "junction-correction-offset")]
+    junction_correction_offset: Option<u32>,
+
+    /// Minimum weighted support for a junction site to avoid correction/filtering.
+    #[arg(long = "junction-correction-min-support")]
+    junction_correction_min_support: Option<u32>,
+
     /// SL-supported partial/5' truncation biological 5' offset tolerated for merging.
-    #[arg(long = "sl-partial-5prime-offset", default_value_t = trackcluster_rs::cluster::clusterj::DEFAULT_SL_PARTIAL_FIVE_PRIME_END_OFFSET)]
-    sl_partial_5prime_offset: u32,
+    #[arg(long = "sl-partial-5prime-offset")]
+    sl_partial_5prime_offset: Option<u32>,
 
     /// SL-supported same-junction biological 5' offset tolerated for merging.
-    #[arg(long = "sl-same-junction-5prime-offset", default_value_t = trackcluster_rs::cluster::clusterj::DEFAULT_SL_SAME_JUNCTION_FIVE_PRIME_END_OFFSET)]
-    sl_same_junction_5prime_offset: u32,
+    #[arg(long = "sl-same-junction-5prime-offset")]
+    sl_same_junction_5prime_offset: Option<u32>,
 
     /// Offset used to group SL-supported reads into the same biological 5' cluster.
-    #[arg(long = "sl-5prime-cluster-offset", default_value_t = trackcluster_rs::cluster::clusterj::DEFAULT_SL_FIVE_PRIME_CLUSTER_OFFSET)]
-    sl_5prime_cluster_offset: u32,
+    #[arg(long = "sl-5prime-cluster-offset")]
+    sl_5prime_cluster_offset: Option<u32>,
 
     /// Minimum read support required for an SL 5' cluster to protect a candidate isoform.
-    #[arg(long = "sl-5prime-min-support", default_value_t = trackcluster_rs::cluster::clusterj::DEFAULT_MIN_SL_FIVE_PRIME_CLUSTER_SUPPORT)]
-    sl_5prime_min_support: usize,
+    #[arg(long = "sl-5prime-min-support")]
+    sl_5prime_min_support: Option<usize>,
 
     /// Overwrite existing outputs (default: skip genes whose output file already exists)
     #[arg(long = "force")]
@@ -110,6 +122,15 @@ struct Args {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    let resolved_options = trackcluster_rs::cluster::clusterj::resolve_platform_options(
+        args.platform_preset,
+        args.junction_correction_offset,
+        args.junction_correction_min_support,
+        args.sl_partial_5prime_offset,
+        args.sl_same_junction_5prime_offset,
+        args.sl_5prime_cluster_offset,
+        args.sl_5prime_min_support,
+    );
     trackcluster_rs::flow::full::run_clusterj_batch(
         trackcluster_rs::flow::full::BatchRunOptions {
             cluster_mode: trackcluster_rs::flow::full::ClusterMode::Clusterj,
@@ -126,12 +147,9 @@ fn main() -> anyhow::Result<()> {
             batch_size: args.batch_size,
             batch_rounds: args.batch_rounds,
             name2_mode: args.name2_mode,
-            sl_options: trackcluster_rs::cluster::clusterj::SlMergeOptions {
-                partial_five_prime_end_offset: args.sl_partial_5prime_offset,
-                same_junction_five_prime_end_offset: args.sl_same_junction_5prime_offset,
-                five_prime_cluster_offset: args.sl_5prime_cluster_offset,
-                min_five_prime_cluster_support: args.sl_5prime_min_support,
-            },
+            platform_preset: args.platform_preset,
+            junction_correction_options: resolved_options.junction_correction,
+            sl_options: resolved_options.sl_options,
             overlap_cutoff1: trackcluster_rs::cluster::cluster_overlap::DEFAULT_CUTOFF1,
             overlap_cutoff2: trackcluster_rs::cluster::cluster_overlap::DEFAULT_CUTOFF2,
             overlap_intron_weight: trackcluster_rs::cluster::cluster_overlap::DEFAULT_INTRON_WEIGHT,

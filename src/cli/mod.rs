@@ -93,10 +93,101 @@ mod tests {
                 assert_eq!(args.reference, PathBuf::from("ref.bed"));
                 assert_eq!(args.out, PathBuf::from("out.bed"));
                 assert_eq!(args.threads, 4);
-                assert_eq!(args.sl_partial_5prime_offset, 16);
-                assert_eq!(args.sl_same_junction_5prime_offset, 26);
-                assert_eq!(args.sl_5prime_cluster_offset, 17);
-                assert_eq!(args.sl_5prime_min_support, 3);
+                assert_eq!(args.sl_partial_5prime_offset, Some(16));
+                assert_eq!(args.sl_same_junction_5prime_offset, Some(26));
+                assert_eq!(args.sl_5prime_cluster_offset, Some(17));
+                assert_eq!(args.sl_5prime_min_support, Some(3));
+            }
+            _ => panic!("expected clusterj args"),
+        }
+    }
+
+    #[test]
+    fn clusterj_rna002_preset_expands_and_explicit_flags_override() {
+        let cli = Cli::try_parse_from([
+            "trackcluster",
+            "clusterj",
+            "-s",
+            "reads.bed",
+            "-r",
+            "ref.bed",
+            "--platform-preset",
+            "rna002",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Clusterj(args) => {
+                let resolved = args.resolved_platform_options();
+                assert_eq!(
+                    args.platform_preset,
+                    crate::cluster::clusterj::PlatformPreset::Rna002
+                );
+                assert_eq!(resolved.junction_correction.offset, 15);
+                assert_eq!(resolved.junction_correction.min_support, 2);
+                assert_eq!(resolved.sl_options.partial_five_prime_end_offset, 20);
+                assert_eq!(resolved.sl_options.same_junction_five_prime_end_offset, 25);
+                assert_eq!(resolved.sl_options.five_prime_cluster_offset, 20);
+                assert_eq!(resolved.sl_options.min_five_prime_cluster_support, 2);
+            }
+            _ => panic!("expected clusterj args"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "trackcluster",
+            "clusterj",
+            "-s",
+            "reads.bed",
+            "-r",
+            "ref.bed",
+            "--platform-preset",
+            "rna002",
+            "--junction-correction-offset",
+            "12",
+            "--sl-partial-5prime-offset",
+            "18",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Clusterj(args) => {
+                let resolved = args.resolved_platform_options();
+                assert_eq!(resolved.junction_correction.offset, 12);
+                assert_eq!(resolved.sl_options.partial_five_prime_end_offset, 18);
+                assert_eq!(resolved.sl_options.same_junction_five_prime_end_offset, 25);
+                assert_eq!(resolved.sl_options.five_prime_cluster_offset, 20);
+            }
+            _ => panic!("expected clusterj args"),
+        }
+    }
+
+    #[test]
+    fn clusterj_rna004_preset_uses_generic_cutoffs() {
+        let cli = Cli::try_parse_from([
+            "trackcluster",
+            "clusterj",
+            "-s",
+            "reads.bed",
+            "-r",
+            "ref.bed",
+            "--platform-preset",
+            "rna004",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Clusterj(args) => {
+                let resolved = args.resolved_platform_options();
+                assert_eq!(
+                    args.platform_preset,
+                    crate::cluster::clusterj::PlatformPreset::Rna004
+                );
+                assert_eq!(resolved.junction_correction.offset, 10);
+                assert_eq!(resolved.junction_correction.min_support, 2);
+                assert_eq!(resolved.sl_options.partial_five_prime_end_offset, 15);
+                assert_eq!(resolved.sl_options.same_junction_five_prime_end_offset, 25);
+                assert_eq!(resolved.sl_options.five_prime_cluster_offset, 15);
+                assert_eq!(resolved.sl_options.min_five_prime_cluster_support, 2);
             }
             _ => panic!("expected clusterj args"),
         }
