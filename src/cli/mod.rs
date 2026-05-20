@@ -124,7 +124,7 @@ mod tests {
                     crate::cluster::clusterj::PlatformPreset::Rna002
                 );
                 assert_eq!(resolved.junction_correction.offset, 15);
-                assert_eq!(resolved.junction_correction.min_support, 2);
+                assert_eq!(resolved.junction_correction.min_support, 5);
                 assert_eq!(resolved.sl_options.partial_five_prime_end_offset, 20);
                 assert_eq!(resolved.sl_options.same_junction_five_prime_end_offset, 25);
                 assert_eq!(resolved.sl_options.five_prime_cluster_offset, 20);
@@ -183,7 +183,7 @@ mod tests {
                     crate::cluster::clusterj::PlatformPreset::Rna004
                 );
                 assert_eq!(resolved.junction_correction.offset, 10);
-                assert_eq!(resolved.junction_correction.min_support, 2);
+                assert_eq!(resolved.junction_correction.min_support, 5);
                 assert_eq!(resolved.sl_options.partial_five_prime_end_offset, 15);
                 assert_eq!(resolved.sl_options.same_junction_five_prime_end_offset, 25);
                 assert_eq!(resolved.sl_options.five_prime_cluster_offset, 15);
@@ -313,6 +313,7 @@ mod tests {
                 assert_eq!(args.reference, PathBuf::from("ref.bed"));
                 assert_eq!(args.isoform, PathBuf::from("isoform.bed"));
                 assert_eq!(args.out_prefix, PathBuf::from("out/prefix"));
+                assert_eq!(args.assignment_mode, crate::count::AssignmentMode::Unique);
             }
             _ => panic!("expected count-multi args"),
         }

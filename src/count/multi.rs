@@ -8,7 +8,7 @@ use anyhow::Context;
 use crate::count::parse_subreads;
 use crate::io::manifest::{read_manifest_tsv, SampleRow};
 use crate::model::Transcript;
-use crate::sample::split_tagged_read_name;
+use crate::sample::{split_tagged_read_name, tagged_read_name};
 
 const GENE_NAME_COL: usize = 5;
 const EPSILON: f64 = 1e-12;
@@ -532,6 +532,46 @@ pub fn run_count_multi_from_read_to_isoform(
     write_count_multi_outputs(sample_rows, &result, out_prefix)
 }
 
+pub fn read_tagged_sample_reads(sample_rows: &[SampleRow]) -> anyhow::Result<Vec<Transcript>> {
+    let mut reads = Vec::new();
+    for row in sample_rows {
+        let mut sample_reads: Vec<Transcript> = crate::io::bed::read_bed12(&row.reads)
+            .with_context(|| format!("open reads {:?}", row.reads))?
+            .collect::<Result<Vec<_>, crate::io::bed::BedError>>()
+            .with_context(|| format!("parse reads {:?}", row.reads))?;
+        for read in &mut sample_reads {
+            match split_tagged_read_name(&read.name) {
+                Some((sample_name, _)) if sample_name == row.sample => {}
+                _ => {
+                    read.name = tagged_read_name(&row.sample, &read.name);
+                }
+            }
+        }
+        reads.extend(sample_reads);
+    }
+    Ok(reads)
+}
+
+pub fn run_count_multi_from_read_to_isoform_unique(
+    sample_rows: &[SampleRow],
+    isoforms: &[Transcript],
+    reads: &[Transcript],
+    read_to_isoform: &[(String, String)],
+    out_prefix: &Path,
+) -> anyhow::Result<MultiSampleOutputPaths> {
+    if let Some(parent) = out_prefix
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).with_context(|| format!("create output dir {parent:?}"))?;
+    }
+
+    let unique_pairs =
+        crate::count::select_unique_best_read_to_isoform(reads, isoforms, read_to_isoform)?;
+    let result = count_multi_by_read_to_isoform(isoforms, &unique_pairs, sample_rows)?;
+    write_count_multi_outputs(sample_rows, &result, out_prefix)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -541,17 +581,27 @@ mod tests {
     use super::*;
 
     fn make_tx(name: &str, name2: &str, gene: &str) -> Transcript {
+        make_tx_with_exons(name, name2, gene, &[(100, 200)])
+    }
+
+    fn make_tx_with_exons(name: &str, name2: &str, gene: &str, exons: &[(u32, u32)]) -> Transcript {
+        let tx_start = exons.iter().map(|(start, _)| *start).min().unwrap();
+        let tx_end = exons.iter().map(|(_, end)| *end).max().unwrap();
+        let exons = exons
+            .iter()
+            .map(|(start, end)| Interval::new(Coord::new(*start), Coord::new(*end)).unwrap())
+            .collect::<Vec<_>>();
         Transcript::new(
             "chr1".to_owned(),
             Strand::Plus,
-            Coord::new(100),
-            Coord::new(200),
+            Coord::new(tx_start),
+            Coord::new(tx_end),
             name.to_owned(),
-            vec![Interval::new(Coord::new(100), Coord::new(200)).unwrap()],
+            exons,
             Bed12Attrs {
                 score: 0,
-                thick_start: Coord::new(100),
-                thick_end: Coord::new(200),
+                thick_start: Coord::new(tx_start),
+                thick_end: Coord::new(tx_end),
                 item_rgb: "0".to_owned(),
                 extra_fields: vec![
                     name2.to_owned(),
@@ -650,6 +700,51 @@ mod tests {
                 assert!((l - r).abs() < 1e-9);
             }
         }
+    }
+
+    #[test]
+    fn unique_mapping_counts_each_read_once() {
+        let isoforms = vec![
+            make_tx_with_exons("long_ref", "S1::r1,|0", "GENEA", &[(50, 60), (100, 200)]),
+            make_tx_with_exons("closest_novel", "S1::r1,|0", "GENEA", &[(100, 200)]),
+        ];
+        let read = Transcript::new(
+            "chr1".to_owned(),
+            Strand::Plus,
+            Coord::new(100),
+            Coord::new(200),
+            "S1::r1".to_owned(),
+            vec![Interval::new(Coord::new(100), Coord::new(200)).unwrap()],
+            Bed12Attrs {
+                score: 0,
+                thick_start: Coord::new(100),
+                thick_end: Coord::new(200),
+                item_rgb: "0".to_owned(),
+                extra_fields: vec![],
+            },
+        )
+        .unwrap();
+        let mapping = vec![
+            ("S1::r1".to_owned(), "long_ref".to_owned()),
+            ("S1::r1".to_owned(), "closest_novel".to_owned()),
+        ];
+
+        let unique =
+            crate::count::select_unique_best_read_to_isoform(&[read], &isoforms, &mapping).unwrap();
+        let result = count_multi_by_read_to_isoform(&isoforms, &unique, &sample_rows()).unwrap();
+        let long_ref = result
+            .matrix_rows
+            .iter()
+            .find(|row| row.isoform_id == "long_ref")
+            .unwrap();
+        let closest = result
+            .matrix_rows
+            .iter()
+            .find(|row| row.isoform_id == "closest_novel")
+            .unwrap();
+
+        assert_eq!(long_ref.counts, vec![0.0, 0.0]);
+        assert_eq!(closest.counts, vec![1.0, 0.0]);
     }
 
     #[test]

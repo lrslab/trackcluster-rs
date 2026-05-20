@@ -85,7 +85,7 @@ fn clusterj_batch_keeps_compat_behavior() {
     let summary_text = fs::read_to_string(summary).unwrap();
     assert!(summary_text.contains("platform_preset\tgeneric"));
     assert!(summary_text.contains("junction_correction_offset\t10"));
-    assert!(summary_text.contains("junction_correction_min_support\t2"));
+    assert!(summary_text.contains("junction_correction_min_support\t5"));
     assert!(summary_text.contains("total_genes\t1"));
     assert!(summary_text.contains("errors\t0"));
 }

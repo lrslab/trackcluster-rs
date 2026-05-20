@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.12
+- Make `unique` the default assignment mode for `count`, `count-multi`, and `flow`; pass `--assignment-mode fractional` to keep legacy split-count behavior.
+- Expand unique counting against the isoform catalog before choosing the closest compatible isoform, so reads are not trapped by an incomplete `read_to_isoform.tsv` candidate set.
+- Use structure-aware unique assignment across mapping-backed and embedded-subread counting paths, including multi-sample manifest reads and pooled `flow` outputs.
+- Add fuzzy same-junction merging in `clusterj` using the active junction correction offset, with a same-length junction-chain index to keep candidate scans bounded.
+- Raise the default weighted junction correction minimum support to `5`; the `rna002` preset now uses junction correction offset `15` with SL 5' offsets `20/25/20`.
+- Update CLI and behavior documentation for catalog-aware unique counting, weighted junction support, RNA002 defaults, and the distinction between junction correction and SL/5' terminal offsets.
+- Add regression coverage for fuzzy same-junction merging, catalog-expanded unique assignment, default unique counting, and explicit fractional compatibility.
+
 ## 0.1.11
 - Add configurable junction correction controls for `clusterj`, `flow`, and `clusterj_batch`: `--junction-correction-offset` and `--junction-correction-min-support`.
 - Add `--platform-preset generic|rna002|rna004`; `generic` preserves current defaults, `rna002` widens junction correction and SL 5' offsets for RNA002/DEI-style workflows, and `rna004` keeps conservative/default RNA004 cutoffs.

@@ -80,6 +80,7 @@ fn count_multi_outputs_expected_long_and_matrix_tables() {
     let matrix = fs::read_to_string(matrix_tsv).expect("read matrix tsv");
     let mut lines = matrix.lines();
     assert_eq!(lines.next().unwrap(), "gene\tisoform_id\tS1\tS2");
+    let mut counts = std::collections::HashMap::<String, (f64, f64)>::new();
     let mut seen_rows = 0usize;
     for line in lines {
         let fields: Vec<&str> = line.split('\t').collect();
@@ -87,11 +88,12 @@ fn count_multi_outputs_expected_long_and_matrix_tables() {
         assert_eq!(fields[0], "GENEA");
         let c1: f64 = fields[2].parse().expect("parse S1 count");
         let c2: f64 = fields[3].parse().expect("parse S2 count");
-        assert!((c1 - 0.5).abs() < 1e-9);
-        assert!((c2 - 0.5).abs() < 1e-9);
+        counts.insert(fields[1].to_owned(), (c1, c2));
         seen_rows += 1;
     }
     assert_eq!(seen_rows, 2);
+    assert_eq!(counts.get("ref_a"), Some(&(1.0, 1.0)));
+    assert_eq!(counts.get("ref_b"), Some(&(0.0, 0.0)));
 
     let long = fs::read_to_string(long_tsv).expect("read long tsv");
     let mut sums = std::collections::HashMap::<String, f64>::new();
@@ -106,5 +108,38 @@ fn count_multi_outputs_expected_long_and_matrix_tables() {
     }
     for total in sums.values() {
         assert!((*total - 1.0).abs() < 1e-9);
+    }
+
+    let fractional_out_prefix = out_dir.join("recount_fractional");
+    let fractional_status = Command::new(exe)
+        .args([
+            "count-multi",
+            "--manifest",
+            manifest.to_str().unwrap(),
+            "-r",
+            reference.to_str().unwrap(),
+            "-i",
+            isoform.to_str().unwrap(),
+            "--assignment-mode",
+            "fractional",
+            "-o",
+            fractional_out_prefix.to_str().unwrap(),
+        ])
+        .status()
+        .expect("run fractional count-multi");
+    assert!(fractional_status.success());
+
+    let fractional_matrix =
+        fs::read_to_string(out_dir.join("recount_fractional.isoform_counts.matrix.tsv"))
+            .expect("read fractional matrix tsv");
+    let mut lines = fractional_matrix.lines();
+    assert_eq!(lines.next().unwrap(), "gene\tisoform_id\tS1\tS2");
+    for line in lines {
+        let fields: Vec<&str> = line.split('\t').collect();
+        assert_eq!(fields.len(), 4);
+        let c1: f64 = fields[2].parse().expect("parse S1 fractional count");
+        let c2: f64 = fields[3].parse().expect("parse S2 fractional count");
+        assert!((c1 - 0.5).abs() < 1e-9);
+        assert!((c2 - 0.5).abs() < 1e-9);
     }
 }

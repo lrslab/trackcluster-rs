@@ -31,7 +31,7 @@ By default (`--name2-mode coverage`), this stores only a coverage value:
 - `--name2-mode full`: `extra_fields[0] = "<read1>,<read2>,...,|<coverage>"`
   - Example: `readA,readB,readC,|2.5`
 
-When read IDs are omitted from `name2`, use the `*_read_to_isoform.tsv` mapping written by `clusterj`/`cluster`/`flow` and pass it to `count` / `count-multi` via `--read-to-isoform` (or keep it next to the isoform BED for auto-discovery).
+When read IDs are omitted from `name2`, use the `*_read_to_isoform.tsv` mapping written by `clusterj`/`cluster`/`flow` and pass it to `count` / `count-multi` via `--read-to-isoform` (or keep it next to the isoform BED for auto-discovery). Counting defaults to unique best assignment: it expands compatible candidates against the isoform catalog, then selects the closest isoform per read before counting. Pass `--assignment-mode fractional` for compatibility with split multi-mapped counts from the mapping file.
 
 ## Multi-sample manifest TSV
 `count-multi` and `flow --manifest` expect a tab-separated manifest with:

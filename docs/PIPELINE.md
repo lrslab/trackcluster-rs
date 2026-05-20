@@ -185,6 +185,7 @@ Low-support splice-junction sites are corrected before merging with `--junction-
 Supported alternative SL 5' clusters can be protected from merging with the separate `--sl-*` terminal controls exposed by `trackcluster clusterj`, `trackcluster flow`, and `clusterj_batch`.
 Use `--platform-preset rna002` for RNA002 reads (junction offset `15`; SL 5' offsets `20/25/20`) and `--platform-preset rna004` for RNA004 reads (conservative defaults: junction offset `10`; SL 5' offsets `15/25/15`). Explicit junction correction and SL options override the preset.
 SL evidence is optional; reads without SL information still use junction correction and normal 5' truncation collapsing, but they are not protected by the SL-cluster rules.
+Counting defaults to `--assignment-mode unique`, so each read contributes to only the closest compatible catalog isoform. Pass `--assignment-mode fractional` for compatibility with split multi-mapped counts from the mapping file.
 
 For each gene, it writes:
 

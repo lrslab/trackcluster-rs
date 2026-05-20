@@ -20,6 +20,10 @@ pub struct Args {
     #[arg(long = "read-to-isoform")]
     pub read_to_isoform: Option<PathBuf>,
 
+    /// How reads with multiple isoform candidates are counted: fractional or unique
+    #[arg(long = "assignment-mode", default_value_t = crate::count::AssignmentMode::Unique)]
+    pub assignment_mode: crate::count::AssignmentMode,
+
     /// Output file prefix (writes .isoform_usage.long.tsv and .isoform_counts.matrix.tsv)
     #[arg(short = 'o', long = "out")]
     pub out_prefix: PathBuf,
@@ -51,12 +55,23 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     let outputs = if let Some(mapping_path) = mapping_path.as_ref() {
         let pairs = crate::count::read_read_to_isoform_tsv(mapping_path)
             .with_context(|| format!("read mapping {mapping_path:?}"))?;
-        crate::count::multi::run_count_multi_from_read_to_isoform(
-            &sample_rows,
-            &isoforms,
-            &pairs,
-            &args.out_prefix,
-        )?
+        if args.assignment_mode == crate::count::AssignmentMode::Unique {
+            let reads = crate::count::multi::read_tagged_sample_reads(&sample_rows)?;
+            crate::count::multi::run_count_multi_from_read_to_isoform_unique(
+                &sample_rows,
+                &isoforms,
+                &reads,
+                &pairs,
+                &args.out_prefix,
+            )?
+        } else {
+            crate::count::multi::run_count_multi_from_read_to_isoform(
+                &sample_rows,
+                &isoforms,
+                &pairs,
+                &args.out_prefix,
+            )?
+        }
     } else {
         let has_subreads = isoforms
             .iter()
@@ -75,7 +90,19 @@ Provide --read-to-isoform or re-run clustering with --name2-mode full.",
             .collect::<Result<Vec<_>, crate::io::bed::BedError>>()
             .with_context(|| format!("parse reference {:?}", args.reference))?;
 
-        crate::count::multi::run_count_multi(&sample_rows, &isoforms, &refs, &args.out_prefix)?
+        if args.assignment_mode == crate::count::AssignmentMode::Unique {
+            let reads = crate::count::multi::read_tagged_sample_reads(&sample_rows)?;
+            let pairs = crate::count::read_to_isoform_from_subreads(&isoforms, &refs);
+            crate::count::multi::run_count_multi_from_read_to_isoform_unique(
+                &sample_rows,
+                &isoforms,
+                &reads,
+                &pairs,
+                &args.out_prefix,
+            )?
+        } else {
+            crate::count::multi::run_count_multi(&sample_rows, &isoforms, &refs, &args.out_prefix)?
+        }
     };
 
     eprintln!(

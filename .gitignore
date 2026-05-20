@@ -17,6 +17,7 @@
 /tmp/
 /results/
 /artifacts/
+/tests/genes/
 /isoform*.bed
 /isoform*.tsv
 /isoform*.csv

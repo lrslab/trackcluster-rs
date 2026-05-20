@@ -19,7 +19,7 @@ struct PartitionKey {
 const NAME2_COL: usize = 0;
 const TTYPE_COL: usize = 4;
 pub const DEFAULT_SW_SCORE: i64 = 11;
-pub const DEFAULT_JUNCTION_CORRECTION_MIN_SUPPORT: u32 = 2;
+pub const DEFAULT_JUNCTION_CORRECTION_MIN_SUPPORT: u32 = 5;
 pub const DEFAULT_JUNCTION_CORRECTION_OFFSET: u32 = 10;
 pub const DEFAULT_SL_PARTIAL_FIVE_PRIME_END_OFFSET: u32 = 15;
 pub const DEFAULT_SL_SAME_JUNCTION_FIVE_PRIME_END_OFFSET: u32 = 25;
@@ -440,24 +440,16 @@ fn flow_junction_correct(
 }
 
 fn junctions_equal(a: &[u32], b: &[u32], offset: u32) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
     if offset == 0 {
         return a == b;
     }
 
-    let mut matched_a: HashSet<u32> = HashSet::new();
-    let mut matched_b: HashSet<u32> = HashSet::new();
-
-    for &i in a {
-        for &j in b {
-            if i.abs_diff(j) <= offset {
-                matched_a.insert(i);
-                matched_b.insert(j);
-            }
-        }
-    }
-
-    a.iter().copied().collect::<HashSet<u32>>() == matched_a
-        && b.iter().copied().collect::<HashSet<u32>>() == matched_b
+    a.iter()
+        .zip(b.iter())
+        .all(|(&left, &right)| left.abs_diff(right) <= offset)
 }
 
 fn fuzzy_intersection(a: &[u32], b: &[u32], offset: u32) -> HashMap<u32, u32> {
@@ -559,12 +551,16 @@ fn is_junction_5primer(missed_order: &[usize]) -> bool {
     groups.len() == 1
 }
 
-fn junction_merge_kind(short_junctions: &[u32], long_junctions: &[u32]) -> Option<MergeKind> {
+fn junction_merge_kind(
+    short_junctions: &[u32],
+    long_junctions: &[u32],
+    same_junction_offset: u32,
+) -> Option<MergeKind> {
     if short_junctions.is_empty() {
         return None;
     }
 
-    if junctions_equal(short_junctions, long_junctions, 0) {
+    if junctions_equal(short_junctions, long_junctions, same_junction_offset) {
         return Some(MergeKind::SameJunction);
     }
 
@@ -833,6 +829,7 @@ struct MergeContext<'a> {
     sl_cluster_support: &'a [usize],
     sw_score: i64,
     sl_options: SlMergeOptions,
+    same_junction_offset: u32,
 }
 
 impl MergeContext<'_> {
@@ -854,9 +851,11 @@ impl MergeContext<'_> {
             };
             kind
         } else {
-            let Some(kind) =
-                junction_merge_kind(source_junctions, &self.junctions_cache[target_idx])
-            else {
+            let Some(kind) = junction_merge_kind(
+                source_junctions,
+                &self.junctions_cache[target_idx],
+                self.same_junction_offset,
+            ) else {
                 return false;
             };
             kind
@@ -918,6 +917,20 @@ fn build_junction_suffix_index<'a>(
     suffix_index
 }
 
+fn build_junction_length_index(
+    junctions_cache: &[Vec<u32>],
+    target_eligible: &[bool],
+) -> HashMap<usize, Vec<usize>> {
+    let mut length_index: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (idx, junctions) in junctions_cache.iter().enumerate() {
+        if !target_eligible[idx] || junctions.is_empty() {
+            continue;
+        }
+        length_index.entry(junctions.len()).or_default().push(idx);
+    }
+    length_index
+}
+
 fn build_exact_duplicate_representatives<'a>(
     tracks: &'a [Track],
     junctions_cache: &'a [Vec<u32>],
@@ -971,13 +984,14 @@ fn build_exact_duplicate_representatives<'a>(
 
 #[cfg(test)]
 fn junction_simple_merge(tracks: &mut [Track], sw_score: i64) -> Vec<usize> {
-    junction_simple_merge_with_options(tracks, sw_score, SlMergeOptions::default())
+    junction_simple_merge_with_options(tracks, sw_score, SlMergeOptions::default(), 0)
 }
 
 fn junction_simple_merge_with_options(
     tracks: &mut [Track],
     sw_score: i64,
     sl_options: SlMergeOptions,
+    same_junction_offset: u32,
 ) -> Vec<usize> {
     if sw_score < 0 {
         return (0..tracks.len()).collect();
@@ -1002,6 +1016,7 @@ fn junction_simple_merge_with_options(
         build_sl_five_prime_cluster_support(tracks, &junctions_cache, sw_score, sl_options);
 
     let suffix_index = build_junction_suffix_index(&junctions_cache, &target_eligible);
+    let length_index = build_junction_length_index(&junctions_cache, &target_eligible);
 
     let mut dropped: Vec<bool> = vec![false; tracks.len()];
     for i in 0..tracks.len() {
@@ -1031,6 +1046,7 @@ fn junction_simple_merge_with_options(
                         sl_cluster_support: &sl_cluster_support,
                         sw_score,
                         sl_options,
+                        same_junction_offset,
                     };
                     ctx.should_merge_into(i, j)
                 };
@@ -1044,11 +1060,23 @@ fn junction_simple_merge_with_options(
             continue;
         }
 
-        let Some(candidates) = suffix_index.get(junctions_i.as_slice()) else {
+        let exact_candidates = suffix_index.get(junctions_i.as_slice());
+        let same_length_candidates = (same_junction_offset > 0)
+            .then(|| length_index.get(&junctions_i.len()))
+            .flatten();
+        if exact_candidates.is_none() && same_length_candidates.is_none() {
             continue;
-        };
+        }
 
-        for &j in candidates {
+        let mut seen_candidates: HashSet<usize> = HashSet::new();
+        for &j in exact_candidates
+            .into_iter()
+            .flatten()
+            .chain(same_length_candidates.into_iter().flatten())
+        {
+            if !seen_candidates.insert(j) {
+                continue;
+            }
             if i == j {
                 continue;
             }
@@ -1066,6 +1094,7 @@ fn junction_simple_merge_with_options(
                     sl_cluster_support: &sl_cluster_support,
                     sw_score,
                     sl_options,
+                    same_junction_offset,
                 };
                 ctx.should_merge_into(i, j)
             };
@@ -1089,7 +1118,7 @@ fn junction_simple_merge_with_options(
 
 #[cfg(test)]
 fn junction_simple_merge_naive(tracks: &mut [Track], sw_score: i64) -> Vec<usize> {
-    junction_simple_merge_naive_with_options(tracks, sw_score, SlMergeOptions::default())
+    junction_simple_merge_naive_with_options(tracks, sw_score, SlMergeOptions::default(), 0)
 }
 
 #[cfg(test)]
@@ -1097,6 +1126,7 @@ fn junction_simple_merge_naive_with_options(
     tracks: &mut [Track],
     sw_score: i64,
     sl_options: SlMergeOptions,
+    same_junction_offset: u32,
 ) -> Vec<usize> {
     if sw_score < 0 {
         return (0..tracks.len()).collect();
@@ -1137,6 +1167,7 @@ fn junction_simple_merge_naive_with_options(
                     sl_cluster_support: &sl_cluster_support,
                     sw_score,
                     sl_options,
+                    same_junction_offset,
                 };
                 ctx.should_merge_into(i, j)
             };
@@ -1210,8 +1241,10 @@ fn merge_one_batch(
     mut tracks: Vec<Track>,
     sw_score: i64,
     sl_options: SlMergeOptions,
+    same_junction_offset: u32,
 ) -> Vec<Track> {
-    let keep_indices = junction_simple_merge_with_options(&mut tracks, sw_score, sl_options);
+    let keep_indices =
+        junction_simple_merge_with_options(&mut tracks, sw_score, sl_options, same_junction_offset);
     select_tracks_by_keep_indices(tracks, keep_indices)
 }
 
@@ -1221,6 +1254,7 @@ fn merge_read_batches(
     batch_size: usize,
     sw_score: i64,
     sl_options: SlMergeOptions,
+    same_junction_offset: u32,
 ) -> (Vec<Track>, bool) {
     let mut anchors: Vec<Track> = ref_tracks.to_vec();
     let mut changed = false;
@@ -1231,7 +1265,7 @@ fn merge_read_batches(
         batch.extend(chunk.iter().cloned());
 
         let before_len = batch.len();
-        let merged = merge_one_batch(batch, sw_score, sl_options);
+        let merged = merge_one_batch(batch, sw_score, sl_options, same_junction_offset);
         if merged.len() < before_len {
             changed = true;
         }
@@ -1248,6 +1282,7 @@ fn batch_junction_simple_merge(
     batch_size: usize,
     max_rounds: usize,
     sl_options: SlMergeOptions,
+    same_junction_offset: u32,
 ) -> Vec<Track> {
     let batch_size = batch_size.max(1);
     let max_rounds = max_rounds.max(1);
@@ -1265,10 +1300,17 @@ fn batch_junction_simple_merge(
             let mut combined: Vec<Track> = Vec::with_capacity(refs.len() + reads.len());
             combined.extend(refs);
             combined.extend(reads);
-            return merge_one_batch(combined, sw_score, sl_options);
+            return merge_one_batch(combined, sw_score, sl_options, same_junction_offset);
         }
 
-        let (merged, changed) = merge_read_batches(&refs, reads, batch_size, sw_score, sl_options);
+        let (merged, changed) = merge_read_batches(
+            &refs,
+            reads,
+            batch_size,
+            sw_score,
+            sl_options,
+            same_junction_offset,
+        );
         tracks = merged;
 
         if !changed || tracks.len() >= previous_len {
@@ -1283,10 +1325,17 @@ fn batch_junction_simple_merge(
         let mut combined: Vec<Track> = Vec::with_capacity(refs.len() + reads.len());
         combined.extend(refs);
         combined.extend(reads);
-        return merge_one_batch(combined, sw_score, sl_options);
+        return merge_one_batch(combined, sw_score, sl_options, same_junction_offset);
     }
 
-    let (merged, _) = merge_read_batches(&refs, reads, batch_size, sw_score, sl_options);
+    let (merged, _) = merge_read_batches(
+        &refs,
+        reads,
+        batch_size,
+        sw_score,
+        sl_options,
+        same_junction_offset,
+    );
     merged
 }
 
@@ -1450,8 +1499,12 @@ fn process_partition(
     let mut kept: Vec<Track> = Vec::new();
     for mut locus_tracks in loci {
         let mut locus_kept = if batch_size == 0 {
-            let keep_indices =
-                junction_simple_merge_with_options(&mut locus_tracks, sw_score, sl_options);
+            let keep_indices = junction_simple_merge_with_options(
+                &mut locus_tracks,
+                sw_score,
+                sl_options,
+                junction_correction.offset,
+            );
             select_tracks_by_keep_indices(locus_tracks, keep_indices)
         } else {
             batch_junction_simple_merge(
@@ -1460,6 +1513,7 @@ fn process_partition(
                 batch_size,
                 batch_rounds,
                 sl_options,
+                junction_correction.offset,
             )
         };
         kept.append(&mut locus_kept);
@@ -1819,6 +1873,105 @@ mod tests {
         for idx in keep_indexed {
             assert_eq!(tracks[idx].subreads, naive_tracks[idx].subreads);
         }
+    }
+
+    #[test]
+    fn fuzzy_same_junction_merge_uses_offset() {
+        let tracks = vec![
+            make_track(
+                "long_chain",
+                Strand::Plus,
+                &[(100, 150), (200, 250), (300, 350)],
+                "nanopore_read",
+                0,
+            ),
+            make_track(
+                "near_chain",
+                Strand::Plus,
+                &[(102, 154), (204, 249), (304, 348)],
+                "nanopore_read",
+                0,
+            ),
+        ];
+
+        let mut exact_tracks = tracks.clone();
+        let keep_exact =
+            junction_simple_merge_with_options(&mut exact_tracks, 11, SlMergeOptions::default(), 0);
+        assert_eq!(keep_exact, vec![0, 1]);
+
+        let mut fuzzy_tracks = tracks;
+        let keep_fuzzy =
+            junction_simple_merge_with_options(&mut fuzzy_tracks, 11, SlMergeOptions::default(), 5);
+        assert_eq!(keep_fuzzy, vec![0]);
+        assert!(fuzzy_tracks[0].subreads.contains("long_chain"));
+        assert!(fuzzy_tracks[0].subreads.contains("near_chain"));
+    }
+
+    #[test]
+    fn clusterj_fuzzy_same_junction_uses_junction_correction_offset() {
+        let refs = vec![make_tx(
+            "ref_anchor",
+            Strand::Plus,
+            &[(50, 500)],
+            "isoform_anno",
+            100,
+        )];
+        let reads = vec![
+            make_tx(
+                "long_chain",
+                Strand::Plus,
+                &[(100, 150), (200, 250), (300, 350)],
+                "nanopore_read",
+                1,
+            ),
+            make_tx(
+                "near_chain",
+                Strand::Plus,
+                &[(102, 154), (204, 249), (304, 348)],
+                "nanopore_read",
+                1,
+            ),
+        ];
+
+        let exact = clusterj_with_options(
+            &reads,
+            Some(&refs),
+            1,
+            11,
+            0,
+            1,
+            Name2Mode::Full,
+            SlMergeOptions::default(),
+            JunctionCorrectionOptions {
+                min_support: 1,
+                offset: 0,
+            },
+        );
+        let exact_names: HashSet<_> = exact.isoforms.iter().map(|tx| tx.name.as_str()).collect();
+        assert!(exact_names.contains("long_chain"));
+        assert!(exact_names.contains("near_chain"));
+
+        let fuzzy = clusterj_with_options(
+            &reads,
+            Some(&refs),
+            1,
+            11,
+            0,
+            1,
+            Name2Mode::Full,
+            SlMergeOptions::default(),
+            JunctionCorrectionOptions {
+                min_support: 1,
+                offset: 5,
+            },
+        );
+        let fuzzy_names: HashSet<_> = fuzzy.isoforms.iter().map(|tx| tx.name.as_str()).collect();
+        assert!(fuzzy_names.contains("long_chain"));
+        assert!(!fuzzy_names.contains("near_chain"));
+        assert!(fuzzy
+            .read_to_isoform
+            .iter()
+            .any(|(read, isoform)| read == "near_chain" && isoform == "long_chain"));
     }
 
     proptest! {

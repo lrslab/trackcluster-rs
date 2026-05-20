@@ -94,6 +94,10 @@ pub struct Args {
     #[arg(long = "prepare-fraction-ref", default_value_t = 0.05)]
     pub prepare_fraction_ref: f64,
 
+    /// Counting mode for reads with multiple isoform candidates: fractional or unique
+    #[arg(long = "assignment-mode", default_value_t = crate::count::AssignmentMode::Unique)]
+    pub assignment_mode: crate::count::AssignmentMode,
+
     /// Manifest mode: also write `<prefix>_pooled_reads.bed` for debugging/compatibility
     #[arg(long = "emit-pooled-reads")]
     pub emit_pooled_reads: bool,
@@ -171,6 +175,7 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         overlap_intron_weight: args.overlap_intron_weight,
         prepare_fraction_read: args.prepare_fraction_read,
         prepare_fraction_ref: args.prepare_fraction_ref,
+        assignment_mode: args.assignment_mode,
         emit_pooled_reads: args.emit_pooled_reads,
         force: args.force,
         progress_every: args.progress_every,

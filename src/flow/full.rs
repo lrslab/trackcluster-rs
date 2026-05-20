@@ -151,6 +151,7 @@ pub struct FullFlowOptions {
     pub overlap_intron_weight: f64,
     pub prepare_fraction_read: f64,
     pub prepare_fraction_ref: f64,
+    pub assignment_mode: crate::count::AssignmentMode,
     pub emit_pooled_reads: bool,
     pub force: bool,
     pub progress_every: usize,
@@ -1297,11 +1298,30 @@ pub fn run_full_flow(opts: FullFlowOptions) -> anyhow::Result<FullFlowResult> {
     let read_to_isoform = crate::count::read_read_to_isoform_tsv(&read_to_isoform_tsv)
         .with_context(|| format!("read merged read_to_isoform {read_to_isoform_tsv:?}"))?;
 
+    let selected_read_to_isoform;
+    let count_read_to_isoform = if opts.assignment_mode == crate::count::AssignmentMode::Unique {
+        let reads_for_assignment = if let Some(rows) = sample_rows.as_ref() {
+            crate::count::multi::read_tagged_sample_reads(rows)?
+        } else if let Some(reads_path) = opts.reads.as_ref() {
+            read_bed12_records(reads_path, "reads")?
+        } else {
+            Vec::new()
+        };
+        selected_read_to_isoform = crate::count::select_unique_best_read_to_isoform(
+            &reads_for_assignment,
+            &isoforms,
+            &read_to_isoform,
+        )?;
+        &selected_read_to_isoform
+    } else {
+        &read_to_isoform
+    };
+
     eprintln!("flow: count + desc");
     run_count_and_desc(
         &isoforms,
         &refs,
-        &read_to_isoform,
+        count_read_to_isoform,
         &count_csv,
         &desc_prefix,
         downsample_scales.as_ref(),
@@ -1313,7 +1333,7 @@ pub fn run_full_flow(opts: FullFlowOptions) -> anyhow::Result<FullFlowResult> {
             Some(run_count_multi_scaled(
                 rows,
                 &isoforms,
-                &read_to_isoform,
+                count_read_to_isoform,
                 &output_prefix,
                 scales,
             )?)
@@ -1322,7 +1342,7 @@ pub fn run_full_flow(opts: FullFlowOptions) -> anyhow::Result<FullFlowResult> {
                 run_count_multi_from_read_to_isoform(
                     rows,
                     &isoforms,
-                    &read_to_isoform,
+                    count_read_to_isoform,
                     &output_prefix,
                 )
                 .with_context(|| {
