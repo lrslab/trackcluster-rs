@@ -200,8 +200,8 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     );
     if let Some(multi) = result.multi_sample {
         eprintln!(
-            "flow: multi-sample long={:?} matrix={:?} group={:?}",
-            multi.long_tsv, multi.matrix_tsv, multi.group_tsv
+            "flow: multi-sample count={:?} long={:?} matrix={:?} group={:?}",
+            multi.count_csv, multi.long_tsv, multi.matrix_tsv, multi.group_tsv
         );
     }
 

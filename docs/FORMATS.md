@@ -62,6 +62,18 @@ This guarantees sample identity for downstream per-sample counting.
 
 ## `count-multi` outputs
 
+### Aggregate count table (`*.isoform_count.csv`)
+Columns:
+- `isoform_id`
+- `count`
+
+Semantics:
+- `count` is exactly the sum of the sample columns in the matching
+  `*.isoform_counts.matrix.tsv`.
+- In `flow --manifest`, the main `<prefix>_isoform_count.csv` is synchronized
+  from the same aggregate table, so total counts and sample counts share one
+  assignment result.
+
 ### Long table (`*.isoform_usage.long.tsv`)
 Columns:
 - `gene`

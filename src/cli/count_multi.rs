@@ -106,8 +106,8 @@ Provide --read-to-isoform or re-run clustering with --name2-mode full.",
     };
 
     eprintln!(
-        "count-multi: long={:?} matrix={:?} group={:?}",
-        outputs.long_tsv, outputs.matrix_tsv, outputs.group_tsv
+        "count-multi: count={:?} long={:?} matrix={:?} group={:?}",
+        outputs.count_csv, outputs.long_tsv, outputs.matrix_tsv, outputs.group_tsv
     );
 
     Ok(())

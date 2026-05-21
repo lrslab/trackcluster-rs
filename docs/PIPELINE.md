@@ -115,9 +115,12 @@ Under `--output-root`:
 In manifest mode:
 
 - `pooled_pooled_reads.bed` (only if `--emit-pooled-reads`; sample-tagged IDs like `S1::read123`)
+- `pooled.isoform_count.csv` (aggregate counts derived from the per-sample matrix)
 - `pooled.isoform_usage.long.tsv`
 - `pooled.isoform_counts.matrix.tsv`
 - `pooled.isoform_usage.group.tsv` (if manifest includes `group`)
+
+In manifest mode, `pooled_isoform_count.csv` is synchronized from `pooled.isoform_count.csv`. This keeps the main total-count output consistent with the per-sample matrix and usage tables.
 
 The batch runner also writes:
 
@@ -257,9 +260,12 @@ trackcluster count-multi \
 
 This writes:
 
+- `sample.isoform_count.csv` (aggregate counts derived from the per-sample matrix)
 - `sample.isoform_usage.long.tsv`
 - `sample.isoform_counts.matrix.tsv`
 - `sample.isoform_usage.group.tsv` (if groups are defined)
+
+The aggregate count for each isoform is the sum of the corresponding row in `sample.isoform_counts.matrix.tsv`.
 
 ## Step 5 - Describe/classify isoforms (`desc`)
 

@@ -1028,6 +1028,14 @@ fn run_count_and_desc(
     write_counts_csv(count_csv, &counts)
         .with_context(|| format!("write count csv {count_csv:?}"))?;
 
+    write_desc_outputs(isoforms, refs, desc_prefix)
+}
+
+fn write_desc_outputs(
+    isoforms: &[Transcript],
+    refs: &[Transcript],
+    desc_prefix: &Path,
+) -> anyhow::Result<()> {
     let desc = describe(isoforms, refs, DescOpts::default());
 
     let desc_path = append_suffix(desc_prefix, "_desc.txt");
@@ -1113,8 +1121,13 @@ fn run_count_multi_scaled(
         row.gene_total *= scale;
     }
 
+    let count_csv = append_suffix(out_prefix, ".isoform_count.csv");
     let long_tsv = append_suffix(out_prefix, ".isoform_usage.long.tsv");
     let matrix_tsv = append_suffix(out_prefix, ".isoform_counts.matrix.tsv");
+    let count_records =
+        crate::count::multi::total_count_records_from_matrix_rows(&result.matrix_rows);
+    crate::count::write_counts_csv(&count_csv, &count_records)
+        .with_context(|| format!("write aggregate count output {count_csv:?}"))?;
     crate::count::multi::write_usage_long_tsv(&long_tsv, &result.long_rows, include_group)
         .with_context(|| format!("write long output {long_tsv:?}"))?;
     crate::count::multi::write_counts_matrix_tsv(&matrix_tsv, &result.matrix_rows, sample_rows)
@@ -1130,6 +1143,7 @@ fn run_count_multi_scaled(
     };
 
     Ok(MultiSampleOutputPaths {
+        count_csv,
         long_tsv,
         matrix_tsv,
         group_tsv,
@@ -1353,6 +1367,15 @@ pub fn run_full_flow(opts: FullFlowOptions) -> anyhow::Result<FullFlowResult> {
     } else {
         None
     };
+
+    if let Some(multi) = multi_sample.as_ref() {
+        fs::copy(&multi.count_csv, &count_csv).with_context(|| {
+            format!(
+                "sync aggregate count csv from multi-sample matrix {:?} -> {:?}",
+                multi.count_csv, count_csv
+            )
+        })?;
+    }
 
     Ok(FullFlowResult {
         batch,

@@ -116,9 +116,12 @@ Tip: with default `--name2-mode coverage` (or `none`), use `--read-to-isoform ou
 For overlap-mode pooled clustering, add `--cluster-mode cluster` to the `flow` command above.
 
 `count-multi` writes:
+- `out/pooled.isoform_count.csv`
 - `out/pooled.isoform_usage.long.tsv`
 - `out/pooled.isoform_counts.matrix.tsv`
 - `out/pooled.isoform_usage.group.tsv` (only when manifest has `group`)
+
+The aggregate `out/pooled.isoform_count.csv` is derived from the per-sample matrix: each isoform count is the sum of that isoform's sample columns. In `flow --manifest`, the main `<prefix>_isoform_count.csv` is synchronized from the same aggregate count, so total and per-sample counts use the same assignment result.
 
 ## Docs
 - 488 real-data demo (full walkthrough + manifest details): `docs/DEMO_488.md`

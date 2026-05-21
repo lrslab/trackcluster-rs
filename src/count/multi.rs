@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 
 use crate::count::parse_subreads;
+use crate::count::CountRecord;
 use crate::io::manifest::{read_manifest_tsv, SampleRow};
 use crate::model::Transcript;
 use crate::sample::{split_tagged_read_name, tagged_read_name};
@@ -50,6 +51,7 @@ pub struct MultiSampleCountResult {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MultiSampleOutputPaths {
+    pub count_csv: PathBuf,
     pub long_tsv: PathBuf,
     pub matrix_tsv: PathBuf,
     pub group_tsv: Option<PathBuf>,
@@ -433,6 +435,15 @@ pub fn write_counts_matrix_tsv(
     Ok(())
 }
 
+pub fn total_count_records_from_matrix_rows(rows: &[UsageMatrixRow]) -> Vec<CountRecord> {
+    rows.iter()
+        .map(|row| CountRecord {
+            isoform_id: row.isoform_id.clone(),
+            count: row.counts.iter().sum(),
+        })
+        .collect()
+}
+
 pub fn write_group_usage_tsv(path: &Path, rows: &[GroupUsageRow]) -> Result<(), std::io::Error> {
     let mut writer = std::io::BufWriter::new(std::fs::File::create(path)?);
     writeln!(
@@ -468,15 +479,19 @@ pub fn run_count_multi_from_paths(
     run_count_multi(&sample_rows, &isoforms, &refs, out_prefix)
 }
 
-fn write_count_multi_outputs(
+pub fn write_count_multi_outputs(
     sample_rows: &[SampleRow],
     result: &MultiSampleCountResult,
     out_prefix: &Path,
 ) -> anyhow::Result<MultiSampleOutputPaths> {
     let include_group = sample_rows.iter().any(|sample| sample.group.is_some());
 
+    let count_csv = append_suffix(out_prefix, ".isoform_count.csv");
     let long_tsv = append_suffix(out_prefix, ".isoform_usage.long.tsv");
     let matrix_tsv = append_suffix(out_prefix, ".isoform_counts.matrix.tsv");
+    let count_records = total_count_records_from_matrix_rows(&result.matrix_rows);
+    crate::count::write_counts_csv(&count_csv, &count_records)
+        .with_context(|| format!("write aggregate count output {count_csv:?}"))?;
     write_usage_long_tsv(&long_tsv, &result.long_rows, include_group)
         .with_context(|| format!("write long output {long_tsv:?}"))?;
     write_counts_matrix_tsv(&matrix_tsv, &result.matrix_rows, sample_rows)
@@ -492,6 +507,7 @@ fn write_count_multi_outputs(
     };
 
     Ok(MultiSampleOutputPaths {
+        count_csv,
         long_tsv,
         matrix_tsv,
         group_tsv,

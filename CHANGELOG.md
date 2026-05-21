@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.14
+- Derive `count-multi` aggregate counts from the emitted per-sample matrix and write them to `<prefix>.isoform_count.csv`.
+- Synchronize `flow --manifest` `<prefix>_isoform_count.csv` from the same multi-sample aggregate count, so the total count table, sample matrix, long usage table, and group usage table share one assignment result.
+- Keep `unique` assignment as the default for `count-multi` and `flow`, including catalog-expanded candidate selection for reads that should assign to a closer isoform than the original mapping candidate.
+- Document the new aggregate count output and its invariant: each `*.isoform_count.csv` value is exactly the sum of the corresponding row in `*.isoform_counts.matrix.tsv`.
+- Add regression coverage that checks `count-multi` aggregate counts and `flow --manifest` main count outputs against the per-sample matrix.
+
 ## 0.1.12
 - Make `unique` the default assignment mode for `count`, `count-multi`, and `flow`; pass `--assignment-mode fractional` to keep legacy split-count behavior.
 - Expand unique counting against the isoform catalog before choosing the closest compatible isoform, so reads are not trapped by an incomplete `read_to_isoform.tsv` candidate set.

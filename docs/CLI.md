@@ -64,6 +64,7 @@ Outputs (under `--output-root`):
 - `clusterj_batch_summary.txt` / `cluster_batch_summary.txt` and matching `*_errors.txt`
 - `clusterj_batch_downsample.tsv` / `cluster_batch_downsample.tsv` (only when downsampling occurs)
 - `<prefix>_pooled_reads.bed` (manifest mode + `--emit-pooled-reads`)
+- `<prefix>.isoform_count.csv` (manifest mode only; aggregate counts derived from the per-sample matrix)
 - `<prefix>.isoform_usage.long.tsv` (manifest mode only)
 - `<prefix>.isoform_counts.matrix.tsv` (manifest mode only)
 - `<prefix>.isoform_usage.group.tsv` (manifest mode only; only when manifest has `group`)
@@ -250,9 +251,13 @@ Input:
 - `--out/-o`: output prefix
 
 Outputs (`--out <prefix>`):
+- `<prefix>.isoform_count.csv` (aggregate counts derived from the per-sample matrix)
 - `<prefix>.isoform_usage.long.tsv`
 - `<prefix>.isoform_counts.matrix.tsv`
 - `<prefix>.isoform_usage.group.tsv` (only when manifest includes `group`)
+
+Aggregate count semantics:
+- `count` is exactly the sum of the sample columns in `<prefix>.isoform_counts.matrix.tsv` for the same isoform.
 
 Long-table semantics:
 - One row per `(gene, isoform, sample)` with non-zero count.

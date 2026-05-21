@@ -72,9 +72,11 @@ fn count_multi_outputs_expected_long_and_matrix_tables() {
 
     let long_tsv = out_dir.join("recount.isoform_usage.long.tsv");
     let matrix_tsv = out_dir.join("recount.isoform_counts.matrix.tsv");
+    let count_csv = out_dir.join("recount.isoform_count.csv");
     let group_tsv = out_dir.join("recount.isoform_usage.group.tsv");
     assert!(long_tsv.exists());
     assert!(matrix_tsv.exists());
+    assert!(count_csv.exists());
     assert!(group_tsv.exists());
 
     let matrix = fs::read_to_string(matrix_tsv).expect("read matrix tsv");
@@ -94,6 +96,28 @@ fn count_multi_outputs_expected_long_and_matrix_tables() {
     assert_eq!(seen_rows, 2);
     assert_eq!(counts.get("ref_a"), Some(&(1.0, 1.0)));
     assert_eq!(counts.get("ref_b"), Some(&(0.0, 0.0)));
+
+    let count_csv = fs::read_to_string(count_csv).expect("read aggregate count csv");
+    let mut aggregate_counts = std::collections::HashMap::<String, f64>::new();
+    for (idx, line) in count_csv.lines().enumerate() {
+        if idx == 0 {
+            assert_eq!(line, "isoform_id,count");
+            continue;
+        }
+        let fields: Vec<&str> = line.split(',').collect();
+        assert_eq!(fields.len(), 2);
+        aggregate_counts.insert(
+            fields[0].to_owned(),
+            fields[1].parse().expect("parse aggregate count"),
+        );
+    }
+    for (isoform_id, (s1, s2)) in &counts {
+        let aggregate = aggregate_counts
+            .get(isoform_id)
+            .copied()
+            .expect("aggregate row for isoform");
+        assert!((aggregate - (s1 + s2)).abs() < 1e-9);
+    }
 
     let long = fs::read_to_string(long_tsv).expect("read long tsv");
     let mut sums = std::collections::HashMap::<String, f64>::new();

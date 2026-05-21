@@ -148,9 +148,13 @@ fn flow_manifest_writes_multi_sample_usage_outputs() {
 
     let long_tsv = out_dir.join(format!("{prefix}.isoform_usage.long.tsv"));
     let matrix_tsv = out_dir.join(format!("{prefix}.isoform_counts.matrix.tsv"));
+    let multi_count_csv = out_dir.join(format!("{prefix}.isoform_count.csv"));
+    let main_count_csv = out_dir.join(format!("{prefix}_isoform_count.csv"));
     let group_tsv = out_dir.join(format!("{prefix}.isoform_usage.group.tsv"));
     assert!(long_tsv.exists());
     assert!(matrix_tsv.exists());
+    assert!(multi_count_csv.exists());
+    assert!(main_count_csv.exists());
     assert!(group_tsv.exists());
 
     let long_content = fs::read_to_string(long_tsv).expect("read long tsv");
@@ -171,6 +175,38 @@ fn flow_manifest_writes_multi_sample_usage_outputs() {
     }
     for total in sample_prop_sum.values() {
         assert!((*total - 1.0).abs() < 1e-9);
+    }
+
+    let matrix_content = fs::read_to_string(matrix_tsv).expect("read matrix tsv");
+    let mut matrix_totals = std::collections::HashMap::<String, f64>::new();
+    for (idx, line) in matrix_content.lines().enumerate() {
+        if idx == 0 {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        let total = fields[2..]
+            .iter()
+            .map(|value| value.parse::<f64>().expect("parse sample count"))
+            .sum();
+        matrix_totals.insert(fields[1].to_owned(), total);
+    }
+
+    for path in [multi_count_csv, main_count_csv] {
+        let csv = fs::read_to_string(path).expect("read aggregate count csv");
+        for (idx, line) in csv.lines().enumerate() {
+            if idx == 0 {
+                assert_eq!(line, "isoform_id,count");
+                continue;
+            }
+            let fields: Vec<&str> = line.split(',').collect();
+            assert_eq!(fields.len(), 2);
+            let matrix_total = matrix_totals
+                .get(fields[0])
+                .copied()
+                .expect("matrix row for isoform");
+            let aggregate = fields[1].parse::<f64>().expect("parse aggregate count");
+            assert!((aggregate - matrix_total).abs() < 1e-9);
+        }
     }
 }
 
