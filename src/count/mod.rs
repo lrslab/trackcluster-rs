@@ -170,6 +170,20 @@ fn transcript_exon_len(tx: &Transcript) -> u64 {
     tx.exons.iter().map(|exon| u64::from(exon.len())).sum()
 }
 
+fn read_structures_by_name(reads: &[Transcript]) -> HashMap<&str, &Transcript> {
+    let mut reads_by_name: HashMap<&str, &Transcript> = HashMap::new();
+    for read in reads {
+        let read_id = read.name.as_str();
+        match reads_by_name.get(read_id).copied() {
+            Some(existing) if transcript_exon_len(read) <= transcript_exon_len(existing) => {}
+            _ => {
+                reads_by_name.insert(read_id, read);
+            }
+        }
+    }
+    reads_by_name
+}
+
 fn transcript_exon_overlap(left: &Transcript, right: &Transcript) -> u64 {
     let mut overlap = 0u64;
     for left_exon in &left.exons {
@@ -283,15 +297,7 @@ pub fn select_unique_best_read_to_isoform(
     isoforms: &[Transcript],
     read_to_isoform: &[(String, String)],
 ) -> anyhow::Result<Vec<(String, String)>> {
-    let mut reads_by_name: HashMap<&str, &Transcript> = HashMap::new();
-    for read in reads {
-        if reads_by_name.insert(read.name.as_str(), read).is_some() {
-            anyhow::bail!(
-                "unique assignment requires unique read names; duplicate read id {:?}",
-                read.name
-            );
-        }
-    }
+    let reads_by_name = read_structures_by_name(reads);
 
     let isoforms_by_name: HashMap<&str, &Transcript> = isoforms
         .iter()
@@ -328,7 +334,7 @@ pub fn select_unique_best_read_to_isoform(
         }
     }
 
-    for read in reads {
+    for read in reads_by_name.values().copied() {
         let catalog_candidates = gene_name(read)
             .and_then(|gene| isoforms_by_gene.get(gene))
             .or_else(|| isoforms_by_locus.get(&(read.chrom.as_str(), read.strand)));
@@ -544,6 +550,25 @@ mod tests {
             .unwrap();
         assert_eq!(long_ref.count, 0.0);
         assert_eq!(closest.count, 1.0);
+    }
+
+    #[test]
+    fn unique_assignment_uses_longest_duplicate_read_structure() {
+        let reads = vec![
+            make_tx("r1", &[(100, 110)], "none"),
+            make_tx("r1", &[(100, 110), (200, 210)], "none"),
+        ];
+        let isoforms = vec![
+            make_tx("short_isoform", &[(100, 110)], "none"),
+            make_tx("long_isoform", &[(100, 110), (200, 210)], "none"),
+        ];
+        let pairs = vec![
+            ("r1".to_owned(), "short_isoform".to_owned()),
+            ("r1".to_owned(), "long_isoform".to_owned()),
+        ];
+
+        let unique = select_unique_best_read_to_isoform(&reads, &isoforms, &pairs).unwrap();
+        assert_eq!(unique, vec![("r1".to_owned(), "long_isoform".to_owned())]);
     }
 
     #[test]
