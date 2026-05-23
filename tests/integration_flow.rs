@@ -86,6 +86,7 @@ fn flow_runs_end_to_end_and_matches_goldens() {
     let isoform_out = out_dir.join(format!("{prefix}_isoform.bed"));
     let unused_out = out_dir.join(format!("{prefix}_unused.bed"));
     let count_out = out_dir.join(format!("{prefix}_isoform_count.csv"));
+    let unique_mapping_out = out_dir.join(format!("{prefix}_read_to_isoform.unique.tsv"));
 
     assert_eq!(
         normalized_lines(&isoform_out),
@@ -99,6 +100,8 @@ fn flow_runs_end_to_end_and_matches_goldens() {
         normalized_lines(&count_out),
         normalized_lines(&golden_count)
     );
+    assert!(unique_mapping_out.exists());
+    assert_eq!(count_sum(&count_out), 1.0);
 
     assert!(out_dir.join("GENEA/GENEA_simple_coveragej.bed").exists());
     assert!(out_dir.join("GENEA/GENEA_unused.bed").exists());
@@ -108,6 +111,64 @@ fn flow_runs_end_to_end_and_matches_goldens() {
     assert!(out_dir.join(format!("{prefix}_class4.txt")).exists());
     assert!(out_dir.join(format!("{prefix}_fusion.txt")).exists());
     assert!(out_dir.join(format!("{prefix}_class12.txt")).exists());
+}
+
+#[test]
+fn flow_count_only_reuses_completed_gene_outputs() {
+    let exe = env!("CARGO_BIN_EXE_trackcluster");
+
+    let reads = repo_path("tests/fixtures/reads.bed");
+    let reference = repo_path("tests/fixtures/ref.bed");
+    let golden_count = repo_path("tests/golden/count/isoform_count.csv");
+
+    let out_dir = fresh_temp_dir("flow_count_only");
+    let prefix = "sample";
+
+    let status = Command::new(exe)
+        .args([
+            "flow",
+            "-s",
+            reads.to_str().unwrap(),
+            "-r",
+            reference.to_str().unwrap(),
+            "-o",
+            out_dir.to_str().unwrap(),
+            "--prefix",
+            prefix,
+            "--threads",
+            "1",
+            "--force",
+        ])
+        .status()
+        .expect("run initial flow");
+    assert!(status.success());
+
+    let count_out = out_dir.join(format!("{prefix}_isoform_count.csv"));
+    let unique_mapping_out = out_dir.join(format!("{prefix}_read_to_isoform.unique.tsv"));
+    fs::remove_file(&count_out).expect("remove count output");
+    fs::remove_file(&unique_mapping_out).expect("remove unique mapping output");
+
+    let status = Command::new(exe)
+        .args([
+            "flow",
+            "--count-only",
+            "-r",
+            reference.to_str().unwrap(),
+            "-o",
+            out_dir.to_str().unwrap(),
+            "--prefix",
+            prefix,
+        ])
+        .status()
+        .expect("run count-only flow");
+    assert!(status.success());
+
+    assert_eq!(
+        normalized_lines(&count_out),
+        normalized_lines(&golden_count)
+    );
+    assert!(unique_mapping_out.exists());
+    assert!(out_dir.join(format!("{prefix}_desc.txt")).exists());
 }
 
 #[test]
@@ -284,6 +345,11 @@ fn flow_manifest_downsamples_gene_over_cutoff_and_writes_scale_factors() {
         .any(|line| line.starts_with("GENEA\t2\t1\t2")));
 
     assert!(out_dir.join("GENEA/downsample.tsv").exists());
+
+    let main_count = out_dir.join(format!("{prefix}_isoform_count.csv"));
+    let multi_count = out_dir.join(format!("{prefix}.isoform_count.csv"));
+    assert!((count_sum(&main_count) - 2.0).abs() < 1e-9);
+    assert!((count_sum(&multi_count) - 2.0).abs() < 1e-9);
 }
 
 #[test]

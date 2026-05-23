@@ -106,6 +106,10 @@ pub struct Args {
     #[arg(long = "force")]
     pub force: bool,
 
+    /// Reuse existing per-gene cluster outputs and run only merge/count/desc outputs
+    #[arg(long = "count-only")]
+    pub count_only: bool,
+
     /// Print a progress line every N genes
     #[arg(long = "progress-every", default_value_t = 1000)]
     pub progress_every: usize,
@@ -148,10 +152,11 @@ impl Args {
 }
 
 pub fn run(args: Args) -> anyhow::Result<()> {
-    match (&args.reads, &args.manifest) {
-        (Some(_), Some(_)) => anyhow::bail!("flow: use either --reads or --manifest, not both"),
-        (None, None) => anyhow::bail!("flow: one of --reads or --manifest is required"),
-        _ => {}
+    if args.reads.is_some() && args.manifest.is_some() {
+        anyhow::bail!("flow: use either --reads or --manifest, not both");
+    }
+    if !args.count_only && args.reads.is_none() && args.manifest.is_none() {
+        anyhow::bail!("flow: one of --reads or --manifest is required");
     }
     let resolved_options = args.resolved_platform_options();
 
@@ -178,6 +183,7 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         assignment_mode: args.assignment_mode,
         emit_pooled_reads: args.emit_pooled_reads,
         force: args.force,
+        count_only: args.count_only,
         progress_every: args.progress_every,
         heartbeat_seconds: args.heartbeat_seconds,
         heartbeat_top: args.heartbeat_top,

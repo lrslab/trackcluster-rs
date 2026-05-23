@@ -334,21 +334,54 @@ pub fn select_unique_best_read_to_isoform(
         }
     }
 
-    for read in reads_by_name.values().copied() {
-        let catalog_candidates = gene_name(read)
-            .and_then(|gene| isoforms_by_gene.get(gene))
-            .or_else(|| isoforms_by_locus.get(&(read.chrom.as_str(), read.strand)));
-        let Some(catalog_candidates) = catalog_candidates else {
+    // Keep the mapping as the counted-read boundary; catalog expansion should not
+    // resurrect unused reads or reads excluded by per-gene downsampling.
+    let mapped_read_ids: Vec<&str> = grouped.keys().copied().collect();
+    for read_id in mapped_read_ids {
+        let Some(read) = reads_by_name.get(read_id).copied() else {
             continue;
         };
-        let candidates = grouped.entry(read.name.as_str()).or_default();
-        for isoform_id in catalog_candidates {
+        let mut catalog_candidates = Vec::new();
+        if let Some(gene) = gene_name(read) {
+            if let Some(ids) = isoforms_by_gene.get(gene) {
+                catalog_candidates.extend(ids.iter().copied());
+            }
+        } else if let Some(mapped_candidates) = grouped.get(read_id) {
+            let mut seen_genes: HashSet<&str> = HashSet::new();
+            for isoform_id in mapped_candidates {
+                let Some(gene) = isoforms_by_name
+                    .get(*isoform_id)
+                    .copied()
+                    .and_then(gene_name)
+                else {
+                    continue;
+                };
+                if seen_genes.insert(gene) {
+                    if let Some(ids) = isoforms_by_gene.get(gene) {
+                        catalog_candidates.extend(ids.iter().copied());
+                    }
+                }
+            }
+        }
+
+        if catalog_candidates.is_empty() {
+            if let Some(ids) = isoforms_by_locus.get(&(read.chrom.as_str(), read.strand)) {
+                catalog_candidates.extend(ids.iter().copied());
+            }
+        }
+        if catalog_candidates.is_empty() {
+            continue;
+        }
+        let candidates = grouped
+            .get_mut(read_id)
+            .expect("read id collected from grouped keys");
+        for &isoform_id in &catalog_candidates {
             let isoform = isoforms_by_name
-                .get(*isoform_id)
+                .get(isoform_id)
                 .copied()
                 .expect("catalog index derives from isoforms");
             if catalog_assignment_candidate(read, isoform) {
-                candidates.push(*isoform_id);
+                candidates.push(isoform_id);
             }
         }
     }
@@ -458,6 +491,39 @@ mod tests {
                 thick_end: Coord::new(tx_end),
                 item_rgb: "0".to_owned(),
                 extra_fields: vec![name2.to_owned()],
+            },
+        )
+        .unwrap()
+    }
+
+    fn make_tx_with_gene(name: &str, exons: &[(u32, u32)], name2: &str, gene: &str) -> Transcript {
+        let tx_start = exons.iter().map(|(s, _)| *s).min().unwrap_or(0);
+        let tx_end = exons.iter().map(|(_, e)| *e).max().unwrap_or(0);
+        let exons = exons
+            .iter()
+            .map(|(s, e)| Interval::new(Coord::new(*s), Coord::new(*e)).unwrap())
+            .collect::<Vec<_>>();
+
+        Transcript::new(
+            "chr1".to_owned(),
+            Strand::Plus,
+            Coord::new(tx_start),
+            Coord::new(tx_end),
+            name.to_owned(),
+            exons,
+            Bed12Attrs {
+                score: 0,
+                thick_start: Coord::new(tx_start),
+                thick_end: Coord::new(tx_end),
+                item_rgb: "0".to_owned(),
+                extra_fields: vec![
+                    name2.to_owned(),
+                    "none".to_owned(),
+                    "none".to_owned(),
+                    "none".to_owned(),
+                    "none".to_owned(),
+                    gene.to_owned(),
+                ],
             },
         )
         .unwrap()
@@ -585,12 +651,31 @@ mod tests {
     }
 
     #[test]
-    fn unique_assignment_can_assign_catalog_only_read() {
+    fn unique_assignment_uses_mapped_isoform_gene_when_read_has_no_gene() {
+        let reads = vec![make_tx("r1", &[(100, 110), (200, 210)], "none")];
+        let isoforms = vec![
+            make_tx_with_gene(
+                "mapped_long",
+                &[(50, 60), (100, 110), (200, 210)],
+                "none",
+                "GENEA",
+            ),
+            make_tx_with_gene("z_closest", &[(100, 110), (200, 210)], "none", "GENEA"),
+            make_tx_with_gene("a_decoy", &[(100, 110), (200, 210)], "none", "GENEB"),
+        ];
+        let pairs = vec![("r1".to_owned(), "mapped_long".to_owned())];
+
+        let unique = select_unique_best_read_to_isoform(&reads, &isoforms, &pairs).unwrap();
+        assert_eq!(unique, vec![("r1".to_owned(), "z_closest".to_owned())]);
+    }
+
+    #[test]
+    fn unique_assignment_does_not_create_catalog_only_reads() {
         let reads = vec![make_tx("r1", &[(100, 110), (200, 210)], "none")];
         let isoforms = vec![make_tx("closest_novel", &[(100, 110), (200, 210)], "none")];
         let pairs = Vec::new();
 
         let unique = select_unique_best_read_to_isoform(&reads, &isoforms, &pairs).unwrap();
-        assert_eq!(unique, vec![("r1".to_owned(), "closest_novel".to_owned())]);
+        assert!(unique.is_empty());
     }
 }

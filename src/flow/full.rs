@@ -154,6 +154,7 @@ pub struct FullFlowOptions {
     pub assignment_mode: crate::count::AssignmentMode,
     pub emit_pooled_reads: bool,
     pub force: bool,
+    pub count_only: bool,
     pub progress_every: usize,
     /// Emit a heartbeat status line every N seconds during per-gene clustering (0 disables).
     pub heartbeat_seconds: u64,
@@ -1002,6 +1003,38 @@ fn read_bed12_records(path: &Path, kind: &str) -> anyhow::Result<Vec<Transcript>
         .with_context(|| format!("parse {kind} {path:?}"))
 }
 
+fn select_unique_read_to_isoform_by_gene(
+    output_root: &Path,
+    genes: &[String],
+    cluster_mode: ClusterMode,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let mut selected = Vec::new();
+    for gene in genes {
+        let gene_dir = output_root.join(gene);
+        let reads_path = gene_dir.join(format!("{gene}_nano.bed"));
+        let isoform_path =
+            gene_dir.join(format!("{gene}{}", cluster_mode.per_gene_isoform_suffix()));
+        let mapping_path = gene_dir.join(format!("{gene}_read_to_isoform.tsv"));
+
+        let required = [&reads_path, &isoform_path, &mapping_path];
+        if let Some(missing) = required.iter().find(|path| !path.exists()) {
+            eprintln!("flow: skip unique assignment for {gene}: missing {missing:?}");
+            continue;
+        }
+
+        let reads = read_bed12_records(&reads_path, "prepared gene reads")?;
+        let isoforms = read_bed12_records(&isoform_path, "per-gene isoforms")?;
+        let read_to_isoform = crate::count::read_read_to_isoform_tsv(&mapping_path)
+            .with_context(|| format!("read per-gene read_to_isoform {mapping_path:?}"))?;
+        selected.extend(crate::count::select_unique_best_read_to_isoform(
+            &reads,
+            &isoforms,
+            &read_to_isoform,
+        )?);
+    }
+    Ok(selected)
+}
+
 fn run_count_and_desc(
     isoforms: &[Transcript],
     refs: &[Transcript],
@@ -1156,79 +1189,56 @@ pub fn run_full_flow(opts: FullFlowOptions) -> anyhow::Result<FullFlowResult> {
 
     let gene_list = opts.output_root.join(format!("{}_gene.txt", opts.prefix));
     let mut sample_rows: Option<Vec<SampleRow>> = None;
+    let mut count_only_genes: Option<Vec<String>> = None;
 
-    let batch = match (&opts.reads, &opts.manifest) {
-        (Some(reads), None) => run_clusterj_batch(BatchRunOptions {
-            cluster_mode: opts.cluster_mode,
-            prepare_reads: Some(reads.clone()),
-            prepare_reference: Some(opts.reference.clone()),
-            prepare_prefix: Some(opts.prefix.clone()),
-            prepare_fraction_read: opts.prepare_fraction_read,
-            prepare_fraction_ref: opts.prepare_fraction_ref,
-            input_root: opts.output_root.clone(),
-            gene_list: Some(gene_list.clone()),
-            output_root: opts.output_root.clone(),
-            threads: opts.threads,
-            sw_score: opts.sw_score,
-            batch_size: opts.batch_size,
-            batch_rounds: opts.batch_rounds,
-            name2_mode: opts.name2_mode,
-            platform_preset: opts.platform_preset,
-            junction_correction_options: opts.junction_correction_options,
-            sl_options: opts.sl_options,
-            overlap_cutoff1: opts.overlap_cutoff1,
-            overlap_cutoff2: opts.overlap_cutoff2,
-            overlap_intron_weight: opts.overlap_intron_weight,
-            force: opts.force,
-            progress_every: opts.progress_every,
-            heartbeat_seconds: opts.heartbeat_seconds,
-            heartbeat_top: opts.heartbeat_top,
-            downsample_genes: opts.downsample_genes.clone(),
-            max_reads_per_gene: opts.max_reads_per_gene,
-            downsample_seed: opts.downsample_seed,
-        })?,
-        (None, Some(manifest_path)) => {
-            let rows = read_manifest_tsv(manifest_path)?;
-            let pooled_reads_out = if opts.emit_pooled_reads {
-                Some(
-                    opts.output_root
-                        .join(format!("{}_pooled_reads.bed", opts.prefix)),
-                )
-            } else {
-                None
-            };
-            let prepared = prepare_dir_from_manifest_rows(
-                &rows,
-                &opts.reference,
-                &opts.output_root,
-                &opts.prefix,
-                AddGeneOpts {
-                    fraction_read: opts.prepare_fraction_read,
-                    fraction_ref: opts.prepare_fraction_ref,
-                },
-                pooled_reads_out.as_deref(),
-            )
-            .with_context(|| format!("prepare from manifest {manifest_path:?}"))?;
-            if let Some(path) = pooled_reads_out {
-                eprintln!(
-                    "flow: emitted pooled reads from manifest {:?} (samples={}) -> {:?}",
-                    manifest_path,
-                    rows.len(),
-                    path
-                );
-            }
+    let batch = if opts.count_only {
+        if opts.reads.is_some() && opts.manifest.is_some() {
+            anyhow::bail!("flow: use either reads or manifest, not both");
+        }
+        if let Some(manifest_path) = opts.manifest.as_ref() {
+            sample_rows = Some(read_manifest_tsv(manifest_path)?);
+        }
+
+        let genes = if gene_list.exists() {
+            read_gene_list(&gene_list).with_context(|| format!("read {:?}", gene_list))?
+        } else {
             eprintln!(
-                "prepare: genes={}, dedup_reads={}, novel_reads={}",
-                prepared.genes.len(),
-                prepared.dedup_reads,
-                prepared.novel_reads
+                "flow: count-only gene list {:?} missing; discovering gene folders in {:?}",
+                gene_list, opts.output_root
             );
-
-            let mut batch = run_clusterj_batch(BatchRunOptions {
+            discover_genes(&opts.output_root)?
+        };
+        let batch_file_prefix = opts.cluster_mode.batch_file_prefix();
+        let batch = BatchRunResult {
+            prepared: None,
+            total_genes: genes.len(),
+            processed: 0,
+            skipped: genes.len(),
+            errors: 0,
+            elapsed_seconds: 0.0,
+            summary_path: opts
+                .output_root
+                .join(format!("{batch_file_prefix}_summary.txt")),
+            error_path: opts
+                .output_root
+                .join(format!("{batch_file_prefix}_errors.txt")),
+            downsample_path: opts
+                .output_root
+                .join(format!("{batch_file_prefix}_downsample.tsv")),
+        };
+        eprintln!(
+            "flow: count-only: reusing existing per-gene outputs (genes={})",
+            genes.len()
+        );
+        count_only_genes = Some(genes);
+        batch
+    } else {
+        match (&opts.reads, &opts.manifest) {
+            (Some(reads), None) => run_clusterj_batch(BatchRunOptions {
                 cluster_mode: opts.cluster_mode,
-                prepare_reads: None,
-                prepare_reference: None,
-                prepare_prefix: None,
+                prepare_reads: Some(reads.clone()),
+                prepare_reference: Some(opts.reference.clone()),
+                prepare_prefix: Some(opts.prefix.clone()),
                 prepare_fraction_read: opts.prepare_fraction_read,
                 prepare_fraction_ref: opts.prepare_fraction_ref,
                 input_root: opts.output_root.clone(),
@@ -1252,16 +1262,87 @@ pub fn run_full_flow(opts: FullFlowOptions) -> anyhow::Result<FullFlowResult> {
                 downsample_genes: opts.downsample_genes.clone(),
                 max_reads_per_gene: opts.max_reads_per_gene,
                 downsample_seed: opts.downsample_seed,
-            })?;
-            batch.prepared = Some(prepared);
-            sample_rows = Some(rows);
-            batch
+            })?,
+            (None, Some(manifest_path)) => {
+                let rows = read_manifest_tsv(manifest_path)?;
+                let pooled_reads_out = if opts.emit_pooled_reads {
+                    Some(
+                        opts.output_root
+                            .join(format!("{}_pooled_reads.bed", opts.prefix)),
+                    )
+                } else {
+                    None
+                };
+                let prepared = prepare_dir_from_manifest_rows(
+                    &rows,
+                    &opts.reference,
+                    &opts.output_root,
+                    &opts.prefix,
+                    AddGeneOpts {
+                        fraction_read: opts.prepare_fraction_read,
+                        fraction_ref: opts.prepare_fraction_ref,
+                    },
+                    pooled_reads_out.as_deref(),
+                )
+                .with_context(|| format!("prepare from manifest {manifest_path:?}"))?;
+                if let Some(path) = pooled_reads_out {
+                    eprintln!(
+                        "flow: emitted pooled reads from manifest {:?} (samples={}) -> {:?}",
+                        manifest_path,
+                        rows.len(),
+                        path
+                    );
+                }
+                eprintln!(
+                    "prepare: genes={}, dedup_reads={}, novel_reads={}",
+                    prepared.genes.len(),
+                    prepared.dedup_reads,
+                    prepared.novel_reads
+                );
+
+                let mut batch = run_clusterj_batch(BatchRunOptions {
+                    cluster_mode: opts.cluster_mode,
+                    prepare_reads: None,
+                    prepare_reference: None,
+                    prepare_prefix: None,
+                    prepare_fraction_read: opts.prepare_fraction_read,
+                    prepare_fraction_ref: opts.prepare_fraction_ref,
+                    input_root: opts.output_root.clone(),
+                    gene_list: Some(gene_list.clone()),
+                    output_root: opts.output_root.clone(),
+                    threads: opts.threads,
+                    sw_score: opts.sw_score,
+                    batch_size: opts.batch_size,
+                    batch_rounds: opts.batch_rounds,
+                    name2_mode: opts.name2_mode,
+                    platform_preset: opts.platform_preset,
+                    junction_correction_options: opts.junction_correction_options,
+                    sl_options: opts.sl_options,
+                    overlap_cutoff1: opts.overlap_cutoff1,
+                    overlap_cutoff2: opts.overlap_cutoff2,
+                    overlap_intron_weight: opts.overlap_intron_weight,
+                    force: opts.force,
+                    progress_every: opts.progress_every,
+                    heartbeat_seconds: opts.heartbeat_seconds,
+                    heartbeat_top: opts.heartbeat_top,
+                    downsample_genes: opts.downsample_genes.clone(),
+                    max_reads_per_gene: opts.max_reads_per_gene,
+                    downsample_seed: opts.downsample_seed,
+                })?;
+                batch.prepared = Some(prepared);
+                sample_rows = Some(rows);
+                batch
+            }
+            (Some(_), Some(_)) => anyhow::bail!("flow: use either reads or manifest, not both"),
+            (None, None) => anyhow::bail!("flow: reads or manifest is required"),
         }
-        (Some(_), Some(_)) => anyhow::bail!("flow: use either reads or manifest, not both"),
-        (None, None) => anyhow::bail!("flow: reads or manifest is required"),
     };
 
-    let genes = read_gene_list(&gene_list).with_context(|| format!("read {:?}", gene_list))?;
+    let genes = if let Some(genes) = count_only_genes {
+        genes
+    } else {
+        read_gene_list(&gene_list).with_context(|| format!("read {:?}", gene_list))?
+    };
     let isoform_bed = opts
         .output_root
         .join(format!("{}_isoform.bed", opts.prefix));
@@ -1269,6 +1350,9 @@ pub fn run_full_flow(opts: FullFlowOptions) -> anyhow::Result<FullFlowResult> {
     let read_to_isoform_tsv = opts
         .output_root
         .join(format!("{}_read_to_isoform.tsv", opts.prefix));
+    let unique_read_to_isoform_tsv = opts
+        .output_root
+        .join(format!("{}_read_to_isoform.unique.tsv", opts.prefix));
     let count_csv = opts
         .output_root
         .join(format!("{}_isoform_count.csv", opts.prefix));
@@ -1309,26 +1393,27 @@ pub fn run_full_flow(opts: FullFlowOptions) -> anyhow::Result<FullFlowResult> {
 
     let isoforms = read_bed12_records(&isoform_bed, "isoform")?;
     let refs = read_bed12_records(&opts.reference, "reference")?;
-    let read_to_isoform = crate::count::read_read_to_isoform_tsv(&read_to_isoform_tsv)
-        .with_context(|| format!("read merged read_to_isoform {read_to_isoform_tsv:?}"))?;
 
+    let merged_read_to_isoform;
     let selected_read_to_isoform;
     let count_read_to_isoform = if opts.assignment_mode == crate::count::AssignmentMode::Unique {
-        let reads_for_assignment = if let Some(rows) = sample_rows.as_ref() {
-            crate::count::multi::read_tagged_sample_reads(rows)?
-        } else if let Some(reads_path) = opts.reads.as_ref() {
-            read_bed12_records(reads_path, "reads")?
-        } else {
-            Vec::new()
-        };
-        selected_read_to_isoform = crate::count::select_unique_best_read_to_isoform(
-            &reads_for_assignment,
-            &isoforms,
-            &read_to_isoform,
-        )?;
+        eprintln!("flow: unique assignment from per-gene folders");
+        selected_read_to_isoform =
+            select_unique_read_to_isoform_by_gene(&opts.output_root, &genes, opts.cluster_mode)?;
+        eprintln!(
+            "flow: write unique read-to-isoform -> {:?}",
+            unique_read_to_isoform_tsv
+        );
+        crate::cluster::output::write_read_to_isoform_tsv(
+            &unique_read_to_isoform_tsv,
+            &selected_read_to_isoform,
+        )
+        .with_context(|| format!("write unique read-to-isoform {unique_read_to_isoform_tsv:?}"))?;
         &selected_read_to_isoform
     } else {
-        &read_to_isoform
+        merged_read_to_isoform = crate::count::read_read_to_isoform_tsv(&read_to_isoform_tsv)
+            .with_context(|| format!("read merged read_to_isoform {read_to_isoform_tsv:?}"))?;
+        &merged_read_to_isoform
     };
 
     eprintln!("flow: count + desc");
@@ -1424,5 +1509,27 @@ mod tests {
         merge_files(&[in1, in2, in3], &out).unwrap();
         let merged = fs::read_to_string(out).unwrap();
         assert_eq!(merged, "first\nsecond\n");
+    }
+
+    #[test]
+    fn unique_assignment_skips_missing_gene_folder_reads() {
+        let dir = fresh_temp_dir("unique_requires_gene_reads");
+        let gene = "GENEA".to_owned();
+        let gene_dir = dir.join(&gene);
+        fs::create_dir_all(&gene_dir).unwrap();
+        fs::write(
+            gene_dir.join(format!("{gene}_simple_coveragej.bed")),
+            "chr1\t100\t150\tiso1\t0\t+\t0\t0\t0\t1\t50,\t0,\tnone\tnone\tnone\tnone\tnone\tGENEA\n",
+        )
+        .unwrap();
+        fs::write(
+            gene_dir.join(format!("{gene}_read_to_isoform.tsv")),
+            "read1\tiso1\n",
+        )
+        .unwrap();
+
+        let selected = select_unique_read_to_isoform_by_gene(&dir, &[gene], ClusterMode::Clusterj)
+            .expect("missing per-gene reads should be skipped");
+        assert!(selected.is_empty());
     }
 }

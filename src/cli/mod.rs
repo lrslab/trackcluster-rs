@@ -292,6 +292,32 @@ mod tests {
     }
 
     #[test]
+    fn parses_flow_count_only_without_reads_or_manifest() {
+        let cli = Cli::try_parse_from([
+            "trackcluster",
+            "flow",
+            "--count-only",
+            "-r",
+            "ref.bed",
+            "-o",
+            "outdir",
+            "--prefix",
+            "sample",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Flow(args) => {
+                assert!(args.count_only);
+                assert_eq!(args.reads, None);
+                assert_eq!(args.manifest, None);
+                assert_eq!(args.reference, PathBuf::from("ref.bed"));
+            }
+            _ => panic!("expected flow args"),
+        }
+    }
+
+    #[test]
     fn parses_count_multi_flags() {
         let cli = Cli::try_parse_from([
             "trackcluster",

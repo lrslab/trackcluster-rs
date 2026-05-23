@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.15
+- Change `flow` unique counting to select reads directly inside each per-gene output folder, using `{gene}_nano.bed`, `{gene}_simple_coverage[j].bed`, and `{gene}_read_to_isoform.tsv` instead of falling back to manifest or original read inputs.
+- Add `flow --count-only` to reuse completed per-gene cluster outputs and rerun only merge, count, multi-sample count, and desc outputs.
+- Emit `<prefix>_read_to_isoform.unique.tsv` in unique assignment mode so the exact mapping used for final counts is available for audit/reproduction.
+- Skip genes with incomplete per-gene count inputs during unique assignment, rather than failing the whole final count step.
+- Fix unique assignment so catalog expansion does not resurrect unused reads or reads excluded by per-gene downsampling.
+- Add regression coverage for count-only reruns, unique audit mapping output, missing per-gene inputs, and downsample-scaled final counts.
+
 ## 0.1.14
 - Derive `count-multi` aggregate counts from the emitted per-sample matrix and write them to `<prefix>.isoform_count.csv`.
 - Synchronize `flow --manifest` `<prefix>_isoform_count.csv` from the same multi-sample aggregate count, so the total count table, sample matrix, long usage table, and group usage table share one assignment result.
