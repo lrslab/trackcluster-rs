@@ -53,12 +53,14 @@ Key flags:
 - `--emit-pooled-reads`: when using `--manifest`, also write `<prefix>_pooled_reads.bed`
 - `--max-reads-per-gene` (default: `50000`; set `0` to disable), `--downsample-gene`, `--downsample-seed`: per-gene downsampling (writes `clusterj_batch_downsample.tsv` or `cluster_batch_downsample.tsv` and scales counts)
 - `--force`: overwrite existing per-gene outputs (otherwise genes with existing outputs are skipped)
+- `--count-only`: reuse existing per-gene outputs and run only merge, unique/fractional count, multi-sample count, and desc outputs
 - `--heartbeat-seconds`, `--heartbeat-top`: periodic status line (and which gene(s) are currently in-flight when progress is not moving)
 
 Outputs (under `--output-root`):
 - `<prefix>_isoform.bed`
 - `<prefix>_unused.bed`
 - `<prefix>_read_to_isoform.tsv`
+- `<prefix>_read_to_isoform.unique.tsv` (unique assignment mode only; exact selected mapping used for final counts)
 - `<prefix>_isoform_count.csv`
 - `<prefix>_desc.txt`, `<prefix>_class4.txt`, `<prefix>_class12.txt`, `<prefix>_fusion.txt`
 - `clusterj_batch_summary.txt` / `cluster_batch_summary.txt` and matching `*_errors.txt`
@@ -120,6 +122,17 @@ trackcluster flow \
   --output-root out \
   --prefix pooled
 ```
+
+Count-only rerun example:
+```bash
+trackcluster flow \
+  --count-only \
+  --reference ref.bed \
+  --output-root out \
+  --prefix sample
+```
+
+`--count-only` expects completed per-gene output folders under `--output-root`. It reads `<prefix>_gene.txt` when present, otherwise it discovers gene folders in the output root. In unique assignment mode, it selects reads directly from each gene folder using `{gene}_nano.bed`, the per-gene isoform BED, and `{gene}_read_to_isoform.tsv`; missing per-gene count inputs are skipped. Add `--manifest samples.tsv` to a count-only rerun when you need manifest-mode `*.isoform_usage.*` outputs regenerated.
 
 ### `trackcluster preparedir`
 Split one reads BED + one reference BED into per-gene folders.

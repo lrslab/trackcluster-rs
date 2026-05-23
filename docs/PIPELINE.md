@@ -8,6 +8,8 @@ You can run the whole pipeline in three ways:
 2. **Single-file mode**: run `trackcluster clusterj|cluster` directly on `reads.bed` + `ref.bed` (good for small inputs).
 3. **Manual gene-batched mode**: run `preparedir` -> `clusterj_batch` -> combine outputs -> `count` + `desc` (junction-mode batch runner).
 
+If per-gene clustering already completed, `trackcluster flow --count-only` can rerun just the final merge/count/description stage.
+
 For multi-sample/condition studies, `flow` and `count-multi` support pooled isoform discovery with per-sample usage outputs.
 
 ## Prerequisites
@@ -81,6 +83,18 @@ Notes for overlap mode:
 - Run summaries switch to `cluster_batch_summary.txt`, `cluster_batch_errors.txt`, and `cluster_batch_downsample.tsv`.
 - In the second overlap pass, a short read is collapsed only when `score < --sw-score`; `score == --sw-score` stays as its own track.
 
+Count-only rerun:
+
+```bash
+trackcluster flow \
+  --count-only \
+  --reference ref.bed \
+  --output-root out \
+  --prefix sample
+```
+
+Use this when the per-gene folders already contain completed clustering outputs and you only need to regenerate merged isoforms, counts, multi-sample usage, or desc tables. `--count-only` reads `<prefix>_gene.txt` if it exists; otherwise it discovers gene folders under `--output-root`. In unique assignment mode, missing per-gene count inputs are skipped and the selected mapping used for counts is written to `<prefix>_read_to_isoform.unique.tsv`.
+
 ### Multi-sample pooled command
 
 Manifest TSV (`samples.tsv`):
@@ -109,6 +123,7 @@ Under `--output-root`:
 - per-gene folders with per-gene clustering outputs
 - `sample_isoform.bed`, `sample_unused.bed`
 - `sample_read_to_isoform.tsv`
+- `sample_read_to_isoform.unique.tsv` (unique assignment mode; selected mapping used for final counts)
 - `sample_isoform_count.csv`
 - `sample_desc.txt`, `sample_class4.txt`, `sample_class12.txt`, `sample_fusion.txt`
 

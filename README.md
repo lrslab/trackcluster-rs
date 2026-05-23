@@ -61,6 +61,9 @@ clusterj_batch --help
 trackcluster flow -s tests/fixtures/reads.bed -r tests/fixtures/ref.bed -o out --prefix sample
 # Tip: disable the default per-gene downsampling cap with `--max-reads-per-gene 0` (uses more memory).
 
+# If per-gene clustering already finished, rerun only merge/count/desc outputs
+trackcluster flow --count-only -r tests/fixtures/ref.bed -o out --prefix sample
+
 # Validate a BED12/bigGenePred file
 trackcluster validate-bed -i tests/fixtures/minimal.bed
 
@@ -106,6 +109,11 @@ trackcluster flow --manifest samples.tsv -r tests/fixtures/ref.bed -o out --pref
 
 Add `--emit-pooled-reads` if you also want `<prefix>_pooled_reads.bed` written.
 
+If clustering already completed and you only need to regenerate merged count/description outputs, use `--count-only`. Include `--manifest` when you want the multi-sample usage tables regenerated too:
+```bash
+trackcluster flow --count-only --manifest samples.tsv -r tests/fixtures/ref.bed -o out --prefix pooled
+```
+
 Or run per-sample quantification from an existing pooled isoform BED:
 ```bash
 trackcluster count-multi --manifest samples.tsv -r tests/fixtures/ref.bed -i out/pooled_isoform.bed -o out/pooled
@@ -120,6 +128,8 @@ For overlap-mode pooled clustering, add `--cluster-mode cluster` to the `flow` c
 - `out/pooled.isoform_usage.long.tsv`
 - `out/pooled.isoform_counts.matrix.tsv`
 - `out/pooled.isoform_usage.group.tsv` (only when manifest has `group`)
+
+In unique assignment mode, `flow` also writes `<prefix>_read_to_isoform.unique.tsv`, the exact read-to-isoform mapping used for final counts. The raw merged `<prefix>_read_to_isoform.tsv` remains the unselected mapping from per-gene clustering.
 
 The aggregate `out/pooled.isoform_count.csv` is derived from the per-sample matrix: each isoform count is the sum of that isoform's sample columns. In `flow --manifest`, the main `<prefix>_isoform_count.csv` is synchronized from the same aggregate count, so total and per-sample counts use the same assignment result.
 
