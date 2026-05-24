@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.16
+- Preserve supported same-junction 3' terminal clusters in junction-mode clustering, so high-support 3' early-stop isoforms are not collapsed into longer/reference isoforms solely because the splice chain matches.
+- Expose 3' terminal protection controls in `clusterj`, `flow`, and `clusterj_batch`: `--same-junction-3prime-offset`, `--3prime-cluster-offset`, and `--3prime-min-support`.
+- Change same-junction 3' terminal defaults to require at least `5` nearby supported reads and a biological 3' end more than `50` bp from the merge target; the nearby 3' support window defaults to the active junction correction offset.
+- Apply the 3' terminal support rule strand-aware, including minus-strand genes where the biological 3' end is the lower genomic coordinate.
+- Keep unique counting aligned with retained 3' early-stop isoforms: catalog-aware unique assignment chooses the closest compatible terminal structure instead of assigning those reads back to a longer/reference same-junction isoform.
+- Add regression coverage for retained same-junction 3' clusters and minus-strand 3' early-stop unique counting.
+
 ## 0.1.15
 - Change `flow` unique counting to select reads directly inside each per-gene output folder, using `{gene}_nano.bed`, `{gene}_simple_coverage[j].bed`, and `{gene}_read_to_isoform.tsv` instead of falling back to manifest or original read inputs.
 - Add `flow --count-only` to reuse completed per-gene cluster outputs and rerun only merge, count, multi-sample count, and desc outputs.

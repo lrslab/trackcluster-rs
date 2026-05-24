@@ -31,7 +31,7 @@ By default (`--name2-mode coverage`), this stores only a coverage value:
 - `--name2-mode full`: `extra_fields[0] = "<read1>,<read2>,...,|<coverage>"`
   - Example: `readA,readB,readC,|2.5`
 
-When read IDs are omitted from `name2`, use the `*_read_to_isoform.tsv` mapping written by `clusterj`/`cluster`/`flow` and pass it to `count` / `count-multi` via `--read-to-isoform` (or keep it next to the isoform BED for auto-discovery). Counting defaults to unique best assignment: it expands compatible candidates against the isoform catalog, then selects the closest isoform per read before counting. Pass `--assignment-mode fractional` for compatibility with split multi-mapped counts from the mapping file.
+When read IDs are omitted from `name2`, use the `*_read_to_isoform.tsv` mapping written by `clusterj`/`cluster`/`flow`. For ordinary recounts, prefer `trackcluster count --output-root <out> --prefix <prefix>`; it reads each gene folder directly, so unique assignment and retained-intron checks stay gene-local. The legacy standalone BED mode can still take `--read-to-isoform` (or auto-discover it next to the isoform BED), but its unique assignment scope is the supplied merged input. Counting defaults to unique best assignment: it expands compatible candidates against the isoform catalog, then selects the closest isoform per read before counting. Pass `--assignment-mode fractional` for compatibility with split multi-mapped counts from the mapping file.
 
 In `flow` unique assignment mode, `<prefix>_read_to_isoform.tsv` remains the raw merged mapping from per-gene clustering. The selected mapping actually used for final counts is written separately as `<prefix>_read_to_isoform.unique.tsv`; use that file when auditing or reproducing unique-mode counts.
 

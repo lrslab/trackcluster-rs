@@ -17,7 +17,7 @@ cargo run -- count \
   -s tests/fixtures/reads.bed \
   -r tests/fixtures/ref.bed \
   -i "$tmp_dir/isoform.bed" \
-  -o "$tmp_dir/isoform_count.csv"
+  --out "$tmp_dir/isoform_count.csv"
 
 mkdir -p tests/golden/clusterj tests/golden/count
 cp "$tmp_dir/isoform.bed" tests/golden/clusterj/isoform.bed
@@ -26,4 +26,3 @@ cp "$tmp_dir/isoform.unused.bed" tests/golden/clusterj/isoform.unused.bed
 cp "$tmp_dir/isoform_count.csv" tests/golden/count/isoform_count.csv
 
 echo "Updated goldens in tests/golden/"
-

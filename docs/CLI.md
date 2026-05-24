@@ -44,12 +44,14 @@ Key flags:
 - `--sw-score`: Smith-Waterman cutoff for 5' truncation collapsing (default: `11`; set to `-1` to disable). In overlap mode, the second pass only collapses a short read when `score < --sw-score`; a read at the exact cutoff remains its own track.
 - `--batch-size`, `--batch-rounds`: bounds for very large genes; in overlap mode these control iterative pre-merging rounds before the final two-pass overlap clustering
 - `--name2-mode`: `coverage` (default), `full`, or `none` (controls isoform `name2` payload size; mapping TSVs are used for counting)
-- `--platform-preset`: `generic` (default), `rna002`, or `rna004`. Presets seed junction correction and SL 5' defaults; explicit option values override the preset.
+- `--platform-preset`: `generic` (default), `rna002`, or `rna004`. Presets seed junction correction, SL 5', and same-junction 3' defaults; explicit option values override the preset.
 - `--junction-correction-offset` (default: `10`; `rna002`: `15`; `rna004`: `10`), `--junction-correction-min-support` (default: `5`): internal junction-site correction controls used by junction-mode clustering.
 - `--sl-partial-5prime-offset` (default: `15`), `--sl-same-junction-5prime-offset` (default: `25`), `--sl-5prime-cluster-offset` (default: `15`), `--sl-5prime-min-support` (default: `2`): junction-mode SL 5' merge controls
+- `--same-junction-3prime-offset` (default: `50`), `--3prime-cluster-offset` (default: active junction correction offset), `--3prime-min-support` (default: `5`): junction-mode same-junction 3' terminal retention controls.
+- Junction-mode clustering retains supported same-junction 3' terminal clusters as isoforms; this is strand-aware, so minus-strand 3' early stops are recognized at the lower genomic coordinate.
 - `--overlap-cutoff1`, `--overlap-cutoff2`, `--overlap-intron-weight`: overlap-mode controls used when `--cluster-mode cluster`
 - `--prepare-fraction-read`, `--prepare-fraction-ref`: overlap thresholds for gene assignment
-- `--assignment-mode`: final counting mode, `unique` (default) or `fractional`; unique mode expands candidates against the isoform catalog before choosing the closest compatible isoform
+- `--assignment-mode`: final counting mode, `unique` (default) or `fractional`; unique mode expands candidates against the isoform catalog before choosing the closest compatible isoform, including retained 3' early-stop isoforms.
 - `--emit-pooled-reads`: when using `--manifest`, also write `<prefix>_pooled_reads.bed`
 - `--max-reads-per-gene` (default: `50000`; set `0` to disable), `--downsample-gene`, `--downsample-seed`: per-gene downsampling (writes `clusterj_batch_downsample.tsv` or `cluster_batch_downsample.tsv` and scales counts)
 - `--force`: overwrite existing per-gene outputs (otherwise genes with existing outputs are skipped)
@@ -73,16 +75,18 @@ Outputs (under `--output-root`):
 
 #### Platform presets and SL/no-SL data
 
-`--platform-preset` changes only the junction correction and SL 5' merge/protection defaults. The `--sw-score` default remains `11` for all presets.
+`--platform-preset` changes only the junction correction, SL 5', and same-junction 3' merge/protection defaults. The `--sw-score` default remains `11` for all presets.
 Junction min support is weighted site support: read sites contribute `1`, reference sites contribute `5`.
 
-| Preset | Recommended use | Junction correction offset | Junction min support | SL partial 5' offset | SL same-junction 5' offset | SL 5' cluster offset | SL min support |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `generic` | Default; conservative setting for mixed or unknown platforms | `10` | `5` | `15` | `25` | `15` | `2` |
-| `rna002` | RNA002 direct RNA reads; more tolerant of junction and 5' end wobble | `15` | `5` | `20` | `25` | `20` | `2` |
-| `rna004` | RNA004 direct RNA reads; use the conservative/default cutoffs | `10` | `5` | `15` | `25` | `15` | `2` |
+| Preset | Recommended use | Junction correction offset | Junction min support | SL partial 5' offset | SL same-junction 5' offset | SL 5' cluster offset | SL min support | 3' same-junction offset | 3' cluster offset | 3' min support |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `generic` | Default; conservative setting for mixed or unknown platforms | `10` | `5` | `15` | `25` | `15` | `2` | `50` | `10` | `5` |
+| `rna002` | RNA002 direct RNA reads; more tolerant of junction and 5' end wobble | `15` | `5` | `20` | `25` | `20` | `2` | `50` | `15` | `5` |
+| `rna004` | RNA004 direct RNA reads; use the conservative/default cutoffs | `10` | `5` | `15` | `25` | `15` | `2` | `50` | `10` | `5` |
 
 SL information is optional. Reads with no SL evidence, or reads whose BED score is not greater than `--sw-score`, are treated as non-SL-supported reads: they still go through junction correction and normal 5' truncation collapsing, but they do not receive SL-cluster protection as alternative 5' isoforms. For datasets where many reads have no SL information, keep the default `--sw-score 11` and use `--platform-preset rna004` for RNA004 or `--platform-preset rna002` for RNA002. Use `--sw-score -1` only when you want to disable 5' truncation collapsing entirely.
+
+Same-junction 3' terminal clusters with nearby read support are retained as isoforms independently of SL evidence. By default, protection requires at least `5` reads within the active junction correction offset and a 3' end more than `50` bp from the merge target. The rule is strand-aware: on minus-strand transcripts, a 3' early stop appears as a higher `tx_start`/lower genomic terminal boundary relative to the full-length isoform.
 
 Example:
 ```bash
@@ -187,13 +191,15 @@ Key flags:
 - `--sw-score`: Smith-Waterman cutoff for 5' truncation collapsing (default: `11`; set to `-1` to disable)
 - `--batch-size`, `--batch-rounds`: bounds for very large genes
 - `--name2-mode`: `coverage` (default), `full`, or `none` (controls isoform `name2` payload size)
-- `--platform-preset`: `generic` (default), `rna002`, or `rna004`. Presets seed junction correction and SL 5' defaults; explicit option values override the preset.
-- `--junction-correction-offset` (default: `10`; `rna002`: `15`; `rna004`: `10`), `--junction-correction-min-support` (default: `5`): internal junction-site correction controls. This offset is separate from the SL/5' terminal merge/protection offsets.
+- `--platform-preset`: `generic` (default), `rna002`, or `rna004`. Presets seed junction correction, SL 5', and same-junction 3' defaults; explicit option values override the preset.
+- `--junction-correction-offset` (default: `10`; `rna002`: `15`; `rna004`: `10`), `--junction-correction-min-support` (default: `5`): internal junction-site correction controls. This offset is separate from the SL/5' and 3' terminal merge/protection offsets.
 - `--sl-partial-5prime-offset` (default: `15`), `--sl-same-junction-5prime-offset` (default: `25`), `--sl-5prime-cluster-offset` (default: `15`), `--sl-5prime-min-support` (default: `2`): SL 5' merge controls
+- `--same-junction-3prime-offset` (default: `50`), `--3prime-cluster-offset` (default: active junction correction offset), `--3prime-min-support` (default: `5`): same-junction 3' terminal retention controls
 
 Performance note:
 - 5' truncation collapsing is implemented via a junction-suffix index to avoid quadratic scans on large loci; `--batch-size`/`--batch-rounds` remain useful as hard caps for extreme genes.
 - SL-supported reads with enough nearby 5' support can be protected as alternative isoforms; singleton likely-degradation reads can still merge into compatible longer/reference tracks.
+- Supported same-junction 3' terminal clusters are retained as isoforms and remain compatible with unique counting, which assigns reads to the closest terminal structure.
 
 Example:
 ```bash
@@ -234,15 +240,37 @@ trackcluster cluster \
 ```
 
 ### `trackcluster count`
-Compute isoform counts from the isoform BED produced by `clusterj`/`cluster`.
+Compute isoform counts from an existing `flow`/`clusterj-batch` output directory.
+This is the recommended mode because unique assignment is rerun inside each
+gene folder using `{gene}_nano.bed`, the per-gene isoform BED, and
+`{gene}_read_to_isoform.tsv` before merged counts are written.
 
-Tip:
-- A mapping TSV is written by `clusterj`/`cluster`/`flow`. `count` will auto-discover it when it lives next to the isoform BED (recommended; required when `name2` does not embed read IDs, e.g. default `--name2-mode coverage`).
+Input:
+- `--output-root/-o`: existing output directory containing per-gene folders
+- `--prefix`: prefix for merged outputs
+- `--reference/-r`: reference BED
+- `--cluster-mode`: `clusterj` (default) or `cluster`
+- `--assignment-mode`: `unique` (default) or `fractional`
 
 Output:
-- CSV with header `isoform_id,count`
+- `<prefix>_isoform.bed`
+- `<prefix>_read_to_isoform.tsv`
+- `<prefix>_read_to_isoform.unique.tsv` in unique mode
+- `<prefix>_isoform_count.csv`
+- description files under `<prefix>_*`
 
 Example:
+```bash
+trackcluster count \
+  --reference ref.bed \
+  --output-root out \
+  --prefix sample
+```
+
+Legacy low-level mode can still count a standalone isoform BED. In this mode,
+the selector sees the supplied BED/mapping as its full scope, so prefer
+`--output-root` when continuing a per-gene cluster run.
+
 ```bash
 trackcluster count \
   --reads reads.bed \
@@ -323,9 +351,10 @@ Useful flags:
 - `--sw-score`: Smith-Waterman cutoff for 5' truncation collapsing (default: `11`; set to `-1` to disable)
 - `--batch-size`, `--batch-rounds`: bounds for very large genes
 - `--name2-mode`: `coverage` (default), `full`, or `none` (controls isoform `name2` payload size)
-- `--platform-preset`: `generic` (default), `rna002`, or `rna004`. Presets seed junction correction and SL 5' defaults; explicit option values override the preset.
-- `--junction-correction-offset` (default: `10`; `rna002`: `15`; `rna004`: `10`), `--junction-correction-min-support` (default: `5`): internal junction-site correction controls. This offset is separate from the SL/5' terminal merge/protection offsets.
+- `--platform-preset`: `generic` (default), `rna002`, or `rna004`. Presets seed junction correction, SL 5', and same-junction 3' defaults; explicit option values override the preset.
+- `--junction-correction-offset` (default: `10`; `rna002`: `15`; `rna004`: `10`), `--junction-correction-min-support` (default: `5`): internal junction-site correction controls. This offset is separate from the SL/5' and 3' terminal merge/protection offsets.
 - `--sl-partial-5prime-offset` (default: `15`), `--sl-same-junction-5prime-offset` (default: `25`), `--sl-5prime-cluster-offset` (default: `15`), `--sl-5prime-min-support` (default: `2`): SL 5' merge controls
+- `--same-junction-3prime-offset` (default: `50`), `--3prime-cluster-offset` (default: active junction correction offset), `--3prime-min-support` (default: `5`): same-junction 3' terminal retention controls
 - `--heartbeat-seconds`, `--heartbeat-top`: periodic status line (and which gene(s) are currently in-flight when progress is not moving)
 - `--max-reads-per-gene` (default: `50000`; set `0` to disable), `--downsample-gene`, `--downsample-seed`: per-gene downsampling (writes `clusterj_batch_downsample.tsv`)
 
@@ -338,7 +367,7 @@ clusterj_batch \
   --force
 ```
 
-`clusterj_batch` writes the active platform preset, junction correction settings, and SL settings into `clusterj_batch_summary.txt` for reproducibility.
+`clusterj_batch` writes the active platform preset, junction correction settings, SL settings, and same-junction 3' settings into `clusterj_batch_summary.txt` for reproducibility.
 
 One-command convenience (prepare + batch):
 ```bash

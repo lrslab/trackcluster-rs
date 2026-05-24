@@ -42,15 +42,15 @@ Junction-mode clustering (`clusterj`, `flow` default mode, and `clusterj_batch`)
 - `--junction-correction-offset` (default `10`; `rna002` preset `15`; `rna004` preset `10`)
 - `--junction-correction-min-support` (default `5`)
 
-The minimum support is weighted site support: a read junction site contributes `1`, and a reference junction site contributes `5`. The correction offset controls internal splice-junction coordinate snapping. It is distinct from the SL/5' terminal offsets below, which protect or merge transcript ends after junction correction. Widening junction correction can reduce rare/unused reads, but it can also erase real nearby splice sites.
+The minimum support is weighted site support: a read junction site contributes `1`, and a reference junction site contributes `5`. The correction offset controls internal splice-junction coordinate snapping. It is distinct from the SL/5' and 3' terminal offsets below, which protect or merge transcript ends after junction correction. Widening junction correction can reduce rare/unused reads, but it can also erase real nearby splice sites.
 
-`--platform-preset generic|rna002|rna004` seeds both junction correction and SL defaults. `rna002` sets junction correction offset to `15`, SL partial 5' offset to `20`, SL same-junction 5' offset to `25`, SL 5' cluster offset to `20`, and SL 5' minimum support to `2`. `rna004` intentionally uses the conservative default cutoffs: junction correction offset `10`, SL partial 5' offset `15`, SL same-junction 5' offset `25`, SL 5' cluster offset `15`, and SL 5' minimum support `2`. Explicit CLI values override the preset.
+`--platform-preset generic|rna002|rna004` seeds junction correction, SL, and same-junction 3' defaults. `rna002` sets junction correction offset to `15`, SL partial 5' offset to `20`, SL same-junction 5' offset to `25`, SL 5' cluster offset to `20`, SL 5' minimum support to `2`, and 3' cluster offset to `15`. `rna004` intentionally uses the conservative default cutoffs: junction correction offset `10`, SL partial 5' offset `15`, SL same-junction 5' offset `25`, SL 5' cluster offset `15`, SL 5' minimum support `2`, and 3' cluster offset `10`. Explicit CLI values override the preset.
 
-| Preset | Junction correction offset | Junction min support | SL partial 5' offset | SL same-junction 5' offset | SL 5' cluster offset | SL min support |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `generic` | `10` | `5` | `15` | `25` | `15` | `2` |
-| `rna002` | `15` | `5` | `20` | `25` | `20` | `2` |
-| `rna004` | `10` | `5` | `15` | `25` | `15` | `2` |
+| Preset | Junction correction offset | Junction min support | SL partial 5' offset | SL same-junction 5' offset | SL 5' cluster offset | SL min support | 3' same-junction offset | 3' cluster offset | 3' min support |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `generic` | `10` | `5` | `15` | `25` | `15` | `2` | `50` | `10` | `5` |
+| `rna002` | `15` | `5` | `20` | `25` | `20` | `2` | `50` | `15` | `5` |
+| `rna004` | `10` | `5` | `15` | `25` | `15` | `2` | `50` | `10` | `5` |
 
 ## Junction-mode SL 5' merge controls
 
@@ -63,3 +63,16 @@ Junction-mode clustering (`clusterj`, `flow` default mode, and `clusterj_batch`)
 Reads with score greater than `--sw-score` are treated as SL-supported. A supported candidate with enough nearby same-junction 5' support is protected from merging when its biological 5' end is outside the relevant offset from the longer/reference track. Singleton supported reads can still merge as likely degradation.
 
 SL information is optional and many datasets do not have it for every read. Reads without SL evidence, or reads whose score is not greater than `--sw-score`, are handled as non-SL-supported reads: they still participate in junction correction and normal 5' truncation collapsing, but they do not receive SL-cluster protection as alternative 5' isoforms. Keep the default `--sw-score 11` for mixed/no-SL datasets unless you intentionally want to disable 5' truncation collapsing; setting `--sw-score -1` disables junction truncation collapsing, including batched merging.
+
+## Junction-mode 3' terminal support
+
+Same-junction reads with enough nearby 3' terminal support are retained as isoforms when their biological 3' end is outside the same-junction terminal tolerance from a compatible longer/reference track. This protects high-expression 3' early-stop isoforms that share the same splice chain as a longer isoform.
+
+The CLI controls are:
+- `--same-junction-3prime-offset` (default `50`): a same-junction source is protected only when its 3' end is more than this many bp from the merge target.
+- `--3prime-cluster-offset` (default: active `--junction-correction-offset`): window used to sum nearby same-junction 3' support.
+- `--3prime-min-support` (default `5`): minimum nearby non-reference read support required for protection.
+
+The rule is strand-aware. On plus-strand transcripts, the biological 3' end is `tx_end`; on minus-strand transcripts, it is `tx_start`, so a minus-strand 3' early stop appears as a higher `tx_start`/lower genomic terminal boundary relative to the full-length isoform.
+
+Unique counting remains catalog-aware after these isoforms are retained: reads are assigned to the closest compatible isoform by junction compatibility and terminal distance, so retained 3' early-stop reads count to the shorter terminal isoform instead of being reassigned to a longer same-junction reference.

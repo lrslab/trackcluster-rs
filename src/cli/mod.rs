@@ -84,6 +84,12 @@ mod tests {
             "17",
             "--sl-5prime-min-support",
             "3",
+            "--same-junction-3prime-offset",
+            "60",
+            "--3prime-cluster-offset",
+            "12",
+            "--3prime-min-support",
+            "6",
         ])
         .unwrap();
 
@@ -97,6 +103,9 @@ mod tests {
                 assert_eq!(args.sl_same_junction_5prime_offset, Some(26));
                 assert_eq!(args.sl_5prime_cluster_offset, Some(17));
                 assert_eq!(args.sl_5prime_min_support, Some(3));
+                assert_eq!(args.same_junction_3prime_offset, Some(60));
+                assert_eq!(args.three_prime_cluster_offset, Some(12));
+                assert_eq!(args.three_prime_min_support, Some(6));
             }
             _ => panic!("expected clusterj args"),
         }
@@ -129,6 +138,17 @@ mod tests {
                 assert_eq!(resolved.sl_options.same_junction_five_prime_end_offset, 25);
                 assert_eq!(resolved.sl_options.five_prime_cluster_offset, 20);
                 assert_eq!(resolved.sl_options.min_five_prime_cluster_support, 2);
+                assert_eq!(
+                    resolved
+                        .three_prime_options
+                        .same_junction_three_prime_end_offset,
+                    50
+                );
+                assert_eq!(resolved.three_prime_options.three_prime_cluster_offset, 15);
+                assert_eq!(
+                    resolved.three_prime_options.min_three_prime_cluster_support,
+                    5
+                );
             }
             _ => panic!("expected clusterj args"),
         }
@@ -156,6 +176,7 @@ mod tests {
                 assert_eq!(resolved.sl_options.partial_five_prime_end_offset, 18);
                 assert_eq!(resolved.sl_options.same_junction_five_prime_end_offset, 25);
                 assert_eq!(resolved.sl_options.five_prime_cluster_offset, 20);
+                assert_eq!(resolved.three_prime_options.three_prime_cluster_offset, 12);
             }
             _ => panic!("expected clusterj args"),
         }
@@ -188,6 +209,17 @@ mod tests {
                 assert_eq!(resolved.sl_options.same_junction_five_prime_end_offset, 25);
                 assert_eq!(resolved.sl_options.five_prime_cluster_offset, 15);
                 assert_eq!(resolved.sl_options.min_five_prime_cluster_support, 2);
+                assert_eq!(
+                    resolved
+                        .three_prime_options
+                        .same_junction_three_prime_end_offset,
+                    50
+                );
+                assert_eq!(resolved.three_prime_options.three_prime_cluster_offset, 10);
+                assert_eq!(
+                    resolved.three_prime_options.min_three_prime_cluster_support,
+                    5
+                );
             }
             _ => panic!("expected clusterj args"),
         }
@@ -314,6 +346,34 @@ mod tests {
                 assert_eq!(args.reference, PathBuf::from("ref.bed"));
             }
             _ => panic!("expected flow args"),
+        }
+    }
+
+    #[test]
+    fn parses_count_output_root_flags() {
+        let cli = Cli::try_parse_from([
+            "trackcluster",
+            "count",
+            "-r",
+            "ref.bed",
+            "-o",
+            "outdir",
+            "--prefix",
+            "sample",
+            "--cluster-mode",
+            "cluster",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Count(args) => {
+                assert_eq!(args.reference, PathBuf::from("ref.bed"));
+                assert_eq!(args.output_root, Some(PathBuf::from("outdir")));
+                assert_eq!(args.prefix, Some("sample".to_owned()));
+                assert_eq!(args.cluster_mode, crate::flow::full::ClusterMode::Cluster);
+                assert_eq!(args.isoform, None);
+            }
+            _ => panic!("expected count args"),
         }
     }
 

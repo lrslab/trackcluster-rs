@@ -86,6 +86,9 @@ fn clusterj_batch_keeps_compat_behavior() {
     assert!(summary_text.contains("platform_preset\tgeneric"));
     assert!(summary_text.contains("junction_correction_offset\t10"));
     assert!(summary_text.contains("junction_correction_min_support\t5"));
+    assert!(summary_text.contains("same_junction_3prime_offset\t50"));
+    assert!(summary_text.contains("3prime_cluster_offset\t10"));
+    assert!(summary_text.contains("3prime_min_support\t5"));
     assert!(summary_text.contains("total_genes\t1"));
     assert!(summary_text.contains("errors\t0"));
 }

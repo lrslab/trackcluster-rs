@@ -25,6 +25,8 @@ pub const DEFAULT_SL_PARTIAL_FIVE_PRIME_END_OFFSET: u32 = 15;
 pub const DEFAULT_SL_SAME_JUNCTION_FIVE_PRIME_END_OFFSET: u32 = 25;
 pub const DEFAULT_SL_FIVE_PRIME_CLUSTER_OFFSET: u32 = 15;
 pub const DEFAULT_MIN_SL_FIVE_PRIME_CLUSTER_SUPPORT: usize = 2;
+pub const DEFAULT_SAME_JUNCTION_THREE_PRIME_END_OFFSET: u32 = 50;
+pub const DEFAULT_MIN_THREE_PRIME_CLUSTER_SUPPORT: usize = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JunctionCorrectionOptions {
@@ -61,9 +63,33 @@ impl Default for SlMergeOptions {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThreePrimeMergeOptions {
+    pub same_junction_three_prime_end_offset: u32,
+    pub three_prime_cluster_offset: u32,
+    pub min_three_prime_cluster_support: usize,
+}
+
+impl ThreePrimeMergeOptions {
+    fn with_junction_offset(junction_offset: u32) -> Self {
+        Self {
+            same_junction_three_prime_end_offset: DEFAULT_SAME_JUNCTION_THREE_PRIME_END_OFFSET,
+            three_prime_cluster_offset: junction_offset,
+            min_three_prime_cluster_support: DEFAULT_MIN_THREE_PRIME_CLUSTER_SUPPORT,
+        }
+    }
+}
+
+impl Default for ThreePrimeMergeOptions {
+    fn default() -> Self {
+        Self::with_junction_offset(DEFAULT_JUNCTION_CORRECTION_OFFSET)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResolvedPlatformOptions {
     pub junction_correction: JunctionCorrectionOptions,
     pub sl_options: SlMergeOptions,
+    pub three_prime_options: ThreePrimeMergeOptions,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -85,23 +111,35 @@ impl PlatformPreset {
 
     pub fn options(self) -> ResolvedPlatformOptions {
         match self {
-            Self::Generic | Self::Rna004 => ResolvedPlatformOptions {
-                junction_correction: JunctionCorrectionOptions::default(),
-                sl_options: SlMergeOptions::default(),
-            },
-            Self::Rna002 => ResolvedPlatformOptions {
-                junction_correction: JunctionCorrectionOptions {
+            Self::Generic | Self::Rna004 => {
+                let junction_correction = JunctionCorrectionOptions::default();
+                ResolvedPlatformOptions {
+                    junction_correction,
+                    sl_options: SlMergeOptions::default(),
+                    three_prime_options: ThreePrimeMergeOptions::with_junction_offset(
+                        junction_correction.offset,
+                    ),
+                }
+            }
+            Self::Rna002 => {
+                let junction_correction = JunctionCorrectionOptions {
                     min_support: DEFAULT_JUNCTION_CORRECTION_MIN_SUPPORT,
                     offset: 15,
-                },
-                sl_options: SlMergeOptions {
-                    partial_five_prime_end_offset: 20,
-                    same_junction_five_prime_end_offset:
-                        DEFAULT_SL_SAME_JUNCTION_FIVE_PRIME_END_OFFSET,
-                    five_prime_cluster_offset: 20,
-                    min_five_prime_cluster_support: DEFAULT_MIN_SL_FIVE_PRIME_CLUSTER_SUPPORT,
-                },
-            },
+                };
+                ResolvedPlatformOptions {
+                    junction_correction,
+                    sl_options: SlMergeOptions {
+                        partial_five_prime_end_offset: 20,
+                        same_junction_five_prime_end_offset:
+                            DEFAULT_SL_SAME_JUNCTION_FIVE_PRIME_END_OFFSET,
+                        five_prime_cluster_offset: 20,
+                        min_five_prime_cluster_support: DEFAULT_MIN_SL_FIVE_PRIME_CLUSTER_SUPPORT,
+                    },
+                    three_prime_options: ThreePrimeMergeOptions::with_junction_offset(
+                        junction_correction.offset,
+                    ),
+                }
+            }
         }
     }
 }
@@ -140,6 +178,9 @@ pub fn resolve_platform_options(
     sl_same_junction_five_prime_offset: Option<u32>,
     sl_five_prime_cluster_offset: Option<u32>,
     sl_five_prime_min_support: Option<usize>,
+    same_junction_three_prime_offset: Option<u32>,
+    three_prime_cluster_offset: Option<u32>,
+    three_prime_min_support: Option<usize>,
 ) -> ResolvedPlatformOptions {
     let mut options = platform_preset.options();
     if let Some(offset) = junction_correction_offset {
@@ -159,6 +200,20 @@ pub fn resolve_platform_options(
     }
     if let Some(min_support) = sl_five_prime_min_support {
         options.sl_options.min_five_prime_cluster_support = min_support;
+    }
+    if three_prime_cluster_offset.is_none() {
+        options.three_prime_options.three_prime_cluster_offset = options.junction_correction.offset;
+    }
+    if let Some(offset) = same_junction_three_prime_offset {
+        options
+            .three_prime_options
+            .same_junction_three_prime_end_offset = offset;
+    }
+    if let Some(offset) = three_prime_cluster_offset {
+        options.three_prime_options.three_prime_cluster_offset = offset;
+    }
+    if let Some(min_support) = three_prime_min_support {
+        options.three_prime_options.min_three_prime_cluster_support = min_support;
     }
     options
 }
@@ -641,6 +696,26 @@ fn five_prime_ends_match(a: &Transcript, b: &Transcript, offset: u32) -> bool {
     five_prime_end_delta(a, b).is_some_and(|delta| delta <= offset)
 }
 
+fn three_prime_end_delta(a: &Transcript, b: &Transcript) -> Option<u32> {
+    if a.chrom != b.chrom || a.strand != b.strand {
+        return None;
+    }
+
+    match a.strand {
+        Strand::Plus => Some(a.tx_end.get().abs_diff(b.tx_end.get())),
+        Strand::Minus => Some(a.tx_start.get().abs_diff(b.tx_start.get())),
+        Strand::Unknown => None,
+    }
+}
+
+fn three_prime_position(tx: &Transcript) -> Option<u32> {
+    match tx.strand {
+        Strand::Plus => Some(tx.tx_end.get()),
+        Strand::Minus => Some(tx.tx_start.get()),
+        Strand::Unknown => None,
+    }
+}
+
 fn is_sl_supported_read(tx: &Transcript, sw_score: i64) -> bool {
     sw_score >= 0 && !is_isoform_anno(tx) && i64::from(tx.score) > sw_score
 }
@@ -736,6 +811,85 @@ fn build_sl_five_prime_cluster_support(
     support
 }
 
+fn build_three_prime_cluster_support(
+    tracks: &[Track],
+    junctions_cache: &[Vec<u32>],
+    three_prime_options: ThreePrimeMergeOptions,
+) -> Vec<usize> {
+    let mut support = vec![0usize; tracks.len()];
+
+    #[derive(Clone, Copy, Debug)]
+    struct TerminalSupportEntry {
+        three_prime_pos: u32,
+        idx: usize,
+        read_support: usize,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    struct TerminalSupportKey<'a> {
+        chrom: &'a str,
+        strand: Strand,
+        junctions: &'a [u32],
+    }
+
+    let mut groups: HashMap<TerminalSupportKey<'_>, Vec<TerminalSupportEntry>> = HashMap::new();
+    for (idx, track) in tracks.iter().enumerate() {
+        if is_isoform_anno(&track.tx) || junctions_cache[idx].is_empty() {
+            continue;
+        }
+        let Some(three_prime_pos) = three_prime_position(&track.tx) else {
+            continue;
+        };
+
+        groups
+            .entry(TerminalSupportKey {
+                chrom: track.tx.chrom.as_str(),
+                strand: track.tx.strand,
+                junctions: junctions_cache[idx].as_slice(),
+            })
+            .or_default()
+            .push(TerminalSupportEntry {
+                three_prime_pos,
+                idx,
+                read_support: track_read_support(track),
+            });
+    }
+
+    for entries in groups.values_mut() {
+        entries.sort_by_key(|entry| (entry.three_prime_pos, entry.idx));
+
+        let mut prefix_support = Vec::with_capacity(entries.len() + 1);
+        prefix_support.push(0usize);
+        for entry in entries.iter() {
+            let previous = *prefix_support.last().expect("prefix has initial zero");
+            prefix_support.push(previous + entry.read_support);
+        }
+
+        let mut left = 0usize;
+        let mut right = 0usize;
+        for idx in 0..entries.len() {
+            let center = entries[idx].three_prime_pos;
+            while entries[left]
+                .three_prime_pos
+                .saturating_add(three_prime_options.three_prime_cluster_offset)
+                < center
+            {
+                left += 1;
+            }
+            while right < entries.len()
+                && entries[right].three_prime_pos
+                    <= center.saturating_add(three_prime_options.three_prime_cluster_offset)
+            {
+                right += 1;
+            }
+
+            support[entries[idx].idx] = prefix_support[right] - prefix_support[left];
+        }
+    }
+
+    support
+}
+
 fn sl_protected_from_merge(
     short: &Transcript,
     long: &Transcript,
@@ -759,6 +913,24 @@ fn sl_protected_from_merge(
     };
 
     !five_prime_ends_match(short, long, offset)
+}
+
+fn three_prime_protected_from_merge(
+    short: &Transcript,
+    long: &Transcript,
+    kind: MergeKind,
+    three_prime_cluster_support: usize,
+    three_prime_options: ThreePrimeMergeOptions,
+) -> bool {
+    if kind != MergeKind::SameJunction || is_isoform_anno(short) {
+        return false;
+    }
+    if three_prime_cluster_support < three_prime_options.min_three_prime_cluster_support {
+        return false;
+    }
+
+    three_prime_end_delta(short, long)
+        .is_some_and(|delta| delta > three_prime_options.same_junction_three_prime_end_offset)
 }
 
 fn is_single_exon_same_5prime_in(
@@ -827,8 +999,10 @@ struct MergeContext<'a> {
     exon_lens: &'a [u32],
     is_anno: &'a [bool],
     sl_cluster_support: &'a [usize],
+    three_prime_cluster_support: &'a [usize],
     sw_score: i64,
     sl_options: SlMergeOptions,
+    three_prime_options: ThreePrimeMergeOptions,
     same_junction_offset: u32,
 }
 
@@ -875,6 +1049,12 @@ impl MergeContext<'_> {
             self.sw_score,
             self.sl_cluster_support[source_idx],
             self.sl_options,
+        ) && !three_prime_protected_from_merge(
+            &self.tracks[source_idx].tx,
+            &self.tracks[target_idx].tx,
+            kind,
+            self.three_prime_cluster_support[source_idx],
+            self.three_prime_options,
         )
     }
 }
@@ -984,13 +1164,20 @@ fn build_exact_duplicate_representatives<'a>(
 
 #[cfg(test)]
 fn junction_simple_merge(tracks: &mut [Track], sw_score: i64) -> Vec<usize> {
-    junction_simple_merge_with_options(tracks, sw_score, SlMergeOptions::default(), 0)
+    junction_simple_merge_with_options(
+        tracks,
+        sw_score,
+        SlMergeOptions::default(),
+        ThreePrimeMergeOptions::default(),
+        0,
+    )
 }
 
 fn junction_simple_merge_with_options(
     tracks: &mut [Track],
     sw_score: i64,
     sl_options: SlMergeOptions,
+    three_prime_options: ThreePrimeMergeOptions,
     same_junction_offset: u32,
 ) -> Vec<usize> {
     if sw_score < 0 {
@@ -1014,6 +1201,8 @@ fn junction_simple_merge_with_options(
         .collect();
     let sl_cluster_support =
         build_sl_five_prime_cluster_support(tracks, &junctions_cache, sw_score, sl_options);
+    let three_prime_cluster_support =
+        build_three_prime_cluster_support(tracks, &junctions_cache, three_prime_options);
 
     let suffix_index = build_junction_suffix_index(&junctions_cache, &target_eligible);
     let length_index = build_junction_length_index(&junctions_cache, &target_eligible);
@@ -1044,8 +1233,10 @@ fn junction_simple_merge_with_options(
                         exon_lens: &exon_lens,
                         is_anno: &is_anno,
                         sl_cluster_support: &sl_cluster_support,
+                        three_prime_cluster_support: &three_prime_cluster_support,
                         sw_score,
                         sl_options,
+                        three_prime_options,
                         same_junction_offset,
                     };
                     ctx.should_merge_into(i, j)
@@ -1092,8 +1283,10 @@ fn junction_simple_merge_with_options(
                     exon_lens: &exon_lens,
                     is_anno: &is_anno,
                     sl_cluster_support: &sl_cluster_support,
+                    three_prime_cluster_support: &three_prime_cluster_support,
                     sw_score,
                     sl_options,
+                    three_prime_options,
                     same_junction_offset,
                 };
                 ctx.should_merge_into(i, j)
@@ -1143,6 +1336,9 @@ fn junction_simple_merge_naive_with_options(
         .collect();
     let sl_cluster_support =
         build_sl_five_prime_cluster_support(tracks, &junctions_cache, sw_score, sl_options);
+    let three_prime_options = ThreePrimeMergeOptions::default();
+    let three_prime_cluster_support =
+        build_three_prime_cluster_support(tracks, &junctions_cache, three_prime_options);
 
     let mut dropped: Vec<bool> = vec![false; tracks.len()];
     for i in 0..tracks.len() {
@@ -1165,8 +1361,10 @@ fn junction_simple_merge_naive_with_options(
                     exon_lens: &exon_lens,
                     is_anno: &is_anno,
                     sl_cluster_support: &sl_cluster_support,
+                    three_prime_cluster_support: &three_prime_cluster_support,
                     sw_score,
                     sl_options,
+                    three_prime_options,
                     same_junction_offset,
                 };
                 ctx.should_merge_into(i, j)
@@ -1241,10 +1439,16 @@ fn merge_one_batch(
     mut tracks: Vec<Track>,
     sw_score: i64,
     sl_options: SlMergeOptions,
+    three_prime_options: ThreePrimeMergeOptions,
     same_junction_offset: u32,
 ) -> Vec<Track> {
-    let keep_indices =
-        junction_simple_merge_with_options(&mut tracks, sw_score, sl_options, same_junction_offset);
+    let keep_indices = junction_simple_merge_with_options(
+        &mut tracks,
+        sw_score,
+        sl_options,
+        three_prime_options,
+        same_junction_offset,
+    );
     select_tracks_by_keep_indices(tracks, keep_indices)
 }
 
@@ -1254,6 +1458,7 @@ fn merge_read_batches(
     batch_size: usize,
     sw_score: i64,
     sl_options: SlMergeOptions,
+    three_prime_options: ThreePrimeMergeOptions,
     same_junction_offset: u32,
 ) -> (Vec<Track>, bool) {
     let mut anchors: Vec<Track> = ref_tracks.to_vec();
@@ -1265,7 +1470,13 @@ fn merge_read_batches(
         batch.extend(chunk.iter().cloned());
 
         let before_len = batch.len();
-        let merged = merge_one_batch(batch, sw_score, sl_options, same_junction_offset);
+        let merged = merge_one_batch(
+            batch,
+            sw_score,
+            sl_options,
+            three_prime_options,
+            same_junction_offset,
+        );
         if merged.len() < before_len {
             changed = true;
         }
@@ -1282,6 +1493,7 @@ fn batch_junction_simple_merge(
     batch_size: usize,
     max_rounds: usize,
     sl_options: SlMergeOptions,
+    three_prime_options: ThreePrimeMergeOptions,
     same_junction_offset: u32,
 ) -> Vec<Track> {
     let batch_size = batch_size.max(1);
@@ -1300,7 +1512,13 @@ fn batch_junction_simple_merge(
             let mut combined: Vec<Track> = Vec::with_capacity(refs.len() + reads.len());
             combined.extend(refs);
             combined.extend(reads);
-            return merge_one_batch(combined, sw_score, sl_options, same_junction_offset);
+            return merge_one_batch(
+                combined,
+                sw_score,
+                sl_options,
+                three_prime_options,
+                same_junction_offset,
+            );
         }
 
         let (merged, changed) = merge_read_batches(
@@ -1309,6 +1527,7 @@ fn batch_junction_simple_merge(
             batch_size,
             sw_score,
             sl_options,
+            three_prime_options,
             same_junction_offset,
         );
         tracks = merged;
@@ -1325,7 +1544,13 @@ fn batch_junction_simple_merge(
         let mut combined: Vec<Track> = Vec::with_capacity(refs.len() + reads.len());
         combined.extend(refs);
         combined.extend(reads);
-        return merge_one_batch(combined, sw_score, sl_options, same_junction_offset);
+        return merge_one_batch(
+            combined,
+            sw_score,
+            sl_options,
+            three_prime_options,
+            same_junction_offset,
+        );
     }
 
     let (merged, _) = merge_read_batches(
@@ -1334,6 +1559,7 @@ fn batch_junction_simple_merge(
         batch_size,
         sw_score,
         sl_options,
+        three_prime_options,
         same_junction_offset,
     );
     merged
@@ -1472,6 +1698,7 @@ fn process_partition(
     batch_rounds: usize,
     name2_mode: Name2Mode,
     sl_options: SlMergeOptions,
+    three_prime_options: ThreePrimeMergeOptions,
     junction_correction: JunctionCorrectionOptions,
 ) -> PartitionResult {
     let mut tracks: Vec<Track> = Vec::with_capacity(ref_indices.len() + read_indices.len());
@@ -1503,6 +1730,7 @@ fn process_partition(
                 &mut locus_tracks,
                 sw_score,
                 sl_options,
+                three_prime_options,
                 junction_correction.offset,
             );
             select_tracks_by_keep_indices(locus_tracks, keep_indices)
@@ -1513,6 +1741,7 @@ fn process_partition(
                 batch_size,
                 batch_rounds,
                 sl_options,
+                three_prime_options,
                 junction_correction.offset,
             )
         };
@@ -1567,6 +1796,7 @@ pub fn clusterj_with_name2_mode(
         batch_rounds,
         name2_mode,
         SlMergeOptions::default(),
+        ThreePrimeMergeOptions::default(),
         JunctionCorrectionOptions::default(),
     )
 }
@@ -1581,6 +1811,7 @@ pub fn clusterj_with_options(
     batch_rounds: usize,
     name2_mode: Name2Mode,
     sl_options: SlMergeOptions,
+    three_prime_options: ThreePrimeMergeOptions,
     junction_correction: JunctionCorrectionOptions,
 ) -> ClusterResult {
     let references = match references {
@@ -1651,6 +1882,7 @@ pub fn clusterj_with_options(
                 batch_rounds,
                 name2_mode,
                 sl_options,
+                three_prime_options,
                 junction_correction,
             ));
         }
@@ -1687,6 +1919,7 @@ pub fn clusterj_with_options(
                         batch_rounds,
                         name2_mode,
                         sl_options,
+                        three_prime_options,
                         junction_correction,
                     );
                     if tx.send((item.index, result)).is_err() {
@@ -1895,13 +2128,23 @@ mod tests {
         ];
 
         let mut exact_tracks = tracks.clone();
-        let keep_exact =
-            junction_simple_merge_with_options(&mut exact_tracks, 11, SlMergeOptions::default(), 0);
+        let keep_exact = junction_simple_merge_with_options(
+            &mut exact_tracks,
+            11,
+            SlMergeOptions::default(),
+            ThreePrimeMergeOptions::default(),
+            0,
+        );
         assert_eq!(keep_exact, vec![0, 1]);
 
         let mut fuzzy_tracks = tracks;
-        let keep_fuzzy =
-            junction_simple_merge_with_options(&mut fuzzy_tracks, 11, SlMergeOptions::default(), 5);
+        let keep_fuzzy = junction_simple_merge_with_options(
+            &mut fuzzy_tracks,
+            11,
+            SlMergeOptions::default(),
+            ThreePrimeMergeOptions::default(),
+            5,
+        );
         assert_eq!(keep_fuzzy, vec![0]);
         assert!(fuzzy_tracks[0].subreads.contains("long_chain"));
         assert!(fuzzy_tracks[0].subreads.contains("near_chain"));
@@ -1942,6 +2185,7 @@ mod tests {
             1,
             Name2Mode::Full,
             SlMergeOptions::default(),
+            ThreePrimeMergeOptions::default(),
             JunctionCorrectionOptions {
                 min_support: 1,
                 offset: 0,
@@ -1960,6 +2204,7 @@ mod tests {
             1,
             Name2Mode::Full,
             SlMergeOptions::default(),
+            ThreePrimeMergeOptions::default(),
             JunctionCorrectionOptions {
                 min_support: 1,
                 offset: 5,
@@ -2134,6 +2379,7 @@ mod tests {
             1,
             Name2Mode::Full,
             SlMergeOptions::default(),
+            ThreePrimeMergeOptions::default(),
             JunctionCorrectionOptions {
                 min_support: 2,
                 offset: 10,
@@ -2153,6 +2399,7 @@ mod tests {
             1,
             Name2Mode::Full,
             SlMergeOptions::default(),
+            ThreePrimeMergeOptions::default(),
             JunctionCorrectionOptions {
                 min_support: 2,
                 offset: 15,
@@ -2200,6 +2447,7 @@ mod tests {
             1,
             Name2Mode::Full,
             SlMergeOptions::default(),
+            ThreePrimeMergeOptions::default(),
             JunctionCorrectionOptions {
                 min_support: 2,
                 offset: 10,
@@ -2216,6 +2464,7 @@ mod tests {
             1,
             Name2Mode::Full,
             SlMergeOptions::default(),
+            ThreePrimeMergeOptions::default(),
             JunctionCorrectionOptions {
                 min_support: 3,
                 offset: 10,
@@ -2496,6 +2745,74 @@ mod tests {
         assert!(iso_names.contains("ref"));
         assert!(iso_names.contains("alt_sl_a"));
         assert!(!iso_names.contains("alt_sl_b"));
+    }
+
+    #[test]
+    fn supported_same_junction_three_prime_cluster_is_retained() {
+        let refs = vec![make_tx(
+            "ref",
+            Strand::Minus,
+            &[(100, 200), (300, 350), (400, 500)],
+            "isoform_anno",
+            100,
+        )];
+        let reads = vec![
+            make_tx(
+                "early_stop_a",
+                Strand::Minus,
+                &[(160, 200), (300, 350), (400, 500)],
+                "nanopore_read",
+                0,
+            ),
+            make_tx(
+                "early_stop_b",
+                Strand::Minus,
+                &[(162, 200), (300, 350), (400, 500)],
+                "nanopore_read",
+                0,
+            ),
+            make_tx(
+                "early_stop_c",
+                Strand::Minus,
+                &[(164, 200), (300, 350), (400, 500)],
+                "nanopore_read",
+                0,
+            ),
+            make_tx(
+                "early_stop_d",
+                Strand::Minus,
+                &[(166, 200), (300, 350), (400, 500)],
+                "nanopore_read",
+                0,
+            ),
+            make_tx(
+                "early_stop_e",
+                Strand::Minus,
+                &[(168, 200), (300, 350), (400, 500)],
+                "nanopore_read",
+                0,
+            ),
+        ];
+
+        let result = clusterj_with_name2_mode(&reads, Some(&refs), 1, 11, 0, 1, Name2Mode::Full);
+        let iso_names: HashSet<_> = result.isoforms.iter().map(|tx| tx.name.as_str()).collect();
+
+        assert!(iso_names.contains("ref"));
+        assert!(iso_names.contains("early_stop_a"));
+        assert!(!iso_names.contains("early_stop_b"));
+        assert!(!iso_names.contains("early_stop_c"));
+        assert!(!iso_names.contains("early_stop_d"));
+        assert!(!iso_names.contains("early_stop_e"));
+
+        let early_stop_tx = result
+            .isoforms
+            .iter()
+            .find(|tx| tx.name == "early_stop_a")
+            .expect("early-stop isoform missing");
+        assert!(early_stop_tx
+            .extra_fields
+            .first()
+            .is_some_and(|name2| name2.contains("early_stop_b") && name2.contains("early_stop_e")));
     }
 
     #[test]

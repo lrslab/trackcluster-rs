@@ -99,6 +99,7 @@ pub struct BatchRunOptions {
     pub platform_preset: crate::cluster::clusterj::PlatformPreset,
     pub junction_correction_options: crate::cluster::clusterj::JunctionCorrectionOptions,
     pub sl_options: crate::cluster::clusterj::SlMergeOptions,
+    pub three_prime_options: crate::cluster::clusterj::ThreePrimeMergeOptions,
     pub overlap_cutoff1: f64,
     pub overlap_cutoff2: f64,
     pub overlap_intron_weight: f64,
@@ -146,6 +147,7 @@ pub struct FullFlowOptions {
     pub platform_preset: crate::cluster::clusterj::PlatformPreset,
     pub junction_correction_options: crate::cluster::clusterj::JunctionCorrectionOptions,
     pub sl_options: crate::cluster::clusterj::SlMergeOptions,
+    pub three_prime_options: crate::cluster::clusterj::ThreePrimeMergeOptions,
     pub overlap_cutoff1: f64,
     pub overlap_cutoff2: f64,
     pub overlap_intron_weight: f64,
@@ -477,6 +479,7 @@ fn process_gene(gene: &str, args: &BatchRunOptions) -> anyhow::Result<ProcessGen
             args.batch_rounds,
             args.name2_mode,
             args.sl_options,
+            args.three_prime_options,
             args.junction_correction_options,
         ),
         ClusterMode::Cluster => crate::cluster::cluster_overlap::cluster_with_options(
@@ -848,6 +851,22 @@ each gene will run one full two-pass overlap merge"
         "sl_5prime_min_support\t{}",
         args.sl_options.min_five_prime_cluster_support
     )?;
+    writeln!(
+        summary,
+        "same_junction_3prime_offset\t{}",
+        args.three_prime_options
+            .same_junction_three_prime_end_offset
+    )?;
+    writeln!(
+        summary,
+        "3prime_cluster_offset\t{}",
+        args.three_prime_options.three_prime_cluster_offset
+    )?;
+    writeln!(
+        summary,
+        "3prime_min_support\t{}",
+        args.three_prime_options.min_three_prime_cluster_support
+    )?;
     writeln!(summary, "overlap_cutoff1\t{}", args.overlap_cutoff1)?;
     writeln!(summary, "overlap_cutoff2\t{}", args.overlap_cutoff2)?;
     writeln!(
@@ -1026,6 +1045,8 @@ fn select_unique_read_to_isoform_by_gene(
         let isoforms = read_bed12_records(&isoform_path, "per-gene isoforms")?;
         let read_to_isoform = crate::count::read_read_to_isoform_tsv(&mapping_path)
             .with_context(|| format!("read per-gene read_to_isoform {mapping_path:?}"))?;
+        // Keep unique assignment gene-local: retained-intron and catalog candidate searches
+        // must only see isoforms and read mappings from this gene folder.
         selected.extend(crate::count::select_unique_best_read_to_isoform(
             &reads,
             &isoforms,
@@ -1252,6 +1273,7 @@ pub fn run_full_flow(opts: FullFlowOptions) -> anyhow::Result<FullFlowResult> {
                 platform_preset: opts.platform_preset,
                 junction_correction_options: opts.junction_correction_options,
                 sl_options: opts.sl_options,
+                three_prime_options: opts.three_prime_options,
                 overlap_cutoff1: opts.overlap_cutoff1,
                 overlap_cutoff2: opts.overlap_cutoff2,
                 overlap_intron_weight: opts.overlap_intron_weight,
@@ -1318,6 +1340,7 @@ pub fn run_full_flow(opts: FullFlowOptions) -> anyhow::Result<FullFlowResult> {
                     platform_preset: opts.platform_preset,
                     junction_correction_options: opts.junction_correction_options,
                     sl_options: opts.sl_options,
+                    three_prime_options: opts.three_prime_options,
                     overlap_cutoff1: opts.overlap_cutoff1,
                     overlap_cutoff2: opts.overlap_cutoff2,
                     overlap_intron_weight: opts.overlap_intron_weight,
@@ -1531,5 +1554,59 @@ mod tests {
         let selected = select_unique_read_to_isoform_by_gene(&dir, &[gene], ClusterMode::Clusterj)
             .expect("missing per-gene reads should be skipped");
         assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn unique_assignment_isolated_to_each_gene_folder() {
+        let dir = fresh_temp_dir("unique_gene_folder_isolation");
+        let gene_a = "GENEA".to_owned();
+        let gene_b = "GENEB".to_owned();
+        let gene_a_dir = dir.join(&gene_a);
+        let gene_b_dir = dir.join(&gene_b);
+        fs::create_dir_all(&gene_a_dir).unwrap();
+        fs::create_dir_all(&gene_b_dir).unwrap();
+
+        fs::write(
+            gene_a_dir.join(format!("{gene_a}_nano.bed")),
+            "chr1\t140\t160\tread_a\t0\t+\t0\t0\t0\t1\t20,\t0,\tnone\tnone\tnone\tnone\tnone\tGENEA\n",
+        )
+        .unwrap();
+        fs::write(
+            gene_a_dir.join(format!("{gene_a}_simple_coveragej.bed")),
+            "chr1\t100\t200\tiso_a_retained_like\t0\t+\t0\t0\t0\t1\t100,\t0,\tnone\tnone\tnone\tnone\tnone\tGENEA\n",
+        )
+        .unwrap();
+        fs::write(
+            gene_a_dir.join(format!("{gene_a}_read_to_isoform.tsv")),
+            "read_a\tiso_a_retained_like\n",
+        )
+        .unwrap();
+
+        fs::write(
+            gene_b_dir.join(format!("{gene_b}_nano.bed")),
+            "chr1\t100\t200\tread_b\t0\t+\t0\t0\t0\t2\t30,20,\t0,80,\tnone\tnone\tnone\tnone\tnone\tGENEB\n",
+        )
+        .unwrap();
+        fs::write(
+            gene_b_dir.join(format!("{gene_b}_simple_coveragej.bed")),
+            "chr1\t100\t200\tiso_b_spliced\t0\t+\t0\t0\t0\t2\t30,20,\t0,80,\tnone\tnone\tnone\tnone\tnone\tGENEB\n",
+        )
+        .unwrap();
+        fs::write(
+            gene_b_dir.join(format!("{gene_b}_read_to_isoform.tsv")),
+            "read_b\tiso_b_spliced\n",
+        )
+        .unwrap();
+
+        let selected =
+            select_unique_read_to_isoform_by_gene(&dir, &[gene_a, gene_b], ClusterMode::Clusterj)
+                .expect("unique assignment should run per gene folder");
+        assert_eq!(
+            selected,
+            vec![
+                ("read_a".to_owned(), "iso_a_retained_like".to_owned()),
+                ("read_b".to_owned(), "iso_b_spliced".to_owned()),
+            ]
+        );
     }
 }

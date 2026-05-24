@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
-use crate::model::{Interval, Strand, Transcript};
+use crate::model::{Coord, Interval, Strand, Transcript};
 
 pub mod multi;
 
@@ -208,28 +208,131 @@ fn junctions_match(left: Interval, right: Interval, offset: u32) -> bool {
         && left.end.get().abs_diff(right.end.get()) <= offset
 }
 
-fn matched_junction_counts(
+fn is_three_prime_terminal_exon(isoform: &Transcript, exon_idx: usize) -> bool {
+    match isoform.strand {
+        Strand::Plus | Strand::Unknown => exon_idx + 1 == isoform.exons.len(),
+        Strand::Minus => exon_idx == 0,
+    }
+}
+
+fn interval_contains(container: Interval, contained: Interval) -> bool {
+    container.start <= contained.start && contained.end <= container.end
+}
+
+fn retained_regions_by_isoform(isoforms: &[Transcript]) -> HashMap<String, Vec<Interval>> {
+    let mut out = HashMap::new();
+    let mut gene_introns = Vec::new();
+    for isoform in isoforms {
+        gene_introns.extend(isoform.introns());
+    }
+    gene_introns.sort_unstable();
+    gene_introns.dedup();
+
+    if gene_introns.is_empty() {
+        return out;
+    }
+
+    for isoform in isoforms {
+        let mut retained_regions = Vec::new();
+        for intron in &gene_introns {
+            if intron.is_empty() {
+                continue;
+            }
+            if isoform
+                .exons
+                .iter()
+                .any(|exon| interval_contains(*exon, *intron))
+            {
+                retained_regions.push(*intron);
+            }
+        }
+
+        retained_regions.sort_unstable();
+        retained_regions.dedup();
+        if !retained_regions.is_empty() {
+            out.insert(isoform.name.clone(), retained_regions);
+        }
+    }
+    out
+}
+
+fn interval_spans_position(interval: Interval, position: Coord) -> bool {
+    interval.start < position && position < interval.end
+}
+
+fn read_supports_retained_region(read: &Transcript, region: Interval) -> bool {
+    read.exons.iter().any(|read_exon| {
+        interval_spans_position(*read_exon, region.start)
+            || interval_spans_position(*read_exon, region.end)
+    })
+}
+
+fn retained_regions_supported_by_read(read: &Transcript, retained_regions: &[Interval]) -> bool {
+    retained_regions
+        .iter()
+        .any(|region| read_supports_retained_region(read, *region))
+}
+
+fn matching_intron_indices(
     read_introns: &[Interval],
     isoform_introns: &[Interval],
     offset: u32,
-) -> (usize, usize) {
-    let matched_read_junctions = read_introns
+) -> (HashSet<usize>, HashSet<usize>) {
+    let mut matched_read = HashSet::new();
+    let mut matched_isoform = HashSet::new();
+    for (read_idx, read_intron) in read_introns.iter().enumerate() {
+        for (isoform_idx, isoform_intron) in isoform_introns.iter().enumerate() {
+            if junctions_match(*read_intron, *isoform_intron, offset) {
+                matched_read.insert(read_idx);
+                matched_isoform.insert(isoform_idx);
+            }
+        }
+    }
+    (matched_read, matched_isoform)
+}
+
+fn unmatched_isoform_introns_overlapped_by_read_exons(
+    read: &Transcript,
+    isoform_introns: &[Interval],
+    matched_isoform_introns: &HashSet<usize>,
+) -> usize {
+    isoform_introns
         .iter()
-        .filter(|read_intron| {
-            isoform_introns
-                .iter()
-                .any(|isoform_intron| junctions_match(**read_intron, *isoform_intron, offset))
+        .enumerate()
+        .filter(|(idx, isoform_intron)| {
+            !matched_isoform_introns.contains(idx)
+                && read
+                    .exons
+                    .iter()
+                    .any(|read_exon| read_exon.overlap_len(**isoform_intron) > 0)
         })
-        .count();
-    let matched_isoform_junctions = isoform_introns
+        .count()
+}
+
+fn junctionless_read_candidate(
+    read: &Transcript,
+    isoform: &Transcript,
+    isoform_introns: &[Interval],
+) -> bool {
+    if read.exons.len() != 1 {
+        return false;
+    }
+
+    let read_exon = read.exons[0];
+    if isoform_introns
         .iter()
-        .filter(|isoform_intron| {
-            read_introns
-                .iter()
-                .any(|read_intron| junctions_match(*read_intron, **isoform_intron, offset))
-        })
-        .count();
-    (matched_read_junctions, matched_isoform_junctions)
+        .any(|isoform_intron| read_exon.overlap_len(*isoform_intron) > 0)
+    {
+        return false;
+    }
+
+    if isoform_introns.is_empty() {
+        return true;
+    }
+
+    isoform.exons.iter().enumerate().any(|(idx, isoform_exon)| {
+        is_three_prime_terminal_exon(isoform, idx) && interval_contains(*isoform_exon, read_exon)
+    })
 }
 
 fn catalog_assignment_candidate(read: &Transcript, isoform: &Transcript) -> bool {
@@ -248,47 +351,102 @@ fn catalog_assignment_candidate(read: &Transcript, isoform: &Transcript) -> bool
     let read_introns = read.introns();
     let isoform_introns = isoform.introns();
     if read_introns.is_empty() {
-        return true;
+        return junctionless_read_candidate(read, isoform, &isoform_introns);
     }
     if isoform_introns.is_empty() {
         return false;
     }
 
-    read_introns.iter().all(|read_intron| {
-        isoform_introns.iter().any(|isoform_intron| {
-            junctions_match(
-                *read_intron,
-                *isoform_intron,
-                UNIQUE_ASSIGNMENT_JUNCTION_OFFSET,
-            )
+    let (matched_read_introns, matched_isoform_introns) = matching_intron_indices(
+        &read_introns,
+        &isoform_introns,
+        UNIQUE_ASSIGNMENT_JUNCTION_OFFSET,
+    );
+
+    matched_read_introns.len() == read_introns.len()
+        && unmatched_isoform_introns_overlapped_by_read_exons(
+            read,
+            &isoform_introns,
+            &matched_isoform_introns,
+        ) == 0
+}
+
+fn covered_unmatched_isoform_junctions(
+    read: &Transcript,
+    isoform_introns: &[Interval],
+    matched_isoform_introns: &HashSet<usize>,
+) -> usize {
+    isoform_introns
+        .iter()
+        .enumerate()
+        .filter(|(idx, isoform_intron)| {
+            if matched_isoform_introns.contains(idx) {
+                return false;
+            }
+
+            let inside_read_span =
+                isoform_intron.start >= read.tx_start && isoform_intron.end <= read.tx_end;
+            let overlaps_read_exon = read
+                .exons
+                .iter()
+                .any(|read_exon| read_exon.overlap_len(**isoform_intron) > 0);
+            inside_read_span || overlaps_read_exon
         })
-    })
+        .count()
+}
+
+fn exon_len_within_span(tx: &Transcript, span: Interval) -> u64 {
+    tx.exons
+        .iter()
+        .map(|exon| u64::from(exon.overlap_len(span)))
+        .sum()
+}
+
+fn exon_count_within_span(tx: &Transcript, span: Interval) -> usize {
+    tx.exons
+        .iter()
+        .filter(|exon| exon.overlap_len(span) > 0)
+        .count()
+}
+
+fn read_span(read: &Transcript) -> Interval {
+    Interval {
+        start: read.tx_start,
+        end: read.tx_end,
+    }
 }
 
 fn assignment_score(read: &Transcript, isoform: &Transcript) -> AssignmentScore {
     let read_introns = read.introns();
     let isoform_introns = isoform.introns();
-    let (matched_read_junctions, matched_isoform_junctions) = matched_junction_counts(
+    let (matched_read_introns, matched_isoform_introns) = matching_intron_indices(
         &read_introns,
         &isoform_introns,
         UNIQUE_ASSIGNMENT_JUNCTION_OFFSET,
     );
 
     let read_len = transcript_exon_len(read);
-    let isoform_len = transcript_exon_len(isoform);
+    let isoform_len = exon_len_within_span(isoform, read_span(read));
     let overlap = transcript_exon_overlap(read, isoform);
 
     AssignmentScore {
         chrom_mismatch: read.chrom != isoform.chrom,
         strand_mismatch: read.strand != isoform.strand,
-        unmatched_read_junctions: read_introns.len().saturating_sub(matched_read_junctions),
-        extra_isoform_junctions: isoform_introns
+        unmatched_read_junctions: read_introns
             .len()
-            .saturating_sub(matched_isoform_junctions),
+            .saturating_sub(matched_read_introns.len()),
+        extra_isoform_junctions: covered_unmatched_isoform_junctions(
+            read,
+            &isoform_introns,
+            &matched_isoform_introns,
+        ),
         terminal_delta: u64::from(read.tx_start.get().abs_diff(isoform.tx_start.get()))
             + u64::from(read.tx_end.get().abs_diff(isoform.tx_end.get())),
         exon_symmetric_difference: read_len + isoform_len - 2 * overlap,
-        exon_count_delta: read.exons.len().abs_diff(isoform.exons.len()),
+        exon_count_delta: read
+            .exons
+            .len()
+            .abs_diff(exon_count_within_span(isoform, read_span(read))),
     }
 }
 
@@ -303,6 +461,7 @@ pub fn select_unique_best_read_to_isoform(
         .iter()
         .map(|isoform| (isoform.name.as_str(), isoform))
         .collect();
+    let retained_regions = retained_regions_by_isoform(isoforms);
     let mut isoforms_by_gene: HashMap<&str, Vec<&str>> = HashMap::new();
     let mut isoforms_by_locus: HashMap<(&str, Strand), Vec<&str>> = HashMap::new();
     for isoform in isoforms {
@@ -388,6 +547,20 @@ pub fn select_unique_best_read_to_isoform(
 
     let mut unique_pairs = Vec::with_capacity(grouped.len());
     for (read_id, mut candidates) in grouped {
+        if let Some(read) = reads_by_name.get(read_id).copied() {
+            candidates.retain(|isoform_id| {
+                isoforms_by_name
+                    .get(*isoform_id)
+                    .copied()
+                    .is_some_and(|isoform| {
+                        catalog_assignment_candidate(read, isoform)
+                            && retained_regions.get(*isoform_id).is_none_or(|regions| {
+                                retained_regions_supported_by_read(read, regions)
+                            })
+                    })
+            });
+        }
+
         candidates.sort_unstable();
         candidates.dedup();
         if candidates.is_empty() {
@@ -497,6 +670,16 @@ mod tests {
     }
 
     fn make_tx_with_gene(name: &str, exons: &[(u32, u32)], name2: &str, gene: &str) -> Transcript {
+        make_tx_strand_with_gene(name, Strand::Plus, exons, name2, gene)
+    }
+
+    fn make_tx_strand_with_gene(
+        name: &str,
+        strand: Strand,
+        exons: &[(u32, u32)],
+        name2: &str,
+        gene: &str,
+    ) -> Transcript {
         let tx_start = exons.iter().map(|(s, _)| *s).min().unwrap_or(0);
         let tx_end = exons.iter().map(|(_, e)| *e).max().unwrap_or(0);
         let exons = exons
@@ -506,7 +689,7 @@ mod tests {
 
         Transcript::new(
             "chr1".to_owned(),
-            Strand::Plus,
+            strand,
             Coord::new(tx_start),
             Coord::new(tx_end),
             name.to_owned(),
@@ -667,6 +850,176 @@ mod tests {
 
         let unique = select_unique_best_read_to_isoform(&reads, &isoforms, &pairs).unwrap();
         assert_eq!(unique, vec![("r1".to_owned(), "z_closest".to_owned())]);
+    }
+
+    #[test]
+    fn unique_assignment_prefers_minus_strand_three_prime_early_stop_isoform() {
+        let reads = vec![make_tx_strand_with_gene(
+            "r_early_stop",
+            Strand::Minus,
+            &[(160, 200), (300, 350), (400, 500)],
+            "none",
+            "GENEA",
+        )];
+        let isoforms = vec![
+            make_tx_strand_with_gene(
+                "long_ref",
+                Strand::Minus,
+                &[(100, 200), (300, 350), (400, 500)],
+                "none",
+                "GENEA",
+            ),
+            make_tx_strand_with_gene(
+                "early_stop",
+                Strand::Minus,
+                &[(160, 200), (300, 350), (400, 500)],
+                "none",
+                "GENEA",
+            ),
+        ];
+        let pairs = vec![("r_early_stop".to_owned(), "long_ref".to_owned())];
+
+        let unique = select_unique_best_read_to_isoform(&reads, &isoforms, &pairs).unwrap();
+        assert_eq!(
+            unique,
+            vec![("r_early_stop".to_owned(), "early_stop".to_owned())]
+        );
+    }
+
+    #[test]
+    fn unique_assignment_drops_junctionless_internal_retained_exon_read() {
+        let reads = vec![make_tx_with_gene(
+            "r_internal",
+            &[(140, 160)],
+            "none",
+            "GENEA",
+        )];
+        let isoforms = vec![
+            make_tx_with_gene(
+                "retained",
+                &[(100, 110), (120, 200), (300, 310)],
+                "none",
+                "GENEA",
+            ),
+            make_tx_with_gene(
+                "spliced",
+                &[(100, 110), (120, 130), (180, 200), (300, 310)],
+                "none",
+                "GENEA",
+            ),
+        ];
+        let pairs = vec![("r_internal".to_owned(), "retained".to_owned())];
+
+        let unique = select_unique_best_read_to_isoform(&reads, &isoforms, &pairs).unwrap();
+        assert!(unique.is_empty());
+    }
+
+    #[test]
+    fn unique_assignment_keeps_junctionless_terminal_exon_read() {
+        let reads = vec![make_tx_with_gene(
+            "r_terminal",
+            &[(302, 308)],
+            "none",
+            "GENEA",
+        )];
+        let isoforms = vec![make_tx_with_gene(
+            "retained",
+            &[(100, 110), (120, 200), (300, 310)],
+            "none",
+            "GENEA",
+        )];
+        let pairs = vec![("r_terminal".to_owned(), "retained".to_owned())];
+
+        let unique = select_unique_best_read_to_isoform(&reads, &isoforms, &pairs).unwrap();
+        assert_eq!(
+            unique,
+            vec![("r_terminal".to_owned(), "retained".to_owned())]
+        );
+    }
+
+    #[test]
+    fn unique_assignment_keeps_minus_strand_junctionless_three_prime_read() {
+        let reads = vec![make_tx_strand_with_gene(
+            "r_minus_terminal",
+            Strand::Minus,
+            &[(102, 108)],
+            "none",
+            "GENEA",
+        )];
+        let isoforms = vec![make_tx_strand_with_gene(
+            "minus_isoform",
+            Strand::Minus,
+            &[(100, 110), (200, 210)],
+            "none",
+            "GENEA",
+        )];
+        let pairs = vec![("r_minus_terminal".to_owned(), "minus_isoform".to_owned())];
+
+        let unique = select_unique_best_read_to_isoform(&reads, &isoforms, &pairs).unwrap();
+        assert_eq!(
+            unique,
+            vec![("r_minus_terminal".to_owned(), "minus_isoform".to_owned())]
+        );
+    }
+
+    #[test]
+    fn unique_assignment_requires_retained_intron_boundary_support() {
+        let reads = vec![make_tx_with_gene(
+            "r_suffix",
+            &[(300, 310), (400, 410)],
+            "none",
+            "GENEA",
+        )];
+        let isoforms = vec![
+            make_tx_with_gene(
+                "Novel_retained",
+                &[(100, 200), (300, 310), (400, 410)],
+                "none",
+                "GENEA",
+            ),
+            make_tx_with_gene(
+                "Ref_spliced",
+                &[(100, 130), (180, 200), (300, 310), (400, 410)],
+                "none",
+                "GENEA",
+            ),
+        ];
+        let pairs = vec![("r_suffix".to_owned(), "Novel_retained".to_owned())];
+
+        let unique = select_unique_best_read_to_isoform(&reads, &isoforms, &pairs).unwrap();
+        assert_eq!(
+            unique,
+            vec![("r_suffix".to_owned(), "Ref_spliced".to_owned())]
+        );
+    }
+
+    #[test]
+    fn unique_assignment_prefers_retained_isoform_when_read_spans_retained_boundary() {
+        let reads = vec![make_tx_with_gene(
+            "r_retained",
+            &[(120, 200), (300, 310)],
+            "none",
+            "GENEA",
+        )];
+        let isoforms = vec![
+            make_tx_with_gene("Novel_retained", &[(100, 200), (300, 310)], "none", "GENEA"),
+            make_tx_with_gene(
+                "Ref_spliced",
+                &[(100, 130), (180, 200), (300, 310)],
+                "none",
+                "GENEA",
+            ),
+        ];
+        let pairs = vec![
+            ("r_retained".to_owned(), "Novel_retained".to_owned()),
+            ("r_retained".to_owned(), "Ref_spliced".to_owned()),
+        ];
+
+        let unique = select_unique_best_read_to_isoform(&reads, &isoforms, &pairs).unwrap();
+        assert_eq!(
+            unique,
+            vec![("r_retained".to_owned(), "Novel_retained".to_owned())]
+        );
     }
 
     #[test]

@@ -23,8 +23,67 @@ fn fresh_temp_dir(prefix: &str) -> PathBuf {
     dir
 }
 
+fn normalized_lines(path: &Path) -> Vec<String> {
+    let mut lines: Vec<String> = fs::read_to_string(path)
+        .expect("read text file")
+        .lines()
+        .map(|line| line.to_owned())
+        .collect();
+    lines.sort();
+    lines
+}
+
 #[test]
-fn count_matches_golden_output() {
+fn count_output_root_mode_matches_golden_output() {
+    let exe = env!("CARGO_BIN_EXE_trackcluster");
+
+    let reads = repo_path("tests/fixtures/reads.bed");
+    let reference = repo_path("tests/fixtures/ref.bed");
+    let golden_csv = repo_path("tests/golden/count/isoform_count.csv");
+
+    let out_dir = fresh_temp_dir("count_output_root");
+    let prefix = "sample";
+
+    let status = Command::new(exe)
+        .args([
+            "flow",
+            "-s",
+            reads.to_str().unwrap(),
+            "-r",
+            reference.to_str().unwrap(),
+            "-o",
+            out_dir.to_str().unwrap(),
+            "--prefix",
+            prefix,
+        ])
+        .status()
+        .expect("run flow");
+    assert!(status.success());
+
+    let status = Command::new(exe)
+        .args([
+            "count",
+            "-r",
+            reference.to_str().unwrap(),
+            "-o",
+            out_dir.to_str().unwrap(),
+            "--prefix",
+            prefix,
+        ])
+        .status()
+        .expect("run output-root count");
+    assert!(status.success());
+
+    let count_csv = out_dir.join(format!("{prefix}_isoform_count.csv"));
+    assert_eq!(normalized_lines(&count_csv), normalized_lines(&golden_csv));
+
+    assert!(out_dir
+        .join(format!("{prefix}_read_to_isoform.unique.tsv"))
+        .exists());
+}
+
+#[test]
+fn legacy_count_matches_golden_output() {
     let exe = env!("CARGO_BIN_EXE_trackcluster");
 
     let reads = repo_path("tests/fixtures/reads.bed");
@@ -44,7 +103,7 @@ fn count_matches_golden_output() {
             reference.to_str().unwrap(),
             "-i",
             isoform.to_str().unwrap(),
-            "-o",
+            "--out",
             out_csv.to_str().unwrap(),
         ])
         .status()
@@ -78,7 +137,7 @@ fn count_fractional_mode_preserves_split_counts() {
             isoform.to_str().unwrap(),
             "--assignment-mode",
             "fractional",
-            "-o",
+            "--out",
             out_csv.to_str().unwrap(),
         ])
         .status()

@@ -34,11 +34,11 @@ pub struct Args {
     #[arg(long = "name2-mode", default_value_t = crate::cluster::clusterj::Name2Mode::Coverage)]
     pub name2_mode: crate::cluster::clusterj::Name2Mode,
 
-    /// Platform preset used to seed junction correction and SL 5' defaults: generic, rna002, or rna004
+    /// Platform preset used to seed junction correction, SL 5', and 3' defaults: generic, rna002, or rna004
     #[arg(long = "platform-preset", default_value_t = crate::cluster::clusterj::PlatformPreset::Generic)]
     pub platform_preset: crate::cluster::clusterj::PlatformPreset,
 
-    /// Internal junction correction offset in bp; distinct from SL/5' terminal offsets
+    /// Internal junction correction offset in bp; distinct from SL/5' and 3' terminal offsets
     #[arg(long = "junction-correction-offset")]
     pub junction_correction_offset: Option<u32>,
 
@@ -61,6 +61,18 @@ pub struct Args {
     /// Minimum read support required for an SL 5' cluster to protect a candidate isoform
     #[arg(long = "sl-5prime-min-support")]
     pub sl_5prime_min_support: Option<usize>,
+
+    /// Same-junction biological 3' offset tolerated for merging
+    #[arg(long = "same-junction-3prime-offset")]
+    pub same_junction_3prime_offset: Option<u32>,
+
+    /// Offset used to group reads into the same biological 3' cluster; defaults to the active junction correction offset
+    #[arg(long = "3prime-cluster-offset")]
+    pub three_prime_cluster_offset: Option<u32>,
+
+    /// Minimum read support required for a 3' cluster to protect a candidate isoform
+    #[arg(long = "3prime-min-support")]
+    pub three_prime_min_support: Option<usize>,
 }
 
 impl Args {
@@ -73,6 +85,9 @@ impl Args {
             self.sl_same_junction_5prime_offset,
             self.sl_5prime_cluster_offset,
             self.sl_5prime_min_support,
+            self.same_junction_3prime_offset,
+            self.three_prime_cluster_offset,
+            self.three_prime_min_support,
         )
     }
 }
@@ -93,6 +108,7 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         args.batch_rounds,
         args.name2_mode,
         resolved_options.sl_options,
+        resolved_options.three_prime_options,
         resolved_options.junction_correction,
     );
 

@@ -64,19 +64,26 @@ trackcluster flow -s tests/fixtures/reads.bed -r tests/fixtures/ref.bed -o out -
 # If per-gene clustering already finished, rerun only merge/count/desc outputs
 trackcluster flow --count-only -r tests/fixtures/ref.bed -o out --prefix sample
 
+# Count from an existing output folder; unique assignment stays inside each gene folder
+trackcluster count -r tests/fixtures/ref.bed -o out --prefix sample
+
 # Validate a BED12/bigGenePred file
 trackcluster validate-bed -i tests/fixtures/minimal.bed
 
 # Junction-mode clustering (writes isoform.bed + mapping + unused)
 trackcluster clusterj -s tests/fixtures/reads.bed -r tests/fixtures/ref.bed -o isoform.bed
 # Platform presets:
-#   --platform-preset rna002  # junction offset 15; SL 5' offsets 20/25/20
-#   --platform-preset rna004  # conservative defaults: junction offset 10; SL 5' offsets 15/25/15
+#   --platform-preset rna002  # junction offset 15; SL 5' offsets 20/25/20; 3' cluster offset 15
+#   --platform-preset rna004  # conservative defaults: junction offset 10; SL 5' offsets 15/25/15; 3' cluster offset 10
 # SL 5' merge behavior can be tuned with --sl-partial-5prime-offset,
 # --sl-same-junction-5prime-offset, --sl-5prime-cluster-offset, and
 # --sl-5prime-min-support.
+# Same-junction 3' retention can be tuned with --same-junction-3prime-offset,
+# --3prime-cluster-offset, and --3prime-min-support.
 # SL evidence is optional. Reads without SL information use the normal junction
 # correction and 5' truncation collapse path, but are not SL-protected isoforms.
+# Supported same-junction 3' terminal clusters are retained as isoforms, including
+# minus-strand early-stop clusters where the 3' end is the lower genomic coordinate.
 
 # Overlap-mode clustering (legacy-style two-round exon/intron overlap mode)
 trackcluster cluster -s tests/fixtures/reads.bed -r tests/fixtures/ref.bed -o isoform.bed
@@ -84,8 +91,8 @@ trackcluster cluster -s tests/fixtures/reads.bed -r tests/fixtures/ref.bed -o is
 # Full flow in overlap mode
 trackcluster flow --cluster-mode cluster -s tests/fixtures/reads.bed -r tests/fixtures/ref.bed -o out --prefix sample
 
-# Count isoforms
-trackcluster count -s tests/fixtures/reads.bed -r tests/fixtures/ref.bed -i isoform.bed --read-to-isoform isoform.read_to_isoform.tsv -o isoform_count.csv
+# Legacy low-level count from a standalone isoform BED
+trackcluster count -s tests/fixtures/reads.bed -r tests/fixtures/ref.bed -i isoform.bed --read-to-isoform isoform.read_to_isoform.tsv --out isoform_count.csv
 
 # Describe/classify isoforms vs reference (writes <prefix>_*.txt)
 trackcluster desc --isoform isoform.bed --reference tests/fixtures/ref.bed -o desc_out

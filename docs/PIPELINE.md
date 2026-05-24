@@ -62,6 +62,7 @@ Defaults:
 - `--sw-score 11` (collapse 5' truncations); use `--sw-score -1` to disable.
 - `--name2-mode coverage` (memory-friendly). Use `--name2-mode full` to embed read IDs in the isoform BED (larger outputs); otherwise rely on `*_read_to_isoform.tsv` for counting.
 - SL-supported junction-mode 5' merge controls default to `--sl-partial-5prime-offset 15`, `--sl-same-junction-5prime-offset 25`, `--sl-5prime-cluster-offset 15`, and `--sl-5prime-min-support 2`.
+- Supported same-junction 3' terminal clusters are retained as isoforms with `--same-junction-3prime-offset 50`, `--3prime-min-support 5`, and a default `--3prime-cluster-offset` equal to the active junction correction offset.
 - `--max-reads-per-gene 50000` (memory-friendly cap; set `0` to disable). Counts/usage tables are scaled when downsampling occurs.
 
 Overlap-mode example:
@@ -201,9 +202,10 @@ After running, `tracktest/` contains:
 Internally, 5' truncation collapsing uses a junction-suffix index to avoid quadratic scans on large loci.
 Low-support splice-junction sites are corrected before merging with `--junction-correction-offset` and `--junction-correction-min-support`.
 Supported alternative SL 5' clusters can be protected from merging with the separate `--sl-*` terminal controls exposed by `trackcluster clusterj`, `trackcluster flow`, and `clusterj_batch`.
-Use `--platform-preset rna002` for RNA002 reads (junction offset `15`; SL 5' offsets `20/25/20`) and `--platform-preset rna004` for RNA004 reads (conservative defaults: junction offset `10`; SL 5' offsets `15/25/15`). Explicit junction correction and SL options override the preset.
+Supported same-junction 3' terminal clusters can be protected with `--same-junction-3prime-offset`, `--3prime-cluster-offset`, and `--3prime-min-support`.
+Use `--platform-preset rna002` for RNA002 reads (junction offset `15`; SL 5' offsets `20/25/20`; 3' cluster offset `15`) and `--platform-preset rna004` for RNA004 reads (conservative defaults: junction offset `10`; SL 5' offsets `15/25/15`; 3' cluster offset `10`). Explicit junction correction, SL, and 3' options override the preset.
 SL evidence is optional; reads without SL information still use junction correction and normal 5' truncation collapsing, but they are not protected by the SL-cluster rules.
-Counting defaults to `--assignment-mode unique`, so each read contributes to only the closest compatible catalog isoform. Pass `--assignment-mode fractional` for compatibility with split multi-mapped counts from the mapping file.
+Same-junction 3' retention is independent of SL evidence and is strand-aware, including minus-strand early-stop clusters at the lower genomic coordinate. Counting defaults to `--assignment-mode unique`, so each read contributes to only the closest compatible catalog isoform; retained 3' early-stop reads therefore count to the closer terminal isoform instead of a longer same-junction reference. Pass `--assignment-mode fractional` for compatibility with split multi-mapped counts from the mapping file.
 
 For each gene, it writes:
 
@@ -241,24 +243,32 @@ find trackout -mindepth 2 -maxdepth 2 -name '*_unused.bed' -print0 \
   | xargs -0 cat > sample_unused.bed
 ```
 
-Recommended: combine read-to-isoform mappings (required for default `--name2-mode coverage|none` counting):
+The recommended count path reads the completed per-gene output folders directly, so manual
+concatenation is not needed for counting:
 
 ```bash
-find trackout -mindepth 2 -maxdepth 2 -name '*_read_to_isoform.tsv' -print0 \
-  | sort -z \
-  | xargs -0 cat > sample_read_to_isoform.tsv
+trackcluster count \
+  --reference ref.bed \
+  --output-root trackout \
+  --prefix sample
 ```
 
 ## Step 4 - Count isoforms (`count`)
 
+`trackcluster count --output-root` reuses the same per-gene count boundary as `flow --count-only`.
+In unique assignment mode, each gene folder is counted using its own `{gene}_nano.bed`,
+per-gene isoform BED, and `{gene}_read_to_isoform.tsv`; retained-intron searches do not cross
+between gene folders.
+
 ```bash
 trackcluster count \
-  --reads reads.bed \
   --reference ref.bed \
-  --isoform sample_isoform.bed \
-  --read-to-isoform sample_read_to_isoform.tsv \
-  --out sample_isoform_count.csv
+  --output-root trackout \
+  --prefix sample
 ```
+
+The legacy standalone BED mode remains available with `--isoform` and `--read-to-isoform`, but its
+unique assignment scope is the supplied merged input rather than individual gene folders.
 
 ## Step 4b - Multi-sample usage (`count-multi`)
 

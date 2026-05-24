@@ -61,11 +61,11 @@ struct Args {
     #[arg(long = "name2-mode", default_value_t = trackcluster_rs::cluster::clusterj::Name2Mode::Coverage)]
     name2_mode: trackcluster_rs::cluster::clusterj::Name2Mode,
 
-    /// Platform preset used to seed junction correction and SL 5' defaults: generic, rna002, or rna004.
+    /// Platform preset used to seed junction correction, SL 5', and 3' defaults: generic, rna002, or rna004.
     #[arg(long = "platform-preset", default_value_t = trackcluster_rs::cluster::clusterj::PlatformPreset::Generic)]
     platform_preset: trackcluster_rs::cluster::clusterj::PlatformPreset,
 
-    /// Internal junction correction offset in bp; distinct from SL/5' terminal offsets.
+    /// Internal junction correction offset in bp; distinct from SL/5' and 3' terminal offsets.
     #[arg(long = "junction-correction-offset")]
     junction_correction_offset: Option<u32>,
 
@@ -88,6 +88,18 @@ struct Args {
     /// Minimum read support required for an SL 5' cluster to protect a candidate isoform.
     #[arg(long = "sl-5prime-min-support")]
     sl_5prime_min_support: Option<usize>,
+
+    /// Same-junction biological 3' offset tolerated for merging.
+    #[arg(long = "same-junction-3prime-offset")]
+    same_junction_3prime_offset: Option<u32>,
+
+    /// Offset used to group reads into the same biological 3' cluster; defaults to the active junction correction offset.
+    #[arg(long = "3prime-cluster-offset")]
+    three_prime_cluster_offset: Option<u32>,
+
+    /// Minimum read support required for a 3' cluster to protect a candidate isoform.
+    #[arg(long = "3prime-min-support")]
+    three_prime_min_support: Option<usize>,
 
     /// Overwrite existing outputs (default: skip genes whose output file already exists)
     #[arg(long = "force")]
@@ -130,6 +142,9 @@ fn main() -> anyhow::Result<()> {
         args.sl_same_junction_5prime_offset,
         args.sl_5prime_cluster_offset,
         args.sl_5prime_min_support,
+        args.same_junction_3prime_offset,
+        args.three_prime_cluster_offset,
+        args.three_prime_min_support,
     );
     trackcluster_rs::flow::full::run_clusterj_batch(
         trackcluster_rs::flow::full::BatchRunOptions {
@@ -150,6 +165,7 @@ fn main() -> anyhow::Result<()> {
             platform_preset: args.platform_preset,
             junction_correction_options: resolved_options.junction_correction,
             sl_options: resolved_options.sl_options,
+            three_prime_options: resolved_options.three_prime_options,
             overlap_cutoff1: trackcluster_rs::cluster::cluster_overlap::DEFAULT_CUTOFF1,
             overlap_cutoff2: trackcluster_rs::cluster::cluster_overlap::DEFAULT_CUTOFF2,
             overlap_intron_weight: trackcluster_rs::cluster::cluster_overlap::DEFAULT_INTRON_WEIGHT,
