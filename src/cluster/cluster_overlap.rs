@@ -370,7 +370,7 @@ fn readall_subset(tracks: &[Track], keep: &HashSet<usize>) -> HashSet<String> {
 }
 
 fn should_drop_read(track: &Track, mode: DistanceMode, sw_score: i64) -> bool {
-    mode == DistanceMode::Ratio || i64::from(track.tx.score) < sw_score
+    mode == DistanceMode::Ratio || sw_score < 0 || i64::from(track.tx.score) < sw_score
 }
 
 fn filter_pair(
@@ -1113,7 +1113,7 @@ mod tests {
     }
 
     #[test]
-    fn sw_score_minus_one_disables_ratio_short_truncation_merge() {
+    fn sw_score_minus_one_keeps_ratio_short_truncation_merge() {
         use std::collections::HashSet;
 
         let refs = vec![make_tx(
@@ -1141,7 +1141,7 @@ mod tests {
         ];
 
         let merged = cluster_with_options(&reads, Some(&refs), 1, ClusterOptions::default());
-        let no_merge = cluster_with_options(
+        let no_signal_merge = cluster_with_options(
             &reads,
             Some(&refs),
             1,
@@ -1156,21 +1156,21 @@ mod tests {
             .iter()
             .map(|(read_id, _)| read_id.as_str())
             .collect();
-        let no_merge_reads: HashSet<&str> = no_merge
+        let no_signal_merge_reads: HashSet<&str> = no_signal_merge
             .read_to_isoform
             .iter()
             .map(|(read_id, _)| read_id.as_str())
             .collect();
         assert_eq!(merged_reads.len(), 2);
-        assert_eq!(no_merge_reads.len(), 2);
+        assert_eq!(no_signal_merge_reads.len(), 2);
 
-        let no_merge_targets: HashSet<&str> = no_merge
+        let no_signal_merge_targets: HashSet<&str> = no_signal_merge
             .read_to_isoform
             .iter()
             .map(|(_, isoform_id)| isoform_id.as_str())
             .collect();
 
-        assert_eq!(no_merge_targets.len(), 2);
+        assert_eq!(no_signal_merge_targets.len(), 1);
 
         let merged_short_targets: HashSet<&str> = merged
             .read_to_isoform
@@ -1178,7 +1178,7 @@ mod tests {
             .filter(|(read_id, _)| read_id == "read_short")
             .map(|(_, isoform_id)| isoform_id.as_str())
             .collect();
-        let no_merge_short_targets: HashSet<&str> = no_merge
+        let no_signal_merge_short_targets: HashSet<&str> = no_signal_merge
             .read_to_isoform
             .iter()
             .filter(|(read_id, _)| read_id == "read_short")
@@ -1187,8 +1187,8 @@ mod tests {
 
         assert_eq!(merged_short_targets.len(), 1);
         assert!(merged_short_targets.contains("ref"));
-        assert_eq!(no_merge_short_targets.len(), 1);
-        assert!(no_merge_short_targets.contains("read_short"));
+        assert_eq!(no_signal_merge_short_targets.len(), 1);
+        assert!(no_signal_merge_short_targets.contains("ref"));
     }
 
     #[test]
@@ -1271,6 +1271,67 @@ mod tests {
 
         assert_eq!(sl_targets.len(), 1);
         assert!(sl_targets.contains("read_sl"));
+    }
+
+    #[test]
+    fn sw_score_minus_one_removes_overlap_sl_protection() {
+        use std::collections::HashSet;
+
+        let refs = vec![make_tx(
+            "ref",
+            Strand::Plus,
+            &[(100, 110), (120, 130), (140, 150)],
+            "isoform_anno",
+            100,
+        )];
+        let reads = vec![
+            make_tx(
+                "read_long",
+                Strand::Plus,
+                &[(100, 110), (120, 130), (140, 150)],
+                "nanopore_read",
+                20,
+            ),
+            make_tx(
+                "read_sl",
+                Strand::Plus,
+                &[(120, 130), (140, 150)],
+                "nanopore_read",
+                DEFAULT_SW_SCORE as u32 + 1,
+            ),
+        ];
+
+        let protected = cluster_with_options(&reads, Some(&refs), 1, ClusterOptions::default());
+        let protected_targets: HashSet<&str> = protected
+            .read_to_isoform
+            .iter()
+            .filter(|(read_id, _)| read_id == "read_sl")
+            .map(|(_, isoform_id)| isoform_id.as_str())
+            .collect();
+        assert_eq!(protected_targets.len(), 1);
+        assert!(protected_targets.contains("read_sl"));
+
+        for batch_size in [0, 1] {
+            let no_signal = cluster_with_options(
+                &reads,
+                Some(&refs),
+                1,
+                ClusterOptions {
+                    sw_score: -1,
+                    batch_size,
+                    ..ClusterOptions::default()
+                },
+            );
+            let no_signal_targets: HashSet<&str> = no_signal
+                .read_to_isoform
+                .iter()
+                .filter(|(read_id, _)| read_id == "read_sl")
+                .map(|(_, isoform_id)| isoform_id.as_str())
+                .collect();
+
+            assert_eq!(no_signal_targets.len(), 1);
+            assert!(no_signal_targets.contains("ref"));
+        }
     }
 
     #[test]

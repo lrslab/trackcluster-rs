@@ -59,7 +59,7 @@ trackcluster flow \
 
 Defaults:
 - `--cluster-mode clusterj` (junction mode). Use `--cluster-mode cluster` for the legacy overlap/intersection path.
-- `--sw-score 11` (collapse 5' truncations); use `--sw-score -1` to disable.
+- `--sw-score 11` (use high-scoring reads as valid-5' evidence); use `--sw-score -1` to treat reads as having no SW 5' signal while keeping ordinary merging.
 - `--name2-mode coverage` (memory-friendly). Use `--name2-mode full` to embed read IDs in the isoform BED (larger outputs); otherwise rely on `*_read_to_isoform.tsv` for counting.
 - SL-supported junction-mode 5' merge controls default to `--sl-partial-5prime-offset 15`, `--sl-same-junction-5prime-offset 25`, `--sl-5prime-cluster-offset 15`, and `--sl-5prime-min-support 2`.
 - Supported same-junction 3' terminal clusters are retained as isoforms with `--same-junction-3prime-offset 50`, `--3prime-min-support 5`, and a default `--3prime-cluster-offset` equal to the active junction correction offset.
@@ -82,7 +82,7 @@ trackcluster flow \
 Notes for overlap mode:
 - `flow` writes per-gene overlap isoforms as `*_simple_coverage.bed` under the gene folders, then merges them into `<prefix>_isoform.bed`.
 - Run summaries switch to `cluster_batch_summary.txt`, `cluster_batch_errors.txt`, and `cluster_batch_downsample.tsv`.
-- In the second overlap pass, a short read is collapsed only when `score < --sw-score`; `score == --sw-score` stays as its own track.
+- In the second overlap pass, a short read is protected only when its score is at or above `--sw-score`; with `--sw-score -1`, ordinary short-read merging still runs.
 
 Count-only rerun:
 
@@ -198,6 +198,7 @@ After running, `tracktest/` contains:
 #### What this step does
 
 `clusterj_batch` iterates over gene folders in `--input-root` and runs junction-mode clustering for each gene.
+If you plan to run `trackcluster count --output-root` afterwards, write the batch outputs back into the prepared root so each gene folder still contains `{gene}_nano.bed`, the per-gene isoform BED, and `{gene}_read_to_isoform.tsv`. A separate output root is fine for manual concatenation, but it is not a complete per-gene count root unless you also copy the prepared gene inputs.
 
 Internally, 5' truncation collapsing uses a junction-suffix index to avoid quadratic scans on large loci.
 Low-support splice-junction sites are corrected before merging with `--junction-correction-offset` and `--junction-correction-min-support`.
@@ -220,7 +221,7 @@ It also writes run summaries in the output root (e.g. `clusterj_batch_summary.tx
 ```bash
 clusterj_batch \
   --input-root tracktest \
-  --output-root trackout \
+  --output-root tracktest \
   --threads 8 \
   --force
 ```
@@ -230,7 +231,7 @@ clusterj_batch \
 `clusterj_batch` produces one isoform BED per gene. Many downstream tools expect a single isoform file, so you usually concatenate them:
 
 ```bash
-find trackout -mindepth 2 -maxdepth 2 -name '*_simple_coveragej.bed' -print0 \
+find tracktest -mindepth 2 -maxdepth 2 -name '*_simple_coveragej.bed' -print0 \
   | sort -z \
   | xargs -0 cat > sample_isoform.bed
 ```
@@ -238,7 +239,7 @@ find trackout -mindepth 2 -maxdepth 2 -name '*_simple_coveragej.bed' -print0 \
 Optional: combine unused reads too:
 
 ```bash
-find trackout -mindepth 2 -maxdepth 2 -name '*_unused.bed' -print0 \
+find tracktest -mindepth 2 -maxdepth 2 -name '*_unused.bed' -print0 \
   | sort -z \
   | xargs -0 cat > sample_unused.bed
 ```
@@ -249,7 +250,7 @@ concatenation is not needed for counting:
 ```bash
 trackcluster count \
   --reference ref.bed \
-  --output-root trackout \
+  --output-root tracktest \
   --prefix sample
 ```
 
@@ -263,7 +264,7 @@ between gene folders.
 ```bash
 trackcluster count \
   --reference ref.bed \
-  --output-root trackout \
+  --output-root tracktest \
   --prefix sample
 ```
 

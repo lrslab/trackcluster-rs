@@ -90,6 +90,8 @@ mod tests {
             "12",
             "--3prime-min-support",
             "6",
+            "--sw-score",
+            "-1",
         ])
         .unwrap();
 
@@ -106,6 +108,7 @@ mod tests {
                 assert_eq!(args.same_junction_3prime_offset, Some(60));
                 assert_eq!(args.three_prime_cluster_offset, Some(12));
                 assert_eq!(args.three_prime_min_support, Some(6));
+                assert_eq!(args.sw_score, -1);
             }
             _ => panic!("expected clusterj args"),
         }

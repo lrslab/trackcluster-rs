@@ -26,7 +26,7 @@ Behavior:
 - For large loci, flow/CLI can optionally pre-merge reads in batches before the final full two-pass overlap clustering (`--batch-size`, `--batch-rounds`).
 - Parameters default to the Python flow defaults and are configurable from the CLI/flow surface:
   - `cutoff1=0.05`, `cutoff2=0.01`, `intronweight=0.5`, `scorecutoff=11`
-- The second pass matches the Python SL boundary behavior: a short read is collapsed only when `score < scorecutoff`; reads with `score == scorecutoff` are retained as their own track.
+- With a non-negative `scorecutoff`, the second pass matches the Python SL boundary behavior: a short read is collapsed only when `score < scorecutoff`; reads with `score == scorecutoff` are retained as their own track. With `--sw-score -1`, Rust treats BED scores as no valid-5' signal and ordinary short-read merging still runs.
 - In batched `flow --cluster-mode cluster` runs, per-gene overlap outputs use the `*_simple_coverage.bed` suffix and batch summary files use the `cluster_batch_*` prefix.
 
 Current CLI exposure:
@@ -60,9 +60,9 @@ Junction-mode clustering (`clusterj`, `flow` default mode, and `clusterj_batch`)
 - `--sl-5prime-cluster-offset` (default `15`)
 - `--sl-5prime-min-support` (default `2`)
 
-Reads with score greater than `--sw-score` are treated as SL-supported. A supported candidate with enough nearby same-junction 5' support is protected from merging when its biological 5' end is outside the relevant offset from the longer/reference track. Singleton supported reads can still merge as likely degradation.
+When `--sw-score` is non-negative, reads with score greater than `--sw-score` are treated as SL-supported. A supported candidate with enough nearby same-junction 5' support is protected from merging when its biological 5' end is outside the relevant offset from the longer/reference track. Singleton supported reads can still merge as likely degradation.
 
-SL information is optional and many datasets do not have it for every read. Reads without SL evidence, or reads whose score is not greater than `--sw-score`, are handled as non-SL-supported reads: they still participate in junction correction and normal 5' truncation collapsing, but they do not receive SL-cluster protection as alternative 5' isoforms. Keep the default `--sw-score 11` for mixed/no-SL datasets unless you intentionally want to disable 5' truncation collapsing; setting `--sw-score -1` disables junction truncation collapsing, including batched merging.
+SL information is optional and many datasets do not have it for every read. Reads without SL evidence, or reads whose score is not greater than a non-negative `--sw-score`, are handled as non-SL-supported reads: they still participate in junction correction and normal 5' truncation collapsing, but they do not receive SL-cluster protection as alternative 5' isoforms. Keep the default `--sw-score 11` for mixed/no-SL datasets. Set `--sw-score -1` when the BED score should not be used as valid-5' evidence; all reads are treated as non-SL-supported and ordinary truncation merging, including batched merging, still runs.
 
 ## Junction-mode 3' terminal support
 

@@ -41,7 +41,7 @@ Key flags:
 - `--output-root/-o`: output directory (created if missing)
 - `--prefix`: output prefix (used for merged outputs like `<prefix>_isoform.bed`)
 - `--threads/-t`: number of worker threads (parallel across genes)
-- `--sw-score`: Smith-Waterman cutoff for 5' truncation collapsing (default: `11`; set to `-1` to disable). In overlap mode, the second pass only collapses a short read when `score < --sw-score`; a read at the exact cutoff remains its own track.
+- `--sw-score`: Smith-Waterman cutoff for SL-supported 5' protection (default: `11`; set to `-1` to treat reads as having no SW 5' signal). In overlap mode, the second pass protects a short read only when its score is at or above the cutoff; with `-1`, ordinary short-read merging still runs.
 - `--batch-size`, `--batch-rounds`: bounds for very large genes; in overlap mode these control iterative pre-merging rounds before the final two-pass overlap clustering
 - `--name2-mode`: `coverage` (default), `full`, or `none` (controls isoform `name2` payload size; mapping TSVs are used for counting)
 - `--platform-preset`: `generic` (default), `rna002`, or `rna004`. Presets seed junction correction, SL 5', and same-junction 3' defaults; explicit option values override the preset.
@@ -84,7 +84,7 @@ Junction min support is weighted site support: read sites contribute `1`, refere
 | `rna002` | RNA002 direct RNA reads; more tolerant of junction and 5' end wobble | `15` | `5` | `20` | `25` | `20` | `2` | `50` | `15` | `5` |
 | `rna004` | RNA004 direct RNA reads; use the conservative/default cutoffs | `10` | `5` | `15` | `25` | `15` | `2` | `50` | `10` | `5` |
 
-SL information is optional. Reads with no SL evidence, or reads whose BED score is not greater than `--sw-score`, are treated as non-SL-supported reads: they still go through junction correction and normal 5' truncation collapsing, but they do not receive SL-cluster protection as alternative 5' isoforms. For datasets where many reads have no SL information, keep the default `--sw-score 11` and use `--platform-preset rna004` for RNA004 or `--platform-preset rna002` for RNA002. Use `--sw-score -1` only when you want to disable 5' truncation collapsing entirely.
+SL information is optional. When `--sw-score` is non-negative, reads with no SL evidence, or reads whose BED score is not greater than the cutoff, are treated as non-SL-supported reads: they still go through junction correction and normal 5' truncation collapsing, but they do not receive SL-cluster protection as alternative 5' isoforms. For datasets where many reads have no SL information, keep the default `--sw-score 11` and use `--platform-preset rna004` for RNA004 or `--platform-preset rna002` for RNA002. Use `--sw-score -1` when BED score should not be used as a valid-5' signal; all reads are treated as non-SL-supported and ordinary merging still runs.
 
 Same-junction 3' terminal clusters with nearby read support are retained as isoforms independently of SL evidence. By default, protection requires at least `5` reads within the active junction correction offset and a 3' end more than `50` bp from the merge target. The rule is strand-aware: on minus-strand transcripts, a 3' early stop appears as a higher `tx_start`/lower genomic terminal boundary relative to the full-length isoform.
 
@@ -188,7 +188,7 @@ If `--out isoform.bed`, this command writes:
 Key flags:
 - `--reads/-s`, `--reference/-r`, `--out/-o`
 - `--threads/-t`: number of worker threads
-- `--sw-score`: Smith-Waterman cutoff for 5' truncation collapsing (default: `11`; set to `-1` to disable)
+- `--sw-score`: Smith-Waterman cutoff for SL-supported 5' protection (default: `11`; set to `-1` to treat reads as having no SW 5' signal)
 - `--batch-size`, `--batch-rounds`: bounds for very large genes
 - `--name2-mode`: `coverage` (default), `full`, or `none` (controls isoform `name2` payload size)
 - `--platform-preset`: `generic` (default), `rna002`, or `rna004`. Presets seed junction correction, SL 5', and same-junction 3' defaults; explicit option values override the preset.
@@ -220,7 +220,7 @@ Key flags:
 - `--reads/-s`, `--reference/-r`, `--out/-o`
 - `--threads/-t`: number of worker threads
 - `--batch-size`, `--batch-rounds`: optional overlap batching for large loci (`--batch-size 0` disables intermediate batching)
-- `--sw-score`: Smith-Waterman cutoff for 5' truncation collapsing in pass 2 (default: `11`; set to `-1` to disable). In pass 2, a short read is only collapsed when `score < --sw-score`; `score == --sw-score` remains a separate track.
+- `--sw-score`: Smith-Waterman cutoff for SL-supported 5' protection in pass 2 (default: `11`; set to `-1` to treat reads as having no SW 5' signal). In pass 2, a short read is protected only when its score is at or above the cutoff; with `-1`, ordinary short-read merging still runs.
 - `--cutoff1`, `--cutoff2`: overlap pass 1 / pass 2 cutoffs (default: `0.05`, `0.01`)
 - `--intron-weight`: intron contribution to the combined overlap distance (default: `0.5`)
 - `--name2-mode`: `coverage` (default), `full`, or `none`
@@ -244,6 +244,10 @@ Compute isoform counts from an existing `flow`/`clusterj-batch` output directory
 This is the recommended mode because unique assignment is rerun inside each
 gene folder using `{gene}_nano.bed`, the per-gene isoform BED, and
 `{gene}_read_to_isoform.tsv` before merged counts are written.
+When using manual `preparedir` -> `clusterj_batch`, use the same directory for
+`clusterj_batch --input-root` and `--output-root` if you want to recount with
+`trackcluster count --output-root`; a separate cluster output directory does not
+contain `{gene}_nano.bed` unless you copy the prepared inputs there.
 
 Input:
 - `--output-root/-o`: existing output directory containing per-gene folders
@@ -348,7 +352,7 @@ Scope:
 - For overlap-mode batched clustering, use `trackcluster flow --cluster-mode cluster` or `trackcluster cluster` directly on a single reads/reference pair.
 
 Useful flags:
-- `--sw-score`: Smith-Waterman cutoff for 5' truncation collapsing (default: `11`; set to `-1` to disable)
+- `--sw-score`: Smith-Waterman cutoff for SL-supported 5' protection (default: `11`; set to `-1` to treat reads as having no SW 5' signal)
 - `--batch-size`, `--batch-rounds`: bounds for very large genes
 - `--name2-mode`: `coverage` (default), `full`, or `none` (controls isoform `name2` payload size)
 - `--platform-preset`: `generic` (default), `rna002`, or `rna004`. Presets seed junction correction, SL 5', and same-junction 3' defaults; explicit option values override the preset.
@@ -362,7 +366,7 @@ Typical usage (after `preparedir`):
 ```bash
 clusterj_batch \
   --input-root tracktest \
-  --output-root trackout \
+  --output-root tracktest \
   --threads 8 \
   --force
 ```
@@ -376,7 +380,12 @@ clusterj_batch \
   --prepare-reference ref.bed \
   --prepare-prefix sample \
   --input-root tracktest \
-  --output-root trackout \
+  --output-root tracktest \
   --threads 8 \
   --force
 ```
+
+Use a distinct `--output-root` only when you intend to consume the per-gene
+cluster outputs directly or concatenate them manually. For
+`trackcluster count --output-root` unique assignment, the count root must also
+contain the prepared `{gene}_nano.bed` files.

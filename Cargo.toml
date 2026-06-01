@@ -1,6 +1,6 @@
 [package]
 name = "trackcluster-rs"
-version = "0.1.16"
+version = "0.1.17"
 edition = "2021"
 default-run = "trackcluster"
 description = "Pure-Rust long-read isoform clustering and counting pipeline."
@@ -12,7 +12,7 @@ homepage = "https://github.com/lrslab/trackcluster-rs"
 documentation = "https://docs.rs/trackcluster-rs"
 keywords = ["bioinformatics", "genomics", "isoform", "nanopore", "long-reads"]
 categories = ["science", "command-line-utilities"]
-exclude = ["rust-toolchain.toml"]
+exclude = ["rust-toolchain.toml", "todo_*.md"]
 
 [dependencies]
 anyhow = "1.0.79"

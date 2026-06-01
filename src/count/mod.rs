@@ -8,6 +8,7 @@ pub mod multi;
 
 const GENE_NAME_COL: usize = 5;
 const UNIQUE_ASSIGNMENT_JUNCTION_OFFSET: u32 = 15;
+const UNIQUE_CATALOG_BIN_SIZE: u32 = 16_384;
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct CountRecord {
@@ -56,6 +57,83 @@ struct AssignmentScore {
     terminal_delta: u64,
     exon_symmetric_difference: u64,
     exon_count_delta: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct CatalogKey {
+    gene: Option<String>,
+    chrom: String,
+    strand: Strand,
+}
+
+impl CatalogKey {
+    fn new(gene: Option<&str>, chrom: &str, strand: Strand) -> Self {
+        Self {
+            gene: gene.map(str::to_owned),
+            chrom: chrom.to_owned(),
+            strand,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct SpanCandidateIndex {
+    bins: HashMap<u32, Vec<usize>>,
+}
+
+impl SpanCandidateIndex {
+    fn build(isoforms: &[Transcript], indices: &[usize]) -> Self {
+        let mut bins: HashMap<u32, Vec<usize>> = HashMap::new();
+        for &idx in indices {
+            let isoform = &isoforms[idx];
+            let start = isoform.tx_start.get();
+            let end = isoform.tx_end.get();
+            if start >= end {
+                continue;
+            }
+
+            let start_bin = start / UNIQUE_CATALOG_BIN_SIZE;
+            let end_bin = end.saturating_sub(1) / UNIQUE_CATALOG_BIN_SIZE;
+            for bin in start_bin..=end_bin {
+                bins.entry(bin).or_default().push(idx);
+            }
+        }
+
+        Self { bins }
+    }
+
+    fn collect_overlapping(
+        &self,
+        read: &Transcript,
+        isoforms: &[Transcript],
+        seen: &mut [u32],
+        stamp: u32,
+        out: &mut Vec<usize>,
+    ) {
+        let start = read.tx_start.get();
+        let end = read.tx_end.get();
+        if start >= end {
+            return;
+        }
+
+        let start_bin = start / UNIQUE_CATALOG_BIN_SIZE;
+        let end_bin = end.saturating_sub(1) / UNIQUE_CATALOG_BIN_SIZE;
+        for bin in start_bin..=end_bin {
+            let Some(indices) = self.bins.get(&bin) else {
+                continue;
+            };
+            for &idx in indices {
+                if seen[idx] == stamp {
+                    continue;
+                }
+                let isoform = &isoforms[idx];
+                if isoform.tx_start < read.tx_end && read.tx_start < isoform.tx_end {
+                    seen[idx] = stamp;
+                    out.push(idx);
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn parse_subreads(tx: &Transcript) -> Vec<&str> {
@@ -219,6 +297,20 @@ fn interval_contains(container: Interval, contained: Interval) -> bool {
     container.start <= contained.start && contained.end <= container.end
 }
 
+fn lower_bound_introns_by_start(introns: &[Interval], start: Coord) -> usize {
+    let mut left = 0usize;
+    let mut right = introns.len();
+    while left < right {
+        let mid = left + (right - left) / 2;
+        if introns[mid].start < start {
+            left = mid + 1;
+        } else {
+            right = mid;
+        }
+    }
+    left
+}
+
 fn retained_regions_by_isoform(isoforms: &[Transcript]) -> HashMap<String, Vec<Interval>> {
     let mut out = HashMap::new();
     let mut gene_introns = Vec::new();
@@ -234,16 +326,14 @@ fn retained_regions_by_isoform(isoforms: &[Transcript]) -> HashMap<String, Vec<I
 
     for isoform in isoforms {
         let mut retained_regions = Vec::new();
-        for intron in &gene_introns {
-            if intron.is_empty() {
-                continue;
-            }
-            if isoform
-                .exons
-                .iter()
-                .any(|exon| interval_contains(*exon, *intron))
-            {
-                retained_regions.push(*intron);
+        for exon in &isoform.exons {
+            let mut idx = lower_bound_introns_by_start(&gene_introns, exon.start);
+            while idx < gene_introns.len() && gene_introns[idx].start <= exon.end {
+                let intron = gene_introns[idx];
+                if !intron.is_empty() && interval_contains(*exon, intron) {
+                    retained_regions.push(intron);
+                }
+                idx += 1;
             }
         }
 
@@ -450,6 +540,51 @@ fn assignment_score(read: &Transcript, isoform: &Transcript) -> AssignmentScore 
     }
 }
 
+fn build_catalog_span_indices(isoforms: &[Transcript]) -> HashMap<CatalogKey, SpanCandidateIndex> {
+    let mut grouped: HashMap<CatalogKey, Vec<usize>> = HashMap::new();
+    for (idx, isoform) in isoforms.iter().enumerate() {
+        grouped
+            .entry(CatalogKey::new(None, &isoform.chrom, isoform.strand))
+            .or_default()
+            .push(idx);
+        if let Some(gene) = gene_name(isoform) {
+            grouped
+                .entry(CatalogKey::new(Some(gene), &isoform.chrom, isoform.strand))
+                .or_default()
+                .push(idx);
+        }
+    }
+
+    grouped
+        .into_iter()
+        .map(|(key, indices)| (key, SpanCandidateIndex::build(isoforms, &indices)))
+        .collect()
+}
+
+fn next_catalog_stamp(seen: &mut [u32], stamp: &mut u32) -> u32 {
+    *stamp = stamp.wrapping_add(1);
+    if *stamp == 0 {
+        seen.fill(0);
+        *stamp = 1;
+    }
+    *stamp
+}
+
+fn collect_catalog_candidates_for_key(
+    catalog_indices: &HashMap<CatalogKey, SpanCandidateIndex>,
+    key: CatalogKey,
+    read: &Transcript,
+    isoforms: &[Transcript],
+    seen: &mut [u32],
+    stamp: u32,
+    out: &mut Vec<usize>,
+) {
+    let Some(index) = catalog_indices.get(&key) else {
+        return;
+    };
+    index.collect_overlapping(read, isoforms, seen, stamp, out);
+}
+
 pub fn select_unique_best_read_to_isoform(
     reads: &[Transcript],
     isoforms: &[Transcript],
@@ -462,19 +597,12 @@ pub fn select_unique_best_read_to_isoform(
         .map(|isoform| (isoform.name.as_str(), isoform))
         .collect();
     let retained_regions = retained_regions_by_isoform(isoforms);
-    let mut isoforms_by_gene: HashMap<&str, Vec<&str>> = HashMap::new();
-    let mut isoforms_by_locus: HashMap<(&str, Strand), Vec<&str>> = HashMap::new();
+    let catalog_indices = build_catalog_span_indices(isoforms);
+    let mut genes_present: HashSet<&str> = HashSet::new();
     for isoform in isoforms {
         if let Some(gene) = gene_name(isoform) {
-            isoforms_by_gene
-                .entry(gene)
-                .or_default()
-                .push(isoform.name.as_str());
+            genes_present.insert(gene);
         }
-        isoforms_by_locus
-            .entry((isoform.chrom.as_str(), isoform.strand))
-            .or_default()
-            .push(isoform.name.as_str());
     }
 
     let mut grouped: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
@@ -496,14 +624,28 @@ pub fn select_unique_best_read_to_isoform(
     // Keep the mapping as the counted-read boundary; catalog expansion should not
     // resurrect unused reads or reads excluded by per-gene downsampling.
     let mapped_read_ids: Vec<&str> = grouped.keys().copied().collect();
+    let mut catalog_seen = vec![0u32; isoforms.len()];
+    let mut catalog_stamp = 0u32;
+    let mut catalog_candidate_indices = Vec::new();
     for read_id in mapped_read_ids {
         let Some(read) = reads_by_name.get(read_id).copied() else {
             continue;
         };
-        let mut catalog_candidates = Vec::new();
+        catalog_candidate_indices.clear();
+        let stamp = next_catalog_stamp(&mut catalog_seen, &mut catalog_stamp);
+        let mut domain_found = false;
         if let Some(gene) = gene_name(read) {
-            if let Some(ids) = isoforms_by_gene.get(gene) {
-                catalog_candidates.extend(ids.iter().copied());
+            if genes_present.contains(gene) {
+                domain_found = true;
+                collect_catalog_candidates_for_key(
+                    &catalog_indices,
+                    CatalogKey::new(Some(gene), &read.chrom, read.strand),
+                    read,
+                    isoforms,
+                    &mut catalog_seen,
+                    stamp,
+                    &mut catalog_candidate_indices,
+                );
             }
         } else if let Some(mapped_candidates) = grouped.get(read_id) {
             let mut seen_genes: HashSet<&str> = HashSet::new();
@@ -516,31 +658,41 @@ pub fn select_unique_best_read_to_isoform(
                     continue;
                 };
                 if seen_genes.insert(gene) {
-                    if let Some(ids) = isoforms_by_gene.get(gene) {
-                        catalog_candidates.extend(ids.iter().copied());
-                    }
+                    domain_found = true;
+                    collect_catalog_candidates_for_key(
+                        &catalog_indices,
+                        CatalogKey::new(Some(gene), &read.chrom, read.strand),
+                        read,
+                        isoforms,
+                        &mut catalog_seen,
+                        stamp,
+                        &mut catalog_candidate_indices,
+                    );
                 }
             }
         }
 
-        if catalog_candidates.is_empty() {
-            if let Some(ids) = isoforms_by_locus.get(&(read.chrom.as_str(), read.strand)) {
-                catalog_candidates.extend(ids.iter().copied());
-            }
+        if !domain_found {
+            collect_catalog_candidates_for_key(
+                &catalog_indices,
+                CatalogKey::new(None, &read.chrom, read.strand),
+                read,
+                isoforms,
+                &mut catalog_seen,
+                stamp,
+                &mut catalog_candidate_indices,
+            );
         }
-        if catalog_candidates.is_empty() {
+        if catalog_candidate_indices.is_empty() {
             continue;
         }
         let candidates = grouped
             .get_mut(read_id)
             .expect("read id collected from grouped keys");
-        for &isoform_id in &catalog_candidates {
-            let isoform = isoforms_by_name
-                .get(isoform_id)
-                .copied()
-                .expect("catalog index derives from isoforms");
+        for &isoform_idx in &catalog_candidate_indices {
+            let isoform = &isoforms[isoform_idx];
             if catalog_assignment_candidate(read, isoform) {
-                candidates.push(isoform_id);
+                candidates.push(isoform.name.as_str());
             }
         }
     }
@@ -586,7 +738,13 @@ provide the matching --reads/manifest reads BED"
                 .expect("validated above");
             let score = assignment_score(read, isoform);
             if best.as_ref().is_none_or(|(best_score, best_isoform_id)| {
-                (&score, isoform_id) < (best_score, *best_isoform_id)
+                &score < best_score
+                    || (&score == best_score
+                        && (!seen_pairs.contains(&(read_id, isoform_id)), isoform_id)
+                            < (
+                                !seen_pairs.contains(&(read_id, *best_isoform_id)),
+                                *best_isoform_id,
+                            ))
             }) {
                 best = Some((score, isoform_id));
             }
@@ -834,6 +992,29 @@ mod tests {
     }
 
     #[test]
+    fn unique_assignment_prefers_original_mapping_on_exact_catalog_tie() {
+        let reads = vec![make_tx_with_gene(
+            "read_b",
+            &[(100, 110), (200, 210)],
+            "none",
+            "GENEA",
+        )];
+        let isoforms = vec![
+            make_tx_with_gene(
+                "a_lexical_first",
+                &[(100, 110), (200, 210)],
+                "none",
+                "GENEA",
+            ),
+            make_tx_with_gene("read_b", &[(100, 110), (200, 210)], "none", "GENEA"),
+        ];
+        let pairs = vec![("read_b".to_owned(), "read_b".to_owned())];
+
+        let unique = select_unique_best_read_to_isoform(&reads, &isoforms, &pairs).unwrap();
+        assert_eq!(unique, vec![("read_b".to_owned(), "read_b".to_owned())]);
+    }
+
+    #[test]
     fn unique_assignment_uses_mapped_isoform_gene_when_read_has_no_gene() {
         let reads = vec![make_tx("r1", &[(100, 110), (200, 210)], "none")];
         let isoforms = vec![
@@ -850,6 +1031,19 @@ mod tests {
 
         let unique = select_unique_best_read_to_isoform(&reads, &isoforms, &pairs).unwrap();
         assert_eq!(unique, vec![("r1".to_owned(), "z_closest".to_owned())]);
+    }
+
+    #[test]
+    fn unique_assignment_does_not_fallback_to_locus_when_read_gene_exists() {
+        let reads = vec![make_tx_with_gene("r1", &[(100, 110)], "none", "GENEA")];
+        let isoforms = vec![
+            make_tx_with_gene("mapped_far", &[(1000, 1010)], "none", "GENEA"),
+            make_tx_with_gene("wrong_gene_overlap", &[(100, 110)], "none", "GENEB"),
+        ];
+        let pairs = vec![("r1".to_owned(), "mapped_far".to_owned())];
+
+        let unique = select_unique_best_read_to_isoform(&reads, &isoforms, &pairs).unwrap();
+        assert!(unique.is_empty());
     }
 
     #[test]

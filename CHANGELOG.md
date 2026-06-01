@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.17
+- Interpret `--sw-score -1` as "no SW-supported 5' signal" for junction and overlap clustering instead of disabling ordinary truncation merging; non-SL-supported reads still merge through the normal cluster rules, including batched runs.
+- Speed up catalog-aware unique assignment by indexing isoforms by gene/chromosome/strand span bins and scanning retained-intron regions with sorted intron bounds.
+- Keep unique assignment inside the inferred gene domain: reads with an available gene no longer fall back to same-locus isoforms from other genes when no overlapping in-gene catalog candidate exists.
+- Prefer an original read-to-isoform mapping over a catalog-expanded isoform when unique assignment scores are exactly tied, avoiding lexical tie switches.
+- Clarify manual `preparedir` -> `clusterj_batch` docs: use the prepared gene root as the batch output root when the result will be consumed by `trackcluster count --output-root`.
+- Add regression coverage for negative `--sw-score` behavior, catalog tie handling, gene-domain fallback, and `-1` CLI parsing.
+
 ## 0.1.16
 - Preserve supported same-junction 3' terminal clusters in junction-mode clustering, so high-support 3' early-stop isoforms are not collapsed into longer/reference isoforms solely because the splice chain matches.
 - Expose 3' terminal protection controls in `clusterj`, `flow`, and `clusterj_batch`: `--same-junction-3prime-offset`, `--3prime-cluster-offset`, and `--3prime-min-support`.

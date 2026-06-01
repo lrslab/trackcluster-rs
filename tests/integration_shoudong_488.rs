@@ -69,7 +69,7 @@ fn clusterj_matches_python_flow_outputs_on_shoudong_488_subset() {
         let out_dir = fresh_temp_dir(&format!("clusterj_shoudong_488_{gene}"));
         let out_bed = out_dir.join("isoform.bed");
 
-        // Match Python `flow_clusterj_all_gene_novel(..., sw_score=-1)` behavior: disable collapsing.
+        // Treat reads as having no SW-supported 5' signal while keeping ordinary merge behavior.
         let status = Command::new(exe)
             .args([
                 "clusterj",

@@ -18,7 +18,7 @@ pub struct Args {
     #[arg(short = 't', long = "threads", default_value_t = 1)]
     pub threads: usize,
 
-    /// Smith-Waterman score cutoff for collapsing 5' truncations; set to -1 to disable collapsing
+    /// Smith-Waterman score cutoff for SL-supported 5' protection; set to -1 to treat reads as having no SW 5' signal
     #[arg(long = "sw-score", default_value_t = crate::cluster::clusterj::DEFAULT_SW_SCORE, allow_hyphen_values = true)]
     pub sw_score: i64,
 

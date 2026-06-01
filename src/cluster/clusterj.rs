@@ -1180,10 +1180,6 @@ fn junction_simple_merge_with_options(
     three_prime_options: ThreePrimeMergeOptions,
     same_junction_offset: u32,
 ) -> Vec<usize> {
-    if sw_score < 0 {
-        return (0..tracks.len()).collect();
-    }
-
     let junctions_cache: Vec<Vec<u32>> = tracks
         .iter()
         .map(|track| junction_positions(&track.tx))
@@ -1321,10 +1317,6 @@ fn junction_simple_merge_naive_with_options(
     sl_options: SlMergeOptions,
     same_junction_offset: u32,
 ) -> Vec<usize> {
-    if sw_score < 0 {
-        return (0..tracks.len()).collect();
-    }
-
     let junctions_cache: Vec<Vec<u32>> = tracks
         .iter()
         .map(|track| junction_positions(&track.tx))
@@ -1504,8 +1496,8 @@ fn batch_junction_simple_merge(
     let mut previous_len = tracks.len();
 
     // Read batching always keeps references available as potential containers.
-    // Use the caller's SW cutoff for every round so `--sw-score -1` fully disables
-    // truncation collapsing even when batching is enabled.
+    // Use the caller's SW cutoff for every round so negative cutoffs disable only
+    // SW/SL 5' protection, not ordinary truncation merging.
     while rounds < max_rounds {
         let (refs, reads) = split_reference_and_read_tracks(tracks);
         if reads.len() <= batch_size {
@@ -2931,7 +2923,66 @@ mod tests {
     }
 
     #[test]
-    fn sw_score_minus_one_disables_batched_junction_merge() {
+    fn sw_score_minus_one_removes_junction_sl_cluster_protection() {
+        let refs = vec![make_tx(
+            "ref",
+            Strand::Plus,
+            &[(100, 110), (120, 130), (140, 150)],
+            "isoform_anno",
+            100,
+        )];
+        let reads = vec![
+            make_tx(
+                "read_sl_trunc_a",
+                Strand::Plus,
+                &[(120, 130), (140, 150)],
+                "nanopore_read",
+                12,
+            ),
+            make_tx(
+                "read_sl_trunc_b",
+                Strand::Plus,
+                &[(120, 130), (140, 150)],
+                "nanopore_read",
+                12,
+            ),
+        ];
+
+        let protected = clusterj_with_name2_mode(&reads, Some(&refs), 1, 11, 0, 1, Name2Mode::Full);
+        let protected_names: HashSet<_> = protected
+            .isoforms
+            .iter()
+            .map(|tx| tx.name.as_str())
+            .collect();
+        assert!(protected_names.contains("read_sl_trunc_b"));
+
+        for batch_size in [0, 1] {
+            let no_signal = clusterj_with_name2_mode(
+                &reads,
+                Some(&refs),
+                1,
+                -1,
+                batch_size,
+                10,
+                Name2Mode::Full,
+            );
+            let no_signal_names: HashSet<_> = no_signal
+                .isoforms
+                .iter()
+                .map(|tx| tx.name.as_str())
+                .collect();
+            assert!(no_signal_names.contains("ref"));
+            assert!(!no_signal_names.contains("read_sl_trunc_a"));
+            assert!(!no_signal_names.contains("read_sl_trunc_b"));
+            assert!(no_signal
+                .read_to_isoform
+                .iter()
+                .all(|(_, isoform_id)| isoform_id == "ref"));
+        }
+    }
+
+    #[test]
+    fn sw_score_minus_one_keeps_normal_junction_merge() {
         let refs = vec![make_tx(
             "ref",
             Strand::Plus,
@@ -2956,12 +3007,29 @@ mod tests {
             ),
         ];
 
-        let result = clusterj_with_name2_mode(&reads, Some(&refs), 1, -1, 1, 10, Name2Mode::Full);
-        let iso_names: HashSet<_> = result.isoforms.iter().map(|tx| tx.name.as_str()).collect();
+        for batch_size in [0, 1] {
+            let result = clusterj_with_name2_mode(
+                &reads,
+                Some(&refs),
+                1,
+                -1,
+                batch_size,
+                10,
+                Name2Mode::Full,
+            );
+            let iso_names: HashSet<_> = result.isoforms.iter().map(|tx| tx.name.as_str()).collect();
 
-        assert!(iso_names.contains("ref"));
-        assert!(iso_names.contains("read_trunc"));
-        assert!(iso_names.contains("read_full"));
+            assert!(iso_names.contains("ref"));
+            assert!(!iso_names.contains("read_trunc"));
+            assert!(!iso_names.contains("read_full"));
+            assert_eq!(
+                result.read_to_isoform,
+                vec![
+                    ("read_full".to_owned(), "ref".to_owned()),
+                    ("read_trunc".to_owned(), "ref".to_owned()),
+                ]
+            );
+        }
     }
 
     #[test]
