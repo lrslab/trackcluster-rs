@@ -75,6 +75,8 @@ trackcluster clusterj -s tests/fixtures/reads.bed -r tests/fixtures/ref.bed -o i
 # Platform presets:
 #   --platform-preset rna002  # junction offset 15; SL 5' offsets 20/25/20; 3' cluster offset 15
 #   --platform-preset rna004  # conservative defaults: junction offset 10; SL 5' offsets 15/25/15; 3' cluster offset 10
+# Junction-mode defaults treat reads as no-SL (`--sw-score -1`). Pass
+# `--sw-score 11` only when BED score is valid SL/SW 5' evidence.
 # SL 5' merge behavior can be tuned with --sl-partial-5prime-offset,
 # --sl-same-junction-5prime-offset, --sl-5prime-cluster-offset, and
 # --sl-5prime-min-support.

@@ -41,7 +41,7 @@ Key flags:
 - `--output-root/-o`: output directory (created if missing)
 - `--prefix`: output prefix (used for merged outputs like `<prefix>_isoform.bed`)
 - `--threads/-t`: number of worker threads (parallel across genes)
-- `--sw-score`: Smith-Waterman cutoff for SL-supported 5' protection (default: `11`; set to `-1` to treat reads as having no SW 5' signal). In overlap mode, the second pass protects a short read only when its score is at or above the cutoff; with `-1`, ordinary short-read merging still runs.
+- `--sw-score`: Smith-Waterman cutoff for SL-supported 5' protection (default: `-1`, no SW/SL 5' signal). Pass a non-negative cutoff such as `11` only when BED score is valid SL/SW 5' evidence. In overlap mode, the second pass protects a short read only when its score is at or above the cutoff; with `-1`, ordinary short-read merging still runs.
 - `--batch-size`, `--batch-rounds`: bounds for very large genes; in overlap mode these control iterative pre-merging rounds before the final two-pass overlap clustering
 - `--name2-mode`: `coverage` (default), `full`, or `none` (controls isoform `name2` payload size; mapping TSVs are used for counting)
 - `--platform-preset`: `generic` (default), `rna002`, or `rna004`. Presets seed junction correction, SL 5', and same-junction 3' defaults; explicit option values override the preset.
@@ -75,7 +75,7 @@ Outputs (under `--output-root`):
 
 #### Platform presets and SL/no-SL data
 
-`--platform-preset` changes only the junction correction, SL 5', and same-junction 3' merge/protection defaults. The `--sw-score` default remains `11` for all presets.
+`--platform-preset` changes only the junction correction, SL 5', and same-junction 3' merge/protection defaults. The junction-mode `--sw-score` default remains `-1` for all presets; pass `--sw-score 11` when the BED score should be used as valid SL/SW 5' evidence.
 Junction min support is weighted site support: read sites contribute `1`, reference sites contribute `5`.
 
 | Preset | Recommended use | Junction correction offset | Junction min support | SL partial 5' offset | SL same-junction 5' offset | SL 5' cluster offset | SL min support | 3' same-junction offset | 3' cluster offset | 3' min support |
@@ -84,7 +84,7 @@ Junction min support is weighted site support: read sites contribute `1`, refere
 | `rna002` | RNA002 direct RNA reads; more tolerant of junction and 5' end wobble | `15` | `5` | `20` | `25` | `20` | `2` | `50` | `15` | `5` |
 | `rna004` | RNA004 direct RNA reads; use the conservative/default cutoffs | `10` | `5` | `15` | `25` | `15` | `2` | `50` | `10` | `5` |
 
-SL information is optional. When `--sw-score` is non-negative, reads with no SL evidence, or reads whose BED score is not greater than the cutoff, are treated as non-SL-supported reads: they still go through junction correction and normal 5' truncation collapsing, but they do not receive SL-cluster protection as alternative 5' isoforms. For datasets where many reads have no SL information, keep the default `--sw-score 11` and use `--platform-preset rna004` for RNA004 or `--platform-preset rna002` for RNA002. Use `--sw-score -1` when BED score should not be used as a valid-5' signal; all reads are treated as non-SL-supported and ordinary merging still runs.
+SL information is optional. With the default `--sw-score -1`, all reads are treated as non-SL-supported and ordinary junction correction/truncation merging still runs. When `--sw-score` is non-negative, only reads whose BED score is greater than the cutoff receive SL-cluster protection as alternative 5' isoforms. For no-SL datasets, including human data where BED score is MAPQ or another non-SL value, keep `--sw-score -1`. For SL/SW-scored datasets, pass an explicit cutoff such as `--sw-score 11` together with the appropriate platform preset.
 
 Same-junction 3' terminal clusters with nearby read support are retained as isoforms independently of SL evidence. By default, protection requires at least `5` reads within the active junction correction offset and a 3' end more than `50` bp from the merge target. The rule is strand-aware: on minus-strand transcripts, a 3' early stop appears as a higher `tx_start`/lower genomic terminal boundary relative to the full-length isoform.
 
@@ -188,7 +188,7 @@ If `--out isoform.bed`, this command writes:
 Key flags:
 - `--reads/-s`, `--reference/-r`, `--out/-o`
 - `--threads/-t`: number of worker threads
-- `--sw-score`: Smith-Waterman cutoff for SL-supported 5' protection (default: `11`; set to `-1` to treat reads as having no SW 5' signal)
+- `--sw-score`: Smith-Waterman cutoff for SL-supported 5' protection (default: `-1`, no SW/SL 5' signal; pass a non-negative cutoff such as `11` only when BED score is valid SL/SW 5' evidence)
 - `--batch-size`, `--batch-rounds`: bounds for very large genes
 - `--name2-mode`: `coverage` (default), `full`, or `none` (controls isoform `name2` payload size)
 - `--platform-preset`: `generic` (default), `rna002`, or `rna004`. Presets seed junction correction, SL 5', and same-junction 3' defaults; explicit option values override the preset.
@@ -352,7 +352,7 @@ Scope:
 - For overlap-mode batched clustering, use `trackcluster flow --cluster-mode cluster` or `trackcluster cluster` directly on a single reads/reference pair.
 
 Useful flags:
-- `--sw-score`: Smith-Waterman cutoff for SL-supported 5' protection (default: `11`; set to `-1` to treat reads as having no SW 5' signal)
+- `--sw-score`: Smith-Waterman cutoff for SL-supported 5' protection (default: `-1`, no SW/SL 5' signal; pass a non-negative cutoff such as `11` only when BED score is valid SL/SW 5' evidence)
 - `--batch-size`, `--batch-rounds`: bounds for very large genes
 - `--name2-mode`: `coverage` (default), `full`, or `none` (controls isoform `name2` payload size)
 - `--platform-preset`: `generic` (default), `rna002`, or `rna004`. Presets seed junction correction, SL 5', and same-junction 3' defaults; explicit option values override the preset.

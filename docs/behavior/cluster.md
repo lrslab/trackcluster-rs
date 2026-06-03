@@ -62,7 +62,7 @@ Junction-mode clustering (`clusterj`, `flow` default mode, and `clusterj_batch`)
 
 When `--sw-score` is non-negative, reads with score greater than `--sw-score` are treated as SL-supported. A supported candidate with enough nearby same-junction 5' support is protected from merging when its biological 5' end is outside the relevant offset from the longer/reference track. Singleton supported reads can still merge as likely degradation.
 
-SL information is optional and many datasets do not have it for every read. Reads without SL evidence, or reads whose score is not greater than a non-negative `--sw-score`, are handled as non-SL-supported reads: they still participate in junction correction and normal 5' truncation collapsing, but they do not receive SL-cluster protection as alternative 5' isoforms. Keep the default `--sw-score 11` for mixed/no-SL datasets. Set `--sw-score -1` when the BED score should not be used as valid-5' evidence; all reads are treated as non-SL-supported and ordinary truncation merging, including batched merging, still runs.
+SL information is optional and many datasets do not have it for every read. With the junction-mode default `--sw-score -1`, all reads are handled as non-SL-supported reads: they still participate in junction correction and normal 5' truncation collapsing, but they do not receive SL-cluster protection as alternative 5' isoforms. Use a non-negative cutoff such as `--sw-score 11` only when the BED score should be used as valid SL/SW 5' evidence.
 
 ## Junction-mode 3' terminal support
 

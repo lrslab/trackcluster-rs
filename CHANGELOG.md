@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.18
+- Change the junction-mode default `--sw-score` for `clusterj`, `flow`, and `clusterj_batch` from `11` to `-1`, so no-SL/no-valid-5'-score datasets use ordinary truncation merging by default instead of treating BED scores as SL/SW 5' evidence.
+- Keep SL/SW-supported 5' protection available for scored datasets by passing an explicit non-negative cutoff such as `--sw-score 11`; platform presets still control junction, SL 5', and 3' offsets but no longer opt into score-based 5' protection implicitly.
+- Fix terminal single-exon containment in junction-mode merging, including exact single-exon matches, terminal exon boundary cases, and minus-strand genomic containment checks.
+- Add regression coverage showing that high-score terminal single-exon reads merge under the no-SL default, while explicit `--sw-score 11` can still retain supported terminal SL clusters.
+- Update README, CLI, pipeline, and behavior docs for the new no-SL default and explicit `--sw-score 11` guidance.
+- Refine the m6A/modification analysis plan with call-state/provenance fields, negative-call completeness handling, read-id audit requirements, site eligibility/QC outputs, and transcript-to-genomic projection constraints.
+
 ## 0.1.17
 - Interpret `--sw-score -1` as "no SW-supported 5' signal" for junction and overlap clustering instead of disabling ordinary truncation merging; non-SL-supported reads still merge through the normal cluster rules, including batched runs.
 - Speed up catalog-aware unique assignment by indexing isoforms by gene/chromosome/strand span bins and scanning retained-intron regions with sorted intron bounds.

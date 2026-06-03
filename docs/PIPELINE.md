@@ -59,7 +59,7 @@ trackcluster flow \
 
 Defaults:
 - `--cluster-mode clusterj` (junction mode). Use `--cluster-mode cluster` for the legacy overlap/intersection path.
-- `--sw-score 11` (use high-scoring reads as valid-5' evidence); use `--sw-score -1` to treat reads as having no SW 5' signal while keeping ordinary merging.
+- `--sw-score -1` (default; treat reads as having no SW/SL 5' signal while keeping ordinary merging). Pass `--sw-score 11` only when BED score is valid SL/SW 5' evidence.
 - `--name2-mode coverage` (memory-friendly). Use `--name2-mode full` to embed read IDs in the isoform BED (larger outputs); otherwise rely on `*_read_to_isoform.tsv` for counting.
 - SL-supported junction-mode 5' merge controls default to `--sl-partial-5prime-offset 15`, `--sl-same-junction-5prime-offset 25`, `--sl-5prime-cluster-offset 15`, and `--sl-5prime-min-support 2`.
 - Supported same-junction 3' terminal clusters are retained as isoforms with `--same-junction-3prime-offset 50`, `--3prime-min-support 5`, and a default `--3prime-cluster-offset` equal to the active junction correction offset.
@@ -202,10 +202,10 @@ If you plan to run `trackcluster count --output-root` afterwards, write the batc
 
 Internally, 5' truncation collapsing uses a junction-suffix index to avoid quadratic scans on large loci.
 Low-support splice-junction sites are corrected before merging with `--junction-correction-offset` and `--junction-correction-min-support`.
-Supported alternative SL 5' clusters can be protected from merging with the separate `--sl-*` terminal controls exposed by `trackcluster clusterj`, `trackcluster flow`, and `clusterj_batch`.
+Supported alternative SL 5' clusters can be protected from merging with the separate `--sl-*` terminal controls exposed by `trackcluster clusterj`, `trackcluster flow`, and `clusterj_batch`; pass a non-negative `--sw-score` such as `11` when BED score should be used as valid SL/SW 5' evidence.
 Supported same-junction 3' terminal clusters can be protected with `--same-junction-3prime-offset`, `--3prime-cluster-offset`, and `--3prime-min-support`.
 Use `--platform-preset rna002` for RNA002 reads (junction offset `15`; SL 5' offsets `20/25/20`; 3' cluster offset `15`) and `--platform-preset rna004` for RNA004 reads (conservative defaults: junction offset `10`; SL 5' offsets `15/25/15`; 3' cluster offset `10`). Explicit junction correction, SL, and 3' options override the preset.
-SL evidence is optional; reads without SL information still use junction correction and normal 5' truncation collapsing, but they are not protected by the SL-cluster rules.
+SL evidence is optional; reads without SL information still use junction correction and normal 5' truncation collapsing, but they are not protected by the SL-cluster rules. For no-SL human data, keep the junction-mode default `--sw-score -1`.
 Same-junction 3' retention is independent of SL evidence and is strand-aware, including minus-strand early-stop clusters at the lower genomic coordinate. Counting defaults to `--assignment-mode unique`, so each read contributes to only the closest compatible catalog isoform; retained 3' early-stop reads therefore count to the closer terminal isoform instead of a longer same-junction reference. Pass `--assignment-mode fractional` for compatibility with split multi-mapped counts from the mapping file.
 
 For each gene, it writes:

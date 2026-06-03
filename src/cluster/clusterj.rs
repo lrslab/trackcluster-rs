@@ -18,7 +18,7 @@ struct PartitionKey {
 
 const NAME2_COL: usize = 0;
 const TTYPE_COL: usize = 4;
-pub const DEFAULT_SW_SCORE: i64 = 11;
+pub const DEFAULT_SW_SCORE: i64 = -1;
 pub const DEFAULT_JUNCTION_CORRECTION_MIN_SUPPORT: u32 = 5;
 pub const DEFAULT_JUNCTION_CORRECTION_OFFSET: u32 = 10;
 pub const DEFAULT_SL_PARTIAL_FIVE_PRIME_END_OFFSET: u32 = 15;
@@ -629,18 +629,13 @@ fn junction_merge_kind(
 
 fn is_single_exon_in(single: &Transcript, other: &Transcript, other_junctions: &[u32]) -> bool {
     if other_junctions.is_empty() {
+        if single.tx_start == other.tx_start && single.tx_end == other.tx_end {
+            return true;
+        }
         match single.strand {
-            Strand::Plus => {
+            Strand::Plus | Strand::Minus => {
                 if single.tx_start.get() <= other.tx_start.get()
                     || single.tx_end.get() >= other.tx_end.get()
-                {
-                    return false;
-                }
-                true
-            }
-            Strand::Minus => {
-                if single.tx_start.get() >= other.tx_start.get()
-                    || single.tx_end.get() <= other.tx_end.get()
                 {
                     return false;
                 }
@@ -652,16 +647,15 @@ fn is_single_exon_in(single: &Transcript, other: &Transcript, other_junctions: &
         let last_junction = *other_junctions.last().expect("non-empty");
         match single.strand {
             Strand::Plus => {
-                if single.tx_start.get() <= last_junction
-                    || single.tx_end.get() >= other.tx_end.get()
+                if single.tx_start.get() < last_junction || single.tx_end.get() > other.tx_end.get()
                 {
                     return false;
                 }
                 true
             }
             Strand::Minus => {
-                if single.tx_start.get() <= other.tx_start.get()
-                    || single.tx_end.get() >= last_junction
+                if single.tx_start.get() < other.tx_start.get()
+                    || single.tx_end.get() > last_junction
                 {
                     return false;
                 }
@@ -2979,6 +2973,104 @@ mod tests {
                 .iter()
                 .all(|(_, isoform_id)| isoform_id == "ref"));
         }
+    }
+
+    #[test]
+    fn no_sl_default_merges_high_score_terminal_single_exon_reads() {
+        let refs = vec![make_tx(
+            "ref",
+            Strand::Plus,
+            &[(100, 150), (220, 260), (320, 350)],
+            "isoform_anno",
+            100,
+        )];
+        let reads = vec![
+            make_tx(
+                "terminal_a",
+                Strand::Plus,
+                &[(320, 350)],
+                "nanopore_read",
+                60,
+            ),
+            make_tx(
+                "terminal_b",
+                Strand::Plus,
+                &[(332, 350)],
+                "nanopore_read",
+                60,
+            ),
+        ];
+
+        let result = clusterj_with_name2_mode(
+            &reads,
+            Some(&refs),
+            1,
+            DEFAULT_SW_SCORE,
+            0,
+            1,
+            Name2Mode::Full,
+        );
+        let iso_names: HashSet<_> = result.isoforms.iter().map(|tx| tx.name.as_str()).collect();
+
+        assert!(iso_names.contains("ref"));
+        assert!(!iso_names.contains("terminal_a"));
+        assert!(!iso_names.contains("terminal_b"));
+        assert_eq!(
+            result.read_to_isoform,
+            vec![
+                ("terminal_a".to_owned(), "ref".to_owned()),
+                ("terminal_b".to_owned(), "ref".to_owned()),
+            ]
+        );
+
+        let counts =
+            crate::count::count_by_read_to_isoform(&result.isoforms, &result.read_to_isoform);
+        let ref_count = counts
+            .iter()
+            .find(|record| record.isoform_id == "ref")
+            .expect("ref count missing");
+        assert_eq!(ref_count.count, 2.0);
+    }
+
+    #[test]
+    fn sl_supported_terminal_single_exon_cluster_is_retained() {
+        let refs = vec![make_tx(
+            "ref",
+            Strand::Plus,
+            &[(100, 150), (220, 260), (320, 350)],
+            "isoform_anno",
+            100,
+        )];
+        let reads = vec![
+            make_tx(
+                "terminal_sl_a",
+                Strand::Plus,
+                &[(320, 350)],
+                "nanopore_read",
+                12,
+            ),
+            make_tx(
+                "terminal_sl_b",
+                Strand::Plus,
+                &[(320, 350)],
+                "nanopore_read",
+                12,
+            ),
+        ];
+
+        let result = clusterj_with_name2_mode(&reads, Some(&refs), 1, 11, 0, 1, Name2Mode::Full);
+        let iso_names: HashSet<_> = result.isoforms.iter().map(|tx| tx.name.as_str()).collect();
+
+        assert!(iso_names.contains("ref"));
+        assert!(iso_names.contains("terminal_sl_b"));
+        assert!(!iso_names.contains("terminal_sl_a"));
+        assert_eq!(
+            result.read_to_isoform,
+            vec![
+                ("terminal_sl_a".to_owned(), "terminal_sl_b".to_owned()),
+                ("terminal_sl_b".to_owned(), "terminal_sl_b".to_owned()),
+            ]
+        );
     }
 
     #[test]
