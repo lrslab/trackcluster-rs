@@ -1,35 +1,25 @@
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+
+use common::{assert_success, TestDir};
 
 fn repo_path(path: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(path)
 }
 
-fn fresh_temp_dir(prefix: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time went backwards")
-        .as_nanos();
-    let mut dir = std::env::temp_dir();
-    dir.push(format!(
-        "trackcluster_rs_{}_{}_{}",
-        prefix,
-        std::process::id(),
-        nanos
-    ));
-    fs::create_dir_all(&dir).expect("create temp dir");
-    dir
+fn fresh_temp_dir(prefix: &str) -> TestDir {
+    TestDir::new(prefix)
 }
 
 fn normalized_lines(path: &Path) -> Vec<String> {
-    let mut lines: Vec<String> = fs::read_to_string(path)
+    let lines: Vec<String> = fs::read_to_string(path)
         .expect("read text file")
         .lines()
         .map(|line| line.to_owned())
         .collect();
-    lines.sort();
     lines
 }
 
@@ -44,7 +34,7 @@ fn count_output_root_mode_matches_golden_output() {
     let out_dir = fresh_temp_dir("count_output_root");
     let prefix = "sample";
 
-    let status = Command::new(exe)
+    let output = Command::new(exe)
         .args([
             "flow",
             "-s",
@@ -56,11 +46,11 @@ fn count_output_root_mode_matches_golden_output() {
             "--prefix",
             prefix,
         ])
-        .status()
+        .output()
         .expect("run flow");
-    assert!(status.success());
+    assert_success(&output, "flow before output-root count");
 
-    let status = Command::new(exe)
+    let output = Command::new(exe)
         .args([
             "count",
             "-r",
@@ -70,9 +60,9 @@ fn count_output_root_mode_matches_golden_output() {
             "--prefix",
             prefix,
         ])
-        .status()
+        .output()
         .expect("run output-root count");
-    assert!(status.success());
+    assert_success(&output, "output-root count");
 
     let count_csv = out_dir.join(format!("{prefix}_isoform_count.csv"));
     assert_eq!(normalized_lines(&count_csv), normalized_lines(&golden_csv));
@@ -94,7 +84,7 @@ fn legacy_count_matches_golden_output() {
     let out_dir = fresh_temp_dir("count");
     let out_csv = out_dir.join("isoform_count.csv");
 
-    let status = Command::new(exe)
+    let output = Command::new(exe)
         .args([
             "count",
             "-s",
@@ -103,16 +93,49 @@ fn legacy_count_matches_golden_output() {
             reference.to_str().unwrap(),
             "-i",
             isoform.to_str().unwrap(),
+            "--unique-assignment-junction-offset",
+            "8",
             "--out",
             out_csv.to_str().unwrap(),
         ])
-        .status()
+        .output()
         .expect("run count");
-    assert!(status.success());
+    assert_success(&output, "legacy count");
 
-    let produced = fs::read_to_string(out_csv).expect("read produced csv");
+    let produced = fs::read_to_string(&out_csv).expect("read produced csv");
     let golden = fs::read_to_string(golden_csv).expect("read golden csv");
     assert_eq!(produced, golden);
+    let provenance = fs::read_to_string(out_csv.with_extension("provenance.tsv"))
+        .expect("read unique-assignment provenance");
+    assert!(provenance.contains("unique_assignment_junction_offset\t8\n"));
+}
+
+#[test]
+fn legacy_count_rejects_an_output_that_aliases_an_input() {
+    let exe = env!("CARGO_BIN_EXE_trackcluster");
+    let root = fresh_temp_dir("count_output_alias");
+    let reads = root.join("reads.bed");
+    let reference = root.join("reference.bed");
+    let isoform = root.join("isoform.bed");
+    fs::copy(repo_path("tests/fixtures/reads.bed"), &reads).unwrap();
+    fs::copy(repo_path("tests/fixtures/ref.bed"), &reference).unwrap();
+    fs::copy(repo_path("tests/golden/clusterj/isoform.bed"), &isoform).unwrap();
+    let original = fs::read(&isoform).unwrap();
+
+    let output = Command::new(exe)
+        .args(["count", "--reads"])
+        .arg(&reads)
+        .arg("--reference")
+        .arg(&reference)
+        .arg("--isoform")
+        .arg(&isoform)
+        .arg("--out")
+        .arg(&isoform)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("refer to the same file"));
+    assert_eq!(fs::read(&isoform).unwrap(), original);
 }
 
 #[test]
@@ -125,8 +148,10 @@ fn count_fractional_mode_preserves_split_counts() {
 
     let out_dir = fresh_temp_dir("count_fractional");
     let out_csv = out_dir.join("isoform_count.csv");
+    fs::write(out_csv.with_extension("provenance.tsv"), "stale\n")
+        .expect("write stale unique-assignment provenance");
 
-    let status = Command::new(exe)
+    let output = Command::new(exe)
         .args([
             "count",
             "-s",
@@ -140,10 +165,14 @@ fn count_fractional_mode_preserves_split_counts() {
             "--out",
             out_csv.to_str().unwrap(),
         ])
-        .status()
+        .output()
         .expect("run count");
-    assert!(status.success());
+    assert_success(&output, "fractional count");
 
     let produced = fs::read_to_string(out_csv).expect("read produced csv");
-    assert_eq!(produced, "isoform_id,count\nref_a,0.5\nref_b,0.5\n");
+    assert_eq!(
+        produced,
+        "gene,isoform_id,count\nGENEA,ref_a,0.5\nGENEA,ref_b,0.5\n"
+    );
+    assert!(!out_dir.join("isoform_count.provenance.tsv").exists());
 }

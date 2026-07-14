@@ -4,6 +4,7 @@ use super::IntersectOpts;
 
 /// An intersect backend that produces `(a_index, b_index)` pairs.
 pub trait IntervalIndex {
+    /// Return all matching pairs using indices from the original input slices.
     fn intersect_pairs(
         a: &[Transcript],
         b: &[Transcript],
@@ -11,6 +12,7 @@ pub trait IntervalIndex {
     ) -> Vec<(usize, usize)>;
 }
 
+/// Sweep-line implementation of [`IntervalIndex`].
 pub struct SweepIndex;
 
 impl IntervalIndex for SweepIndex {
@@ -24,6 +26,7 @@ impl IntervalIndex for SweepIndex {
 }
 
 #[cfg(feature = "index-binned")]
+/// Fixed-bin implementation of [`IntervalIndex`].
 pub struct BinnedIndex;
 
 #[cfg(feature = "index-binned")]
@@ -39,8 +42,7 @@ impl IntervalIndex for BinnedIndex {
 
 /// Intersect pairs using the sweep-line backend.
 ///
-/// Prefer this for already-sorted inputs; it is typically faster than indexed approaches when both
-/// sides are sorted.
+/// Inputs may be in any order. Returned indices refer to the original input slices.
 pub fn intersect_pairs(
     a: &[Transcript],
     b: &[Transcript],

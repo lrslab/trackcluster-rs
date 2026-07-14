@@ -3,10 +3,15 @@ use crate::model::{Interval, Transcript};
 use super::StrandMode;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// One connected component of overlapping transcript spans.
 pub struct RangeCluster {
+    /// Reference sequence shared by all members.
     pub chrom: String,
+    /// Strand key when strand matching is enabled.
     pub strand: Option<crate::model::Strand>,
+    /// Bounding span of every member.
     pub span: Interval,
+    /// Indices into the original input slice.
     pub members: Vec<usize>,
 }
 
@@ -17,14 +22,31 @@ fn span(transcript: &Transcript) -> Interval {
     }
 }
 
-pub fn cluster_by_span(
-    records_sorted: &[Transcript],
-    strand_mode: StrandMode,
-) -> Vec<RangeCluster> {
+/// Cluster transcript spans from arbitrarily ordered input.
+///
+/// Half-open spans that merely touch are placed in separate clusters.
+pub fn cluster_by_span(records: &[Transcript], strand_mode: StrandMode) -> Vec<RangeCluster> {
+    let mut ordered_indices: Vec<usize> = (0..records.len()).collect();
+    ordered_indices.sort_by(|&left_index, &right_index| {
+        let left = &records[left_index];
+        let right = &records[right_index];
+        left.chrom
+            .cmp(&right.chrom)
+            .then_with(|| {
+                strand_mode
+                    .key_strand(left.strand)
+                    .cmp(&strand_mode.key_strand(right.strand))
+            })
+            .then_with(|| left.tx_start.cmp(&right.tx_start))
+            .then_with(|| left.tx_end.cmp(&right.tx_end))
+            .then_with(|| left_index.cmp(&right_index))
+    });
+
     let mut clusters: Vec<RangeCluster> = Vec::new();
 
     let mut current: Option<RangeCluster> = None;
-    for (index, transcript) in records_sorted.iter().enumerate() {
+    for index in ordered_indices {
+        let transcript = &records[index];
         let tx_span = span(transcript);
         let key_strand = strand_mode.key_strand(transcript.strand);
 
@@ -70,6 +92,15 @@ pub fn cluster_by_span(
     if let Some(cluster) = current {
         clusters.push(cluster);
     }
+
+    clusters.sort_by(|left, right| {
+        left.chrom
+            .cmp(&right.chrom)
+            .then_with(|| left.span.start.cmp(&right.span.start))
+            .then_with(|| left.span.end.cmp(&right.span.end))
+            .then_with(|| left.strand.cmp(&right.strand))
+            .then_with(|| left.members.cmp(&right.members))
+    });
 
     clusters
 }
@@ -128,5 +159,26 @@ mod tests {
 
         let clusters = cluster_by_span(&records, StrandMode::Match);
         assert_eq!(clusters.len(), 2);
+    }
+
+    #[test]
+    fn cluster_by_span_handles_unsorted_strand_interleaving() {
+        let records = vec![
+            make_tx("chr1", Strand::Plus, 40, 60, "plus-right"),
+            make_tx("chr1", Strand::Minus, 20, 30, "minus"),
+            make_tx("chr1", Strand::Plus, 10, 50, "plus-left"),
+        ];
+
+        let clusters = cluster_by_span(&records, StrandMode::Match);
+        assert_eq!(clusters.len(), 2);
+        let plus = clusters
+            .iter()
+            .find(|cluster| cluster.strand == Some(Strand::Plus))
+            .unwrap();
+        assert_eq!(
+            plus.span,
+            Interval::new(Coord::new(10), Coord::new(60)).unwrap()
+        );
+        assert_eq!(plus.members, vec![2, 0]);
     }
 }

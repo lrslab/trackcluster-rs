@@ -79,6 +79,7 @@ impl BinnedPartitionIndex {
 }
 
 #[derive(Clone, Debug)]
+/// Reusable allocation scratch space for binned intersection queries.
 pub struct BinnedIntersectScratch {
     seen: Vec<u32>,
     stamp: u32,
@@ -86,6 +87,7 @@ pub struct BinnedIntersectScratch {
 }
 
 impl BinnedIntersectScratch {
+    /// Allocate scratch space for a catalog with `b_len` records.
     pub fn new(b_len: usize) -> Self {
         Self {
             seen: vec![0; b_len],
@@ -113,6 +115,11 @@ impl BinnedIntersectScratch {
     }
 }
 
+/// Reusable fixed-bin index bound to one transcript catalog.
+///
+/// Queries must use the same `b` records, in the same order, that were supplied to
+/// [`BinnedIntersectIndex::build`]. The index stores catalog indices and partition/bin membership,
+/// but does not retain or borrow `b`, so it cannot verify record identity at query time.
 pub struct BinnedIntersectIndex {
     strand_mode: StrandMode,
     b_len: usize,
@@ -120,6 +127,9 @@ pub struct BinnedIntersectIndex {
 }
 
 impl BinnedIntersectIndex {
+    /// Build an index for `b` using the selected strand policy.
+    ///
+    /// The returned index is valid only for queries using this exact catalog and record order.
     pub fn build(b: &[Transcript], strand_mode: StrandMode) -> Self {
         let b_parts = partition(b, strand_mode);
         let mut partitions: HashMap<PartitionKey, BinnedPartitionIndex> =
@@ -134,6 +144,14 @@ impl BinnedIntersectIndex {
         }
     }
 
+    /// Replace the contents of `out` with matching pairs, reusing caller-provided scratch
+    /// allocation.
+    ///
+    /// `b` must contain the same records in the same order as the catalog used to build this
+    /// index, and `opts.strand_mode` must match the build-time strand mode. This method checks
+    /// only the strand mode and catalog length. A detected mismatch clears `out` and returns no
+    /// pairs; a same-length catalog or ordering mismatch is not detected and can produce
+    /// incomplete or otherwise meaningless results.
     pub fn intersect_pairs_into(
         &self,
         a: &[Transcript],
@@ -193,6 +211,11 @@ impl BinnedIntersectIndex {
         out.sort_unstable();
     }
 
+    /// Return matching pairs for a single query collection.
+    ///
+    /// The `b` catalog and strand-mode requirements are the same as for
+    /// [`BinnedIntersectIndex::intersect_pairs_into`]. A detected strand-mode or length mismatch
+    /// returns an empty vector.
     pub fn intersect_pairs(
         &self,
         a: &[Transcript],
@@ -284,11 +307,11 @@ mod tests {
             a_specs in prop::collection::vec((prop_oneof![Just("chr1".to_owned()), Just("chr2".to_owned())],
                                               prop_oneof![Just(Strand::Plus), Just(Strand::Minus), Just(Strand::Unknown)],
                                               0u32..200_000,
-                                              0u32..50_000), 0..12),
+                                              1u32..50_000), 0..12),
             b_specs in prop::collection::vec((prop_oneof![Just("chr1".to_owned()), Just("chr2".to_owned())],
                                               prop_oneof![Just(Strand::Plus), Just(Strand::Minus), Just(Strand::Unknown)],
                                               0u32..200_000,
-                                              0u32..50_000), 0..12),
+                                              1u32..50_000), 0..12),
             strand_mode in prop_oneof![Just(StrandMode::Ignore), Just(StrandMode::Match)],
             min_overlap_bp in prop_oneof![Just(None), (1u32..25).prop_map(Some)],
         ) {

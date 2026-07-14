@@ -8,6 +8,7 @@ fn strand_rank(strand: Strand) -> u8 {
     }
 }
 
+/// Stably sort transcripts by chromosome, start, end, and strand.
 pub fn sort_by_coord(transcripts: &mut [Transcript]) {
     transcripts.sort_by(|left, right| {
         left.chrom

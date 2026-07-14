@@ -1,5 +1,10 @@
 use crate::model::Transcript;
 
+/// Count coordinate bases covered by exons in both transcripts.
+///
+/// This is a geometry-only refinement: it does not compare chromosome or strand. Callers must
+/// first establish that `a` and `b` belong to the same comparison partition (the same chromosome,
+/// and the same strand when required by the caller's strand policy).
 pub fn exonic_overlap_bp(a: &Transcript, b: &Transcript) -> u32 {
     let mut total: u32 = 0;
     let mut ai: usize = 0;
@@ -30,10 +35,16 @@ pub fn exonic_overlap_bp(a: &Transcript, b: &Transcript) -> u32 {
     total
 }
 
+/// Return whether chromosome, strand, and every intron match exactly.
 pub fn junctions_equal(a: &Transcript, b: &Transcript) -> bool {
     a.junction_signature() == b.junction_signature()
 }
 
+/// Return whether every intron coordinate in `a` occurs in order within `b`.
+///
+/// This is a geometry-only refinement: it does not compare chromosome or strand. Callers must
+/// first establish that `a` and `b` belong to the same comparison partition (the same chromosome,
+/// and the same strand when required by the caller's strand policy).
 pub fn junctions_subset(a: &Transcript, b: &Transcript) -> bool {
     let a_introns = a.introns();
     let b_introns = b.introns();

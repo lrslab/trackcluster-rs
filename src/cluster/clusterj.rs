@@ -7,7 +7,50 @@ use crate::model::{Coord, Interval, Strand, Transcript};
 #[derive(Clone, Debug)]
 struct Track {
     tx: Transcript,
-    subreads: HashSet<String>,
+    source: TrackSource,
+    subreads: HashSet<ReadInstance>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum TrackSource {
+    Reference,
+    Read,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ReadInstance {
+    index: usize,
+    name: String,
+}
+
+impl Track {
+    fn reference(tx: Transcript) -> Self {
+        Self {
+            tx,
+            source: TrackSource::Reference,
+            subreads: HashSet::new(),
+        }
+    }
+
+    fn read(tx: Transcript, index: usize) -> Self {
+        let subreads = HashSet::from([ReadInstance {
+            index,
+            name: tx.name.clone(),
+        }]);
+        Self {
+            tx,
+            source: TrackSource::Read,
+            subreads,
+        }
+    }
+
+    fn is_reference(&self) -> bool {
+        self.source == TrackSource::Reference
+    }
+
+    fn is_read(&self) -> bool {
+        self.source == TrackSource::Read
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -16,8 +59,6 @@ struct PartitionKey {
     strand: Strand,
 }
 
-const NAME2_COL: usize = 0;
-const TTYPE_COL: usize = 4;
 pub const DEFAULT_SW_SCORE: i64 = -1;
 pub const DEFAULT_JUNCTION_CORRECTION_MIN_SUPPORT: u32 = 5;
 pub const DEFAULT_JUNCTION_CORRECTION_OFFSET: u32 = 10;
@@ -27,6 +68,30 @@ pub const DEFAULT_SL_FIVE_PRIME_CLUSTER_OFFSET: u32 = 15;
 pub const DEFAULT_MIN_SL_FIVE_PRIME_CLUSTER_SUPPORT: usize = 2;
 pub const DEFAULT_SAME_JUNCTION_THREE_PRIME_END_OFFSET: u32 = 50;
 pub const DEFAULT_MIN_THREE_PRIME_CLUSTER_SUPPORT: usize = 5;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JunctionClusterSummary {
+    pub input_reads: usize,
+    pub represented_reads: usize,
+    pub mapping_rows: usize,
+    pub rare_reads: usize,
+    pub unmatched_reads: usize,
+    pub unused_reads: usize,
+}
+
+impl JunctionClusterSummary {
+    fn emit(self) {
+        eprintln!(
+            "clusterj: input_reads={} represented_reads={} mapping_rows={} rare_reads={} unmatched_reads={} unused_reads={}",
+            self.input_reads,
+            self.represented_reads,
+            self.mapping_rows,
+            self.rare_reads,
+            self.unmatched_reads,
+            self.unused_reads
+        );
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JunctionCorrectionOptions {
@@ -40,6 +105,18 @@ impl Default for JunctionCorrectionOptions {
             min_support: DEFAULT_JUNCTION_CORRECTION_MIN_SUPPORT,
             offset: DEFAULT_JUNCTION_CORRECTION_OFFSET,
         }
+    }
+}
+
+impl JunctionCorrectionOptions {
+    /// Validate junction-correction support and offset domains.
+    pub fn validate(self) -> Result<(), crate::config::ParameterError> {
+        crate::config::WeightedMinimumSupport::new(
+            "junction correction minimum support",
+            self.min_support,
+        )?;
+        let _ = crate::config::BasePairOffset::new(self.offset);
+        Ok(())
     }
 }
 
@@ -62,6 +139,20 @@ impl Default for SlMergeOptions {
     }
 }
 
+impl SlMergeOptions {
+    /// Validate SL offset and support domains.
+    pub fn validate(self) -> Result<(), crate::config::ParameterError> {
+        let _ = crate::config::BasePairOffset::new(self.partial_five_prime_end_offset);
+        let _ = crate::config::BasePairOffset::new(self.same_junction_five_prime_end_offset);
+        let _ = crate::config::BasePairOffset::new(self.five_prime_cluster_offset);
+        crate::config::MinimumSupport::new(
+            "SL 5-prime minimum support",
+            self.min_five_prime_cluster_support,
+        )?;
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThreePrimeMergeOptions {
     pub same_junction_three_prime_end_offset: u32,
@@ -77,6 +168,17 @@ impl ThreePrimeMergeOptions {
             min_three_prime_cluster_support: DEFAULT_MIN_THREE_PRIME_CLUSTER_SUPPORT,
         }
     }
+
+    /// Validate 3-prime offset and support domains.
+    pub fn validate(self) -> Result<(), crate::config::ParameterError> {
+        let _ = crate::config::BasePairOffset::new(self.same_junction_three_prime_end_offset);
+        let _ = crate::config::BasePairOffset::new(self.three_prime_cluster_offset);
+        crate::config::MinimumSupport::new(
+            "3-prime minimum support",
+            self.min_three_prime_cluster_support,
+        )?;
+        Ok(())
+    }
 }
 
 impl Default for ThreePrimeMergeOptions {
@@ -90,6 +192,16 @@ pub struct ResolvedPlatformOptions {
     pub junction_correction: JunctionCorrectionOptions,
     pub sl_options: SlMergeOptions,
     pub three_prime_options: ThreePrimeMergeOptions,
+}
+
+impl ResolvedPlatformOptions {
+    /// Validate every resolved scientific option.
+    pub fn validate(self) -> Result<(), crate::config::ParameterError> {
+        self.junction_correction.validate()?;
+        self.sl_options.validate()?;
+        self.three_prime_options.validate()?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -269,30 +381,10 @@ impl std::str::FromStr for Name2Mode {
     }
 }
 
-fn get_extra(tx: &Transcript, idx: usize) -> Option<&str> {
-    tx.extra_fields.get(idx).map(|value| value.as_str())
-}
-
-fn set_extra(tx: &mut Transcript, idx: usize, value: String) {
-    if tx.extra_fields.len() <= idx {
-        tx.extra_fields.resize(idx + 1, "none".to_owned());
-    }
-    tx.extra_fields[idx] = value;
-}
-
-fn ttype(tx: &Transcript) -> Option<&str> {
-    get_extra(tx, TTYPE_COL)
-}
-
-fn is_isoform_anno(tx: &Transcript) -> bool {
-    matches!(ttype(tx), Some("isoform_anno"))
-}
-
-fn track_weight(tx: &Transcript, ref_weight: u32, read_weight: u32) -> u32 {
-    match ttype(tx) {
-        Some("isoform_anno") => ref_weight,
-        Some("nanopore_read") => read_weight,
-        _ => 1,
+fn track_weight(track: &Track, ref_weight: u32, read_weight: u32) -> u32 {
+    match track.source {
+        TrackSource::Reference => ref_weight,
+        TrackSource::Read => read_weight,
     }
 }
 
@@ -322,44 +414,41 @@ fn rebuild_exons_from_junctions(
     tx_start: Coord,
     tx_end: Coord,
     junctions: &[u32],
-) -> Vec<Interval> {
+) -> Option<Vec<Interval>> {
     let start = tx_start.get();
     let end = tx_end.get();
 
     let mut junctions = junctions.to_vec();
     junctions.sort_unstable();
 
-    // Junction correction can drift slightly outside the transcript span; clamp defensively so we
-    // never panic when rebuilding exon intervals.
-    for pos in &mut junctions {
-        *pos = (*pos).clamp(start, end);
-    }
-    junctions.dedup();
-
-    if junctions.is_empty() || !junctions.len().is_multiple_of(2) || start >= end {
-        return vec![Interval::new(tx_start, tx_end).expect("valid span")];
+    if start >= end
+        || junctions.is_empty()
+        || !junctions.len().is_multiple_of(2)
+        || junctions.windows(2).any(|pair| pair[0] >= pair[1])
+        || junctions
+            .iter()
+            .any(|boundary| *boundary <= start || *boundary >= end)
+    {
+        return None;
     }
 
     let mut exons: Vec<Interval> = Vec::new();
-    exons.push(Interval::new(Coord::new(start), Coord::new(junctions[0])).expect("valid exon"));
+    exons.push(Interval::new(Coord::new(start), Coord::new(junctions[0])).ok()?);
 
     let mut idx = 1usize;
     while idx + 1 < junctions.len() {
-        let exon = Interval::new(Coord::new(junctions[idx]), Coord::new(junctions[idx + 1]))
-            .expect("valid exon");
+        let exon =
+            Interval::new(Coord::new(junctions[idx]), Coord::new(junctions[idx + 1])).ok()?;
+        if exon.is_empty() {
+            return None;
+        }
         exons.push(exon);
         idx += 2;
     }
 
-    exons.push(
-        Interval::new(
-            Coord::new(*junctions.last().expect("non-empty")),
-            Coord::new(end),
-        )
-        .expect("valid exon"),
-    );
+    exons.push(Interval::new(Coord::new(*junctions.last()?), Coord::new(end)).ok()?);
 
-    exons
+    exons.iter().all(|exon| !exon.is_empty()).then_some(exons)
 }
 
 fn group_consecutive_indices(indices: &[usize]) -> Vec<Vec<usize>> {
@@ -444,7 +533,7 @@ fn flow_junction_correct(
 
     let mut site_cov: HashMap<u32, u32> = HashMap::new();
     for (track, junctions) in tracks.iter().zip(junctions_cache.iter()) {
-        let weight = track_weight(&track.tx, 5, 1);
+        let weight = track_weight(track, 5, 1);
         for &pos in junctions {
             *site_cov.entry(pos).or_insert(0) += weight;
         }
@@ -457,12 +546,19 @@ fn flow_junction_correct(
 
     for (idx, mut track) in tracks.into_iter().enumerate() {
         let junctions = &junctions_cache[idx];
+        // References are anchors supplied by the reference input. Their metadata is biological
+        // annotation only, so never correct or discard them based on transcript-type fields.
+        if track.is_reference() {
+            corrected.push(track);
+            continue;
+        }
+
         if junctions.iter().any(|pos| w_to_no.contains(pos)) {
             rare.push(track);
             continue;
         }
 
-        if !is_isoform_anno(&track.tx) && !junctions.is_empty() {
+        if !junctions.is_empty() {
             let mut corrected_junctions: Vec<u32> = Vec::with_capacity(junctions.len());
             let mut changed = false;
             for &pos in junctions {
@@ -473,19 +569,23 @@ fn flow_junction_correct(
                 corrected_junctions.push(corrected_pos);
             }
 
-            if changed && track.tx.extra_fields.len() > TTYPE_COL {
-                set_extra(
-                    &mut track.tx,
-                    TTYPE_COL,
-                    "nanopore_read_corrected".to_owned(),
-                );
+            if changed {
+                let Some(corrected_exons) = rebuild_exons_from_junctions(
+                    track.tx.tx_start,
+                    track.tx.tx_end,
+                    &corrected_junctions,
+                ) else {
+                    rare.push(track);
+                    continue;
+                };
+                if track.tx.metadata().transcript_type().is_some() {
+                    track
+                        .tx
+                        .metadata_mut()
+                        .set_transcript_type("nanopore_read_corrected");
+                }
+                track.tx.exons = corrected_exons;
             }
-
-            track.tx.exons = rebuild_exons_from_junctions(
-                track.tx.tx_start,
-                track.tx.tx_end,
-                &corrected_junctions,
-            );
         }
 
         corrected.push(track);
@@ -494,105 +594,36 @@ fn flow_junction_correct(
     (corrected, rare)
 }
 
-fn junctions_equal(a: &[u32], b: &[u32], offset: u32) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    if offset == 0 {
-        return a == b;
-    }
-
-    a.iter()
-        .zip(b.iter())
-        .all(|(&left, &right)| left.abs_diff(right) <= offset)
+fn ordered_boundary_matches(a: &[u32], b: &[u32], offset: u32) -> Vec<(usize, usize)> {
+    crate::matching::ordered_one_to_one_matches_by(a.len(), b.len(), |a_idx, b_idx| {
+        let delta = a[a_idx].abs_diff(b[b_idx]);
+        (delta <= offset).then_some(u64::from(delta))
+    })
 }
 
-fn fuzzy_intersection(a: &[u32], b: &[u32], offset: u32) -> HashMap<u32, u32> {
-    let mut match_dic: HashMap<u32, u32> = HashMap::new();
-    for &i in a {
-        for &j in b {
-            if i.abs_diff(j) <= offset {
-                match_dic.insert(i, j);
-            }
-        }
-    }
-    match_dic
+fn junctions_equal(a: &[u32], b: &[u32], offset: u32) -> bool {
+    a.len() == b.len() && ordered_boundary_matches(a, b, offset).len() == a.len()
 }
 
 fn compare_ei_by_boundary(a: &[u32], reference: &[u32], offset: u32) -> (Vec<usize>, Vec<usize>) {
-    if offset == 0 {
-        let ascending = match (reference.first(), reference.last()) {
-            (Some(first), Some(last)) => first <= last,
-            _ => true,
-        };
-
-        let mut missed_order: Vec<usize> = Vec::new();
-        let mut extra_order: Vec<usize> = Vec::new();
-
-        let mut i = 0usize;
-        let mut j = 0usize;
-        while i < a.len() && j < reference.len() {
-            let ai = a[i];
-            let rj = reference[j];
-            if ai == rj {
-                i += 1;
-                j += 1;
-                continue;
-            }
-
-            let a_before_ref = if ascending { ai < rj } else { ai > rj };
-            if a_before_ref {
-                extra_order.push(i);
-                i += 1;
-            } else {
-                missed_order.push(j);
-                j += 1;
-            }
-        }
-
-        while i < a.len() {
-            extra_order.push(i);
-            i += 1;
-        }
-        while j < reference.len() {
-            missed_order.push(j);
-            j += 1;
-        }
-
-        return (missed_order, extra_order);
+    let matches = ordered_boundary_matches(a, reference, offset);
+    let mut matched_a = vec![false; a.len()];
+    let mut matched_reference = vec![false; reference.len()];
+    for (a_idx, reference_idx) in matches {
+        matched_a[a_idx] = true;
+        matched_reference[reference_idx] = true;
     }
 
-    let match_dic = fuzzy_intersection(a, reference, offset);
-    let junction_new: Vec<u32> = a
+    let missed_order = matched_reference
         .iter()
-        .copied()
-        .map(|pos| match_dic.get(&pos).copied().unwrap_or(pos))
+        .enumerate()
+        .filter_map(|(idx, matched)| (!matched).then_some(idx))
         .collect();
-
-    let mut posdic_a: HashMap<u32, usize> = HashMap::new();
-    for (idx, pos) in junction_new.iter().copied().enumerate() {
-        posdic_a.insert(pos, idx);
-    }
-
-    let mut posdic_ref: HashMap<u32, usize> = HashMap::new();
-    for (idx, pos) in reference.iter().copied().enumerate() {
-        posdic_ref.insert(pos, idx);
-    }
-
-    let set_a: HashSet<u32> = junction_new.iter().copied().collect();
-    let set_ref: HashSet<u32> = reference.iter().copied().collect();
-
-    let mut missed_order: Vec<usize> = set_ref
-        .difference(&set_a)
-        .filter_map(|pos| posdic_ref.get(pos).copied())
+    let extra_order = matched_a
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, matched)| (!matched).then_some(idx))
         .collect();
-    missed_order.sort_unstable();
-
-    let mut extra_order: Vec<usize> = set_a
-        .difference(&set_ref)
-        .filter_map(|pos| posdic_a.get(pos).copied())
-        .collect();
-    extra_order.sort_unstable();
 
     (missed_order, extra_order)
 }
@@ -710,12 +741,12 @@ fn three_prime_position(tx: &Transcript) -> Option<u32> {
     }
 }
 
-fn is_sl_supported_read(tx: &Transcript, sw_score: i64) -> bool {
-    sw_score >= 0 && !is_isoform_anno(tx) && i64::from(tx.score) > sw_score
+fn is_sl_supported_read(track: &Track, sw_score: i64) -> bool {
+    sw_score >= 0 && track.is_read() && i64::from(track.tx.score) > sw_score
 }
 
 fn track_read_support(track: &Track) -> usize {
-    if is_isoform_anno(&track.tx) {
+    if track.is_reference() {
         0
     } else {
         track.subreads.len().max(1)
@@ -749,7 +780,7 @@ fn build_sl_five_prime_cluster_support(
 
     let mut groups: HashMap<SlSupportKey<'_>, Vec<SlSupportEntry>> = HashMap::new();
     for (i, track_i) in tracks.iter().enumerate() {
-        if !is_sl_supported_read(&track_i.tx, sw_score) {
+        if !is_sl_supported_read(track_i, sw_score) {
             continue;
         }
         let Some(five_prime_pos) = five_prime_position(&track_i.tx) else {
@@ -828,7 +859,7 @@ fn build_three_prime_cluster_support(
 
     let mut groups: HashMap<TerminalSupportKey<'_>, Vec<TerminalSupportEntry>> = HashMap::new();
     for (idx, track) in tracks.iter().enumerate() {
-        if is_isoform_anno(&track.tx) || junctions_cache[idx].is_empty() {
+        if track.is_reference() || junctions_cache[idx].is_empty() {
             continue;
         }
         let Some(three_prime_pos) = three_prime_position(&track.tx) else {
@@ -885,8 +916,8 @@ fn build_three_prime_cluster_support(
 }
 
 fn sl_protected_from_merge(
-    short: &Transcript,
-    long: &Transcript,
+    short: &Track,
+    long: &Track,
     kind: MergeKind,
     sw_score: i64,
     sl_cluster_support: usize,
@@ -906,24 +937,24 @@ fn sl_protected_from_merge(
         | MergeKind::SingleExonSameFivePrime => sl_options.partial_five_prime_end_offset,
     };
 
-    !five_prime_ends_match(short, long, offset)
+    !five_prime_ends_match(&short.tx, &long.tx, offset)
 }
 
 fn three_prime_protected_from_merge(
-    short: &Transcript,
-    long: &Transcript,
+    short: &Track,
+    long: &Track,
     kind: MergeKind,
     three_prime_cluster_support: usize,
     three_prime_options: ThreePrimeMergeOptions,
 ) -> bool {
-    if kind != MergeKind::SameJunction || is_isoform_anno(short) {
+    if kind != MergeKind::SameJunction || short.is_reference() {
         return false;
     }
     if three_prime_cluster_support < three_prime_options.min_three_prime_cluster_support {
         return false;
     }
 
-    three_prime_end_delta(short, long)
+    three_prime_end_delta(&short.tx, &long.tx)
         .is_some_and(|delta| delta > three_prime_options.same_junction_three_prime_end_offset)
 }
 
@@ -967,12 +998,12 @@ fn target_is_preferred_container(
     kind: MergeKind,
     source_exon_len: u32,
     target_exon_len: u32,
-    is_anno: &[bool],
+    is_reference: &[bool],
 ) -> bool {
-    if is_anno[source_idx] {
+    if is_reference[source_idx] {
         return false;
     }
-    if is_anno[target_idx] {
+    if is_reference[target_idx] {
         return true;
     }
 
@@ -991,7 +1022,7 @@ struct MergeContext<'a> {
     tracks: &'a [Track],
     junctions_cache: &'a [Vec<u32>],
     exon_lens: &'a [u32],
-    is_anno: &'a [bool],
+    is_reference: &'a [bool],
     sl_cluster_support: &'a [usize],
     three_prime_cluster_support: &'a [usize],
     sw_score: i64,
@@ -1035,17 +1066,17 @@ impl MergeContext<'_> {
             kind,
             self.exon_lens[source_idx],
             self.exon_lens[target_idx],
-            self.is_anno,
+            self.is_reference,
         ) && !sl_protected_from_merge(
-            &self.tracks[source_idx].tx,
-            &self.tracks[target_idx].tx,
+            &self.tracks[source_idx],
+            &self.tracks[target_idx],
             kind,
             self.sw_score,
             self.sl_cluster_support[source_idx],
             self.sl_options,
         ) && !three_prime_protected_from_merge(
-            &self.tracks[source_idx].tx,
-            &self.tracks[target_idx].tx,
+            &self.tracks[source_idx],
+            &self.tracks[target_idx],
             kind,
             self.three_prime_cluster_support[source_idx],
             self.three_prime_options,
@@ -1108,7 +1139,7 @@ fn build_junction_length_index(
 fn build_exact_duplicate_representatives<'a>(
     tracks: &'a [Track],
     junctions_cache: &'a [Vec<u32>],
-    is_anno: &[bool],
+    is_reference: &[bool],
 ) -> Vec<Option<usize>> {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     struct ExactDuplicateKey<'a> {
@@ -1121,7 +1152,7 @@ fn build_exact_duplicate_representatives<'a>(
 
     let mut groups: HashMap<ExactDuplicateKey<'_>, Vec<usize>> = HashMap::new();
     for (idx, track) in tracks.iter().enumerate() {
-        if is_anno[idx] {
+        if is_reference[idx] {
             continue;
         }
 
@@ -1179,12 +1210,9 @@ fn junction_simple_merge_with_options(
         .map(|track| junction_positions(&track.tx))
         .collect();
     let exon_lens: Vec<u32> = tracks.iter().map(|track| exon_len(&track.tx)).collect();
-    let is_anno: Vec<bool> = tracks
-        .iter()
-        .map(|track| is_isoform_anno(&track.tx))
-        .collect();
+    let is_reference: Vec<bool> = tracks.iter().map(Track::is_reference).collect();
     let exact_duplicate_representative =
-        build_exact_duplicate_representatives(tracks, &junctions_cache, &is_anno);
+        build_exact_duplicate_representatives(tracks, &junctions_cache, &is_reference);
     let target_eligible: Vec<bool> = exact_duplicate_representative
         .iter()
         .map(Option::is_none)
@@ -1209,7 +1237,7 @@ fn junction_simple_merge_with_options(
                 if i == j {
                     continue;
                 }
-                if dropped[j] && !is_anno[j] {
+                if dropped[j] && !is_reference[j] {
                     continue;
                 }
                 if !target_eligible[j] {
@@ -1221,7 +1249,7 @@ fn junction_simple_merge_with_options(
                         tracks,
                         junctions_cache: &junctions_cache,
                         exon_lens: &exon_lens,
-                        is_anno: &is_anno,
+                        is_reference: &is_reference,
                         sl_cluster_support: &sl_cluster_support,
                         three_prime_cluster_support: &three_prime_cluster_support,
                         sw_score,
@@ -1261,7 +1289,7 @@ fn junction_simple_merge_with_options(
             if i == j {
                 continue;
             }
-            if dropped[j] && !is_anno[j] {
+            if dropped[j] && !is_reference[j] {
                 continue;
             }
             debug_assert!(target_eligible[j]);
@@ -1271,7 +1299,7 @@ fn junction_simple_merge_with_options(
                     tracks,
                     junctions_cache: &junctions_cache,
                     exon_lens: &exon_lens,
-                    is_anno: &is_anno,
+                    is_reference: &is_reference,
                     sl_cluster_support: &sl_cluster_support,
                     three_prime_cluster_support: &three_prime_cluster_support,
                     sw_score,
@@ -1292,7 +1320,7 @@ fn junction_simple_merge_with_options(
 
     let mut keep_vec: Vec<usize> = Vec::with_capacity(tracks.len());
     for (idx, _track) in tracks.iter().enumerate() {
-        if !dropped[idx] || is_anno[idx] {
+        if !dropped[idx] || is_reference[idx] {
             keep_vec.push(idx);
         }
     }
@@ -1316,10 +1344,7 @@ fn junction_simple_merge_naive_with_options(
         .map(|track| junction_positions(&track.tx))
         .collect();
     let exon_lens: Vec<u32> = tracks.iter().map(|track| exon_len(&track.tx)).collect();
-    let is_anno: Vec<bool> = tracks
-        .iter()
-        .map(|track| is_isoform_anno(&track.tx))
-        .collect();
+    let is_reference: Vec<bool> = tracks.iter().map(Track::is_reference).collect();
     let sl_cluster_support =
         build_sl_five_prime_cluster_support(tracks, &junctions_cache, sw_score, sl_options);
     let three_prime_options = ThreePrimeMergeOptions::default();
@@ -1336,7 +1361,7 @@ fn junction_simple_merge_naive_with_options(
             if i == j {
                 continue;
             }
-            if dropped[j] && !is_anno[j] {
+            if dropped[j] && !is_reference[j] {
                 continue;
             }
 
@@ -1345,7 +1370,7 @@ fn junction_simple_merge_naive_with_options(
                     tracks,
                     junctions_cache: &junctions_cache,
                     exon_lens: &exon_lens,
-                    is_anno: &is_anno,
+                    is_reference: &is_reference,
                     sl_cluster_support: &sl_cluster_support,
                     three_prime_cluster_support: &three_prime_cluster_support,
                     sw_score,
@@ -1365,8 +1390,8 @@ fn junction_simple_merge_naive_with_options(
     }
 
     let mut keep_vec: Vec<usize> = Vec::with_capacity(tracks.len());
-    for (idx, track) in tracks.iter().enumerate() {
-        if !dropped[idx] || is_isoform_anno(&track.tx) {
+    for (idx, _track) in tracks.iter().enumerate() {
+        if !dropped[idx] || is_reference[idx] {
             keep_vec.push(idx);
         }
     }
@@ -1394,13 +1419,22 @@ fn select_tracks_by_keep_indices(tracks: Vec<Track>, keep_indices: Vec<usize>) -
 
 fn merge_tracks_by_name(tracks: Vec<Track>) -> Vec<Track> {
     let mut out: Vec<Track> = Vec::new();
-    let mut index_by_name: HashMap<String, usize> = HashMap::new();
+    let mut index_by_source_name_and_structure: HashMap<(TrackSource, String, String), usize> =
+        HashMap::new();
 
     for track in tracks {
-        if let Some(&idx) = index_by_name.get(&track.tx.name) {
+        // A read label identifies a molecule, not a unique alignment. Preserve
+        // structurally distinct alignments and coalesce only exact structural
+        // copies of the same source/name.
+        let key = (
+            track.source,
+            track.tx.name.clone(),
+            crate::identity::novel_isoform_id(&track.tx),
+        );
+        if let Some(&idx) = index_by_source_name_and_structure.get(&key) {
             out[idx].subreads.extend(track.subreads);
         } else {
-            index_by_name.insert(track.tx.name.clone(), out.len());
+            index_by_source_name_and_structure.insert(key, out.len());
             out.push(track);
         }
     }
@@ -1412,7 +1446,7 @@ fn split_reference_and_read_tracks(tracks: Vec<Track>) -> (Vec<Track>, Vec<Track
     let mut refs: Vec<Track> = Vec::new();
     let mut reads: Vec<Track> = Vec::new();
     for track in tracks {
-        if is_isoform_anno(&track.tx) {
+        if track.is_reference() {
             refs.push(track);
         } else {
             reads.push(track);
@@ -1551,59 +1585,56 @@ fn batch_junction_simple_merge(
     merged
 }
 
-fn build_read_to_isoform(isoforms: &[Track], ref_names: &HashSet<String>) -> Vec<(String, String)> {
+fn build_read_to_isoform(isoforms: &[Track]) -> Vec<(String, String)> {
     let mut pairs: Vec<(String, String)> = Vec::new();
     for track in isoforms {
         for subread in &track.subreads {
-            if !ref_names.contains(subread) {
-                pairs.push((subread.clone(), track.tx.name.clone()));
-            }
+            pairs.push((subread.name.clone(), track.tx.name.clone()));
         }
     }
     pairs.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     pairs
 }
 
-fn update_name2(isoforms: &mut [Track], ref_names: &HashSet<String>, mode: Name2Mode) {
+fn update_name2(isoforms: &mut [Track], mode: Name2Mode) {
     if mode == Name2Mode::None {
         for track in isoforms.iter_mut() {
-            set_extra(&mut track.tx, NAME2_COL, "none".to_owned());
+            track.tx.metadata_mut().set_name2("none");
         }
         return;
     }
 
     let values: Vec<String> = {
-        let mut occurrence: HashMap<&str, u32> = HashMap::new();
+        let mut occurrence: HashMap<usize, u32> = HashMap::new();
         for track in isoforms.iter() {
-            for name in &track.subreads {
-                if !ref_names.contains(name) {
-                    *occurrence.entry(name.as_str()).or_insert(0) += 1;
-                }
+            for subread in &track.subreads {
+                *occurrence.entry(subread.index).or_insert(0) += 1;
             }
         }
 
         isoforms
             .iter()
             .map(|track| {
+                let mut subreads: Vec<&ReadInstance> = track.subreads.iter().collect();
+                subreads.sort_unstable_by(|left, right| {
+                    left.name
+                        .cmp(&right.name)
+                        .then_with(|| left.index.cmp(&right.index))
+                });
                 let mut coverage = 0.0f64;
-                for name in &track.subreads {
-                    if ref_names.contains(name) {
-                        continue;
-                    }
-                    let denom = occurrence.get(name.as_str()).copied().unwrap_or(0);
+                for subread in &subreads {
+                    let denom = occurrence.get(&subread.index).copied().unwrap_or(0);
                     if denom > 0 {
                         coverage += 1.0f64 / denom as f64;
                     }
                 }
 
                 match mode {
-                    Name2Mode::Full => {
-                        let mut subreads: Vec<&str> =
-                            track.subreads.iter().map(|s| s.as_str()).collect();
-                        subreads.sort_unstable();
-                        let joined = subreads.join(",");
-                        format!("{joined},|{coverage}")
-                    }
+                    Name2Mode::Full => crate::identity::encode_name2(
+                        subreads.iter().map(|subread| subread.name.as_str()),
+                        coverage,
+                    )
+                    .expect("read IDs were validated before clustering"),
                     Name2Mode::Coverage => format!("|{coverage}"),
                     Name2Mode::None => unreachable!("handled above"),
                 }
@@ -1612,7 +1643,7 @@ fn update_name2(isoforms: &mut [Track], ref_names: &HashSet<String>, mode: Name2
     };
 
     for (track, value) in isoforms.iter_mut().zip(values) {
-        set_extra(&mut track.tx, NAME2_COL, value);
+        track.tx.metadata_mut().set_name2(value);
     }
 }
 
@@ -1663,7 +1694,9 @@ fn split_tracks_into_loci(tracks: Vec<Track>) -> Vec<Vec<Track>> {
 struct PartitionResult {
     isoforms: Vec<Transcript>,
     pairs: Vec<(String, String)>,
-    unused: Vec<Transcript>,
+    represented_read_indices: HashSet<usize>,
+    rare_read_indices: Vec<usize>,
+    unmatched_read_indices: Vec<usize>,
 }
 
 struct WorkItem {
@@ -1678,7 +1711,6 @@ fn process_partition(
     reads: &[Transcript],
     ref_indices: &[usize],
     read_indices: &[usize],
-    ref_names: &HashSet<String>,
     sw_score: i64,
     batch_size: usize,
     batch_rounds: usize,
@@ -1689,59 +1721,88 @@ fn process_partition(
 ) -> PartitionResult {
     let mut tracks: Vec<Track> = Vec::with_capacity(ref_indices.len() + read_indices.len());
     for &idx in ref_indices {
-        tracks.push(Track {
-            tx: references[idx].clone(),
-            subreads: HashSet::new(),
-        });
+        tracks.push(Track::reference(references[idx].clone()));
     }
     for &idx in read_indices {
-        let tx = reads[idx].clone();
-        let mut subreads: HashSet<String> = HashSet::new();
-        subreads.insert(tx.name.clone());
-        tracks.push(Track { tx, subreads });
+        tracks.push(Track::read(reads[idx].clone(), idx));
     }
 
-    let (corrected, rare) = flow_junction_correct(
-        tracks,
-        junction_correction.min_support,
-        junction_correction.offset,
-    );
-    let unused: Vec<Transcript> = rare.into_iter().map(|track| track.tx).collect();
-
-    let loci = split_tracks_into_loci(corrected);
     let mut kept: Vec<Track> = Vec::new();
-    for mut locus_tracks in loci {
-        let mut locus_kept = if batch_size == 0 {
-            let keep_indices = junction_simple_merge_with_options(
-                &mut locus_tracks,
-                sw_score,
-                sl_options,
-                three_prime_options,
-                junction_correction.offset,
+    let mut rare_read_indices: Vec<usize> = Vec::new();
+    let mut unmatched_read_indices: Vec<usize> = Vec::new();
+
+    // Split before junction correction so a read at a disjoint locus cannot borrow junction
+    // support from an unrelated reference on the same chromosome and strand. This matches the
+    // overlap-mode contract: loci with no reference anchor are returned as unused.
+    for locus_tracks in split_tracks_into_loci(tracks) {
+        if !locus_tracks.iter().any(Track::is_reference) {
+            unmatched_read_indices.extend(
+                locus_tracks
+                    .iter()
+                    .flat_map(|track| track.subreads.iter().map(|subread| subread.index)),
             );
-            select_tracks_by_keep_indices(locus_tracks, keep_indices)
-        } else {
-            batch_junction_simple_merge(
-                locus_tracks,
-                sw_score,
-                batch_size,
-                batch_rounds,
-                sl_options,
-                three_prime_options,
-                junction_correction.offset,
-            )
-        };
-        kept.append(&mut locus_kept);
+            continue;
+        }
+
+        let (corrected, rare) = flow_junction_correct(
+            locus_tracks,
+            junction_correction.min_support,
+            junction_correction.offset,
+        );
+        rare_read_indices.extend(
+            rare.iter()
+                .flat_map(|track| track.subreads.iter().map(|subread| subread.index)),
+        );
+
+        for mut corrected_locus in split_tracks_into_loci(corrected) {
+            let mut locus_kept = if batch_size == 0 {
+                let keep_indices = junction_simple_merge_with_options(
+                    &mut corrected_locus,
+                    sw_score,
+                    sl_options,
+                    three_prime_options,
+                    junction_correction.offset,
+                );
+                select_tracks_by_keep_indices(corrected_locus, keep_indices)
+            } else {
+                batch_junction_simple_merge(
+                    corrected_locus,
+                    sw_score,
+                    batch_size,
+                    batch_rounds,
+                    sl_options,
+                    three_prime_options,
+                    junction_correction.offset,
+                )
+            };
+            kept.append(&mut locus_kept);
+        }
     }
 
-    update_name2(&mut kept, ref_names, name2_mode);
-    let pairs = build_read_to_isoform(&kept, ref_names);
+    let represented_read_indices: HashSet<usize> = kept
+        .iter()
+        .flat_map(|track| track.subreads.iter().map(|subread| subread.index))
+        .collect();
+    for track in &mut kept {
+        if track.is_read() {
+            track.tx.name = crate::identity::novel_isoform_id(&track.tx);
+        }
+    }
+    // Two independently retained representatives with the same gene and exact
+    // structure are one catalog isoform. Structural IDs make that equality
+    // explicit, so coalesce their molecule memberships before serialization.
+    let mut kept = merge_tracks_by_name(kept);
+    kept.sort_by(|left, right| left.tx.name.cmp(&right.tx.name));
+    update_name2(&mut kept, name2_mode);
+    let pairs = build_read_to_isoform(&kept);
     let isoforms = kept.into_iter().map(|track| track.tx).collect();
 
     PartitionResult {
         isoforms,
         pairs,
-        unused,
+        represented_read_indices,
+        rare_read_indices,
+        unmatched_read_indices,
     }
 }
 
@@ -1753,7 +1814,27 @@ pub fn clusterj(
     batch_size: usize,
     batch_rounds: usize,
 ) -> ClusterResult {
-    clusterj_with_name2_mode(
+    try_clusterj(
+        reads,
+        references,
+        threads,
+        sw_score,
+        batch_size,
+        batch_rounds,
+    )
+    .unwrap_or_else(|error| panic!("invalid junction-clustering options: {error}"))
+}
+
+/// Junction-cluster with default options, returning invalid configuration errors.
+pub fn try_clusterj(
+    reads: &[Transcript],
+    references: Option<&[Transcript]>,
+    threads: usize,
+    sw_score: i64,
+    batch_size: usize,
+    batch_rounds: usize,
+) -> Result<ClusterResult, crate::config::ParameterError> {
+    try_clusterj_with_name2_mode(
         reads,
         references,
         threads,
@@ -1773,7 +1854,30 @@ pub fn clusterj_with_name2_mode(
     batch_rounds: usize,
     name2_mode: Name2Mode,
 ) -> ClusterResult {
-    clusterj_with_options(
+    try_clusterj_with_name2_mode(
+        reads,
+        references,
+        threads,
+        sw_score,
+        batch_size,
+        batch_rounds,
+        name2_mode,
+    )
+    .unwrap_or_else(|error| panic!("invalid junction-clustering options: {error}"))
+}
+
+/// Junction-cluster with an explicit name2 mode, returning invalid configuration errors.
+#[allow(clippy::too_many_arguments)]
+pub fn try_clusterj_with_name2_mode(
+    reads: &[Transcript],
+    references: Option<&[Transcript]>,
+    threads: usize,
+    sw_score: i64,
+    batch_size: usize,
+    batch_rounds: usize,
+    name2_mode: Name2Mode,
+) -> Result<ClusterResult, crate::config::ParameterError> {
+    try_clusterj_with_options(
         reads,
         references,
         threads,
@@ -1800,20 +1904,123 @@ pub fn clusterj_with_options(
     three_prime_options: ThreePrimeMergeOptions,
     junction_correction: JunctionCorrectionOptions,
 ) -> ClusterResult {
+    try_clusterj_with_options(
+        reads,
+        references,
+        threads,
+        sw_score,
+        batch_size,
+        batch_rounds,
+        name2_mode,
+        sl_options,
+        three_prime_options,
+        junction_correction,
+    )
+    .unwrap_or_else(|error| panic!("invalid junction-clustering options: {error}"))
+}
+
+/// Junction-cluster with explicit options, returning invalid configuration errors.
+#[allow(clippy::too_many_arguments)]
+pub fn try_clusterj_with_options(
+    reads: &[Transcript],
+    references: Option<&[Transcript]>,
+    threads: usize,
+    sw_score: i64,
+    batch_size: usize,
+    batch_rounds: usize,
+    name2_mode: Name2Mode,
+    sl_options: SlMergeOptions,
+    three_prime_options: ThreePrimeMergeOptions,
+    junction_correction: JunctionCorrectionOptions,
+) -> Result<ClusterResult, crate::config::ParameterError> {
+    let (result, summary) = try_clusterj_with_options_and_summary(
+        reads,
+        references,
+        threads,
+        sw_score,
+        batch_size,
+        batch_rounds,
+        name2_mode,
+        sl_options,
+        three_prime_options,
+        junction_correction,
+    )?;
+    summary.emit();
+    Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn clusterj_with_options_and_summary(
+    reads: &[Transcript],
+    references: Option<&[Transcript]>,
+    threads: usize,
+    sw_score: i64,
+    batch_size: usize,
+    batch_rounds: usize,
+    name2_mode: Name2Mode,
+    sl_options: SlMergeOptions,
+    three_prime_options: ThreePrimeMergeOptions,
+    junction_correction: JunctionCorrectionOptions,
+) -> (ClusterResult, JunctionClusterSummary) {
+    try_clusterj_with_options_and_summary(
+        reads,
+        references,
+        threads,
+        sw_score,
+        batch_size,
+        batch_rounds,
+        name2_mode,
+        sl_options,
+        three_prime_options,
+        junction_correction,
+    )
+    .unwrap_or_else(|error| panic!("invalid junction-clustering options: {error}"))
+}
+
+/// Junction-cluster with summary output, returning invalid configuration errors.
+#[allow(clippy::too_many_arguments)]
+pub fn try_clusterj_with_options_and_summary(
+    reads: &[Transcript],
+    references: Option<&[Transcript]>,
+    threads: usize,
+    sw_score: i64,
+    batch_size: usize,
+    batch_rounds: usize,
+    name2_mode: Name2Mode,
+    sl_options: SlMergeOptions,
+    three_prime_options: ThreePrimeMergeOptions,
+    junction_correction: JunctionCorrectionOptions,
+) -> Result<(ClusterResult, JunctionClusterSummary), crate::config::ParameterError> {
+    let threads = crate::config::WorkerThreads::new(threads)?.get();
+    crate::config::BatchRounds::new(batch_rounds)?;
+    sl_options.validate()?;
+    three_prime_options.validate()?;
+    junction_correction.validate()?;
+    crate::identity::validate_read_ids(reads)
+        .map_err(crate::config::ParameterError::invalid_identity)?;
     let references = match references {
         Some(references) => references,
         None => {
-            return ClusterResult {
-                isoforms: Vec::new(),
-                read_to_isoform: Vec::new(),
-                unused: Vec::new(),
-            }
+            let summary = JunctionClusterSummary {
+                input_reads: reads.len(),
+                represented_reads: 0,
+                mapping_rows: 0,
+                rare_reads: 0,
+                unmatched_reads: reads.len(),
+                unused_reads: reads.len(),
+            };
+            return Ok((
+                ClusterResult {
+                    isoforms: Vec::new(),
+                    read_to_isoform: Vec::new(),
+                    unused: reads.to_vec(),
+                },
+                summary,
+            ));
         }
     };
-
-    let threads = threads.max(1);
-    let ref_names: std::sync::Arc<HashSet<String>> =
-        std::sync::Arc::new(references.iter().map(|tx| tx.name.clone()).collect());
+    crate::identity::validate_reference_ids(references)
+        .map_err(crate::config::ParameterError::invalid_identity)?;
 
     let mut refs_by_key: HashMap<PartitionKey, Vec<usize>> = HashMap::new();
     for (idx, tx) in references.iter().enumerate() {
@@ -1827,12 +2034,14 @@ pub fn clusterj_with_options(
     }
 
     let mut reads_by_key: HashMap<PartitionKey, Vec<usize>> = HashMap::new();
+    let mut unmatched_read_indices: Vec<usize> = Vec::new();
     for (idx, read) in reads.iter().enumerate() {
         let key = PartitionKey {
             chrom: read.chrom.clone(),
             strand: read.strand,
         };
         if !refs_by_key.contains_key(&key) {
+            unmatched_read_indices.push(idx);
             continue;
         }
         reads_by_key.entry(key).or_default().push(idx);
@@ -1840,7 +2049,8 @@ pub fn clusterj_with_options(
 
     let mut all_isoforms: Vec<Transcript> = Vec::new();
     let mut all_pairs: Vec<(String, String)> = Vec::new();
-    let mut all_unused: Vec<Transcript> = Vec::new();
+    let mut represented_read_indices: HashSet<usize> = HashSet::new();
+    let mut rare_read_indices: Vec<usize> = Vec::new();
 
     let mut keys: Vec<PartitionKey> = refs_by_key.keys().cloned().collect();
     keys.sort_by(|a, b| a.chrom.cmp(&b.chrom).then_with(|| a.strand.cmp(&b.strand)));
@@ -1862,7 +2072,6 @@ pub fn clusterj_with_options(
                 reads,
                 &item.ref_indices,
                 &item.read_indices,
-                &ref_names,
                 sw_score,
                 batch_size,
                 batch_rounds,
@@ -1883,7 +2092,6 @@ pub fn clusterj_with_options(
             for _ in 0..worker_count {
                 let queue = Arc::clone(&queue);
                 let tx = tx.clone();
-                let ref_names = Arc::clone(&ref_names);
 
                 scope.spawn(move || loop {
                     let item = {
@@ -1899,7 +2107,6 @@ pub fn clusterj_with_options(
                         reads,
                         &item.ref_indices,
                         &item.read_indices,
-                        &ref_names,
                         sw_score,
                         batch_size,
                         batch_rounds,
@@ -1925,25 +2132,127 @@ pub fn clusterj_with_options(
     for part in parts.into_iter().flatten() {
         all_isoforms.extend(part.isoforms);
         all_pairs.extend(part.pairs);
-        all_unused.extend(part.unused);
+        represented_read_indices.extend(part.represented_read_indices);
+        rare_read_indices.extend(part.rare_read_indices);
+        unmatched_read_indices.extend(part.unmatched_read_indices);
     }
 
-    ClusterResult {
-        isoforms: all_isoforms,
-        read_to_isoform: all_pairs,
-        unused: all_unused,
-    }
+    rare_read_indices.sort_unstable();
+    unmatched_read_indices.sort_unstable();
+    let mut unused_read_indices = rare_read_indices.clone();
+    unused_read_indices.extend(unmatched_read_indices.iter().copied());
+    unused_read_indices.sort_unstable();
+
+    let unused_instance_set: HashSet<usize> = unused_read_indices.iter().copied().collect();
+    assert_eq!(
+        unused_instance_set.len(),
+        unused_read_indices.len(),
+        "junction clustering classified a read instance as unused more than once"
+    );
+    assert!(
+        represented_read_indices.is_disjoint(&unused_instance_set),
+        "junction clustering classified a read instance as both represented and unused"
+    );
+    assert!(
+        represented_read_indices
+            .iter()
+            .chain(unused_instance_set.iter())
+            .all(|idx| *idx < reads.len()),
+        "junction clustering produced an out-of-range read instance"
+    );
+    assert_eq!(
+        represented_read_indices.len() + unused_instance_set.len(),
+        reads.len(),
+        "junction clustering violated read-instance conservation"
+    );
+
+    all_pairs.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    all_isoforms.sort_by(|left, right| left.name.cmp(&right.name));
+    crate::identity::validate_isoform_ids(&all_isoforms)
+        .map_err(crate::config::ParameterError::invalid_identity)?;
+    let mut all_unused: Vec<Transcript> = unused_read_indices
+        .iter()
+        .map(|&idx| reads[idx].clone())
+        .collect();
+    all_unused.sort_by(crate::identity::transcript_order);
+    let summary = JunctionClusterSummary {
+        input_reads: reads.len(),
+        represented_reads: represented_read_indices.len(),
+        mapping_rows: all_pairs.len(),
+        rare_reads: rare_read_indices.len(),
+        unmatched_reads: unmatched_read_indices.len(),
+        unused_reads: unused_read_indices.len(),
+    };
+
+    Ok((
+        ClusterResult {
+            isoforms: all_isoforms,
+            read_to_isoform: all_pairs,
+            unused: all_unused,
+        },
+        summary,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use proptest::prelude::*;
 
     use crate::model::{Bed12Attrs, Coord, Interval, Strand, Transcript};
 
     use super::*;
 
+    #[test]
+    fn name2_coverage_sum_is_independent_of_hash_iteration_order() {
+        let expected = (1..=12)
+            .map(|denominator| 1.0 / f64::from(denominator))
+            .sum::<f64>();
+        let expected_payload = format!("|{expected}");
+
+        for _ in 0..64 {
+            let mut tracks = (0..12)
+                .map(|index| {
+                    Track::reference(make_tx(
+                        &format!("isoform_{index:02}"),
+                        Strand::Plus,
+                        &[(100, 200)],
+                        "isoform_anno",
+                        100,
+                    ))
+                })
+                .collect::<Vec<_>>();
+            for read_index in 0..12 {
+                let instance = ReadInstance {
+                    index: read_index,
+                    name: format!("read_{read_index:02}"),
+                };
+                for track in tracks.iter_mut().take(read_index + 1) {
+                    track.subreads.insert(instance.clone());
+                }
+            }
+
+            update_name2(&mut tracks, Name2Mode::Coverage);
+            assert_eq!(
+                tracks[0].tx.metadata().name2_field(),
+                Some(expected_payload.as_str())
+            );
+        }
+    }
+
     fn make_tx(
+        name: &str,
+        strand: Strand,
+        exons: &[(u32, u32)],
+        ttype: &str,
+        score: u32,
+    ) -> Transcript {
+        make_tx_on("chr1", name, strand, exons, ttype, score)
+    }
+
+    fn make_tx_on(
+        chrom: &str,
         name: &str,
         strand: Strand,
         exons: &[(u32, u32)],
@@ -1958,7 +2267,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         Transcript::new(
-            "chr1".to_owned(),
+            chrom.to_owned(),
             strand,
             Coord::new(tx_start),
             Coord::new(tx_end),
@@ -1984,6 +2293,38 @@ mod tests {
         .unwrap()
     }
 
+    fn make_plain_tx_on(
+        chrom: &str,
+        name: &str,
+        strand: Strand,
+        exons: &[(u32, u32)],
+        score: u32,
+    ) -> Transcript {
+        let tx_start = exons.iter().map(|(start, _)| *start).min().unwrap_or(0);
+        let tx_end = exons.iter().map(|(_, end)| *end).max().unwrap_or(0);
+        let exons = exons
+            .iter()
+            .map(|(start, end)| Interval::new(Coord::new(*start), Coord::new(*end)).unwrap())
+            .collect::<Vec<_>>();
+
+        Transcript::new(
+            chrom.to_owned(),
+            strand,
+            Coord::new(tx_start),
+            Coord::new(tx_end),
+            name.to_owned(),
+            exons,
+            Bed12Attrs {
+                score,
+                thick_start: Coord::new(tx_start),
+                thick_end: Coord::new(tx_end),
+                item_rgb: "0".to_owned(),
+                extra_fields: Vec::new(),
+            },
+        )
+        .unwrap()
+    }
+
     fn make_track(
         name: &str,
         strand: Strand,
@@ -1991,12 +2332,58 @@ mod tests {
         ttype: &str,
         score: u32,
     ) -> Track {
+        static NEXT_READ_INSTANCE: AtomicUsize = AtomicUsize::new(0);
+
         let tx = make_tx(name, strand, exons, ttype, score);
-        let mut subreads = HashSet::new();
-        if ttype != "isoform_anno" {
-            subreads.insert(name.to_owned());
+        if ttype == "isoform_anno" {
+            Track::reference(tx)
+        } else {
+            Track::read(tx, NEXT_READ_INSTANCE.fetch_add(1, Ordering::Relaxed))
         }
-        Track { tx, subreads }
+    }
+
+    fn has_subread(track: &Track, name: &str) -> bool {
+        track.subreads.iter().any(|subread| subread.name == name)
+    }
+
+    fn cluster_with_summary(
+        reads: &[Transcript],
+        references: Option<&[Transcript]>,
+    ) -> (ClusterResult, JunctionClusterSummary) {
+        clusterj_with_options_and_summary(
+            reads,
+            references,
+            1,
+            DEFAULT_SW_SCORE,
+            0,
+            1,
+            Name2Mode::Full,
+            SlMergeOptions::default(),
+            ThreePrimeMergeOptions::default(),
+            JunctionCorrectionOptions::default(),
+        )
+    }
+
+    fn mapped_isoform_id<'a>(result: &'a ClusterResult, read_id: &str) -> &'a str {
+        result
+            .read_to_isoform
+            .iter()
+            .find_map(|(mapped_read, isoform_id)| {
+                (mapped_read == read_id).then_some(isoform_id.as_str())
+            })
+            .unwrap_or_else(|| panic!("missing mapping for read {read_id:?}"))
+    }
+
+    fn decoded_subreads(tx: &Transcript) -> HashSet<String> {
+        crate::identity::decode_name2(
+            tx.extra_fields
+                .first()
+                .map(String::as_str)
+                .unwrap_or("none"),
+        )
+        .unwrap()
+        .into_iter()
+        .collect()
     }
 
     #[test]
@@ -2132,8 +2519,19 @@ mod tests {
             5,
         );
         assert_eq!(keep_fuzzy, vec![0]);
-        assert!(fuzzy_tracks[0].subreads.contains("long_chain"));
-        assert!(fuzzy_tracks[0].subreads.contains("near_chain"));
+        assert!(has_subread(&fuzzy_tracks[0], "long_chain"));
+        assert!(has_subread(&fuzzy_tracks[0], "near_chain"));
+    }
+
+    #[test]
+    fn fuzzy_boundary_comparison_is_one_to_one() {
+        let query = [99, 101, 111];
+        let reference = [100, 110, 112];
+
+        assert!(!junctions_equal(&query, &reference, 2));
+        let (missed, extra) = compare_ei_by_boundary(&query, &reference, 2);
+        assert_eq!(missed.len(), 1);
+        assert_eq!(extra.len(), 1);
     }
 
     #[test]
@@ -2177,9 +2575,16 @@ mod tests {
                 offset: 0,
             },
         );
-        let exact_names: HashSet<_> = exact.isoforms.iter().map(|tx| tx.name.as_str()).collect();
-        assert!(exact_names.contains("long_chain"));
-        assert!(exact_names.contains("near_chain"));
+        let exact_targets: HashSet<_> = exact
+            .read_to_isoform
+            .iter()
+            .filter(|(read, _)| read == "long_chain" || read == "near_chain")
+            .map(|(_, isoform)| isoform.as_str())
+            .collect();
+        assert_eq!(exact_targets.len(), 2);
+        assert!(exact_targets
+            .iter()
+            .all(|id| id.starts_with(crate::identity::NOVEL_ISOFORM_PREFIX)));
 
         let fuzzy = clusterj_with_options(
             &reads,
@@ -2196,13 +2601,17 @@ mod tests {
                 offset: 5,
             },
         );
-        let fuzzy_names: HashSet<_> = fuzzy.isoforms.iter().map(|tx| tx.name.as_str()).collect();
-        assert!(fuzzy_names.contains("long_chain"));
-        assert!(!fuzzy_names.contains("near_chain"));
-        assert!(fuzzy
+        let fuzzy_targets: HashSet<_> = fuzzy
             .read_to_isoform
             .iter()
-            .any(|(read, isoform)| read == "near_chain" && isoform == "long_chain"));
+            .filter(|(read, _)| read == "long_chain" || read == "near_chain")
+            .map(|(_, isoform)| isoform.as_str())
+            .collect();
+        assert_eq!(fuzzy_targets.len(), 1);
+        assert_eq!(
+            mapped_isoform_id(&fuzzy, "near_chain"),
+            mapped_isoform_id(&fuzzy, "long_chain")
+        );
     }
 
     proptest! {
@@ -2269,16 +2678,7 @@ mod tests {
             1,
         );
 
-        let tracks = vec![
-            Track {
-                tx: reference,
-                subreads: HashSet::new(),
-            },
-            Track {
-                tx: read,
-                subreads: HashSet::new(),
-            },
-        ];
+        let tracks = vec![Track::reference(reference), Track::read(read, 0)];
         let (corrected, rare) = flow_junction_correct(tracks, 2, 10);
         assert!(rare.is_empty());
 
@@ -2293,11 +2693,7 @@ mod tests {
         ];
         assert_eq!(corrected_read.tx.exons, expected);
         assert_eq!(
-            corrected_read
-                .tx
-                .extra_fields
-                .get(TTYPE_COL)
-                .map(String::as_str),
+            corrected_read.tx.metadata().transcript_type(),
             Some("nanopore_read_corrected")
         );
     }
@@ -2319,16 +2715,7 @@ mod tests {
             1,
         );
 
-        let tracks = vec![
-            Track {
-                tx: reference,
-                subreads: HashSet::new(),
-            },
-            Track {
-                tx: read,
-                subreads: HashSet::new(),
-            },
-        ];
+        let tracks = vec![Track::reference(reference), Track::read(read, 0)];
         let (corrected, rare) = flow_junction_correct(tracks, 2, 10);
 
         assert!(rare
@@ -2337,6 +2724,49 @@ mod tests {
         assert!(!corrected
             .iter()
             .any(|track| track.tx.name == "read_uncorrectable"));
+    }
+
+    #[test]
+    fn junction_correction_rejects_a_snap_outside_the_read_span() {
+        let reference = make_tx(
+            "ref",
+            Strand::Plus,
+            &[(80, 90), (200, 220)],
+            "isoform_anno",
+            100,
+        );
+        let read = make_tx(
+            "read",
+            Strand::Plus,
+            &[(100, 101), (201, 210)],
+            "nanopore_read",
+            100,
+        );
+        let original_exons = read.exons.clone();
+
+        let tracks = vec![Track::reference(reference), Track::read(read, 0)];
+        let (corrected, rare) = flow_junction_correct(tracks, 5, 15);
+
+        assert_eq!(
+            corrected
+                .iter()
+                .map(|track| track.tx.name.as_str())
+                .collect::<Vec<_>>(),
+            ["ref"]
+        );
+        assert_eq!(rare.len(), 1);
+        assert_eq!(rare[0].tx.name, "read");
+        assert_eq!(rare[0].tx.exons, original_exons);
+    }
+
+    #[test]
+    fn corrected_junction_rebuild_rejects_duplicate_boundaries() {
+        assert!(rebuild_exons_from_junctions(
+            Coord::new(100),
+            Coord::new(210),
+            &[110, 110, 200, 200],
+        )
+        .is_none());
     }
 
     #[test]
@@ -2485,28 +2915,26 @@ mod tests {
         let result = clusterj_with_name2_mode(&reads, Some(&refs), 1, 11, 0, 1, Name2Mode::Full);
         assert!(result.unused.is_empty());
 
-        assert!(result
-            .read_to_isoform
-            .iter()
-            .any(|(read_id, iso_id)| read_id == "read1" && iso_id == "read1"));
+        let stable_id = mapped_isoform_id(&result, "read1").to_owned();
+        assert!(stable_id.starts_with(crate::identity::NOVEL_ISOFORM_PREFIX));
 
         let read_isoform = result
             .isoforms
             .iter()
-            .find(|tx| tx.name == "read1")
+            .find(|tx| tx.name == stable_id)
             .expect("read isoform missing");
         let name2 = read_isoform
             .extra_fields
             .first()
             .map(String::as_str)
             .unwrap_or("");
-        let sub_part = name2.split(",|").next().unwrap_or("");
-        assert!(sub_part.split(',').any(|token| token == "read1"));
+        assert!(name2.starts_with("tc_name2_v1:"));
+        assert!(decoded_subreads(read_isoform).contains("read1"));
 
-        let counts = crate::count::count_by_subreads(&result.isoforms, &refs);
+        let counts = crate::count::count_by_subreads(&result.isoforms, &refs).unwrap();
         let read_count = counts
             .iter()
-            .find(|record| record.isoform_id == "read1")
+            .find(|record| record.isoform_id == stable_id)
             .expect("missing count record for read isoform");
         assert!((read_count.count - 1.0).abs() < 1e-9);
     }
@@ -2530,10 +2958,11 @@ mod tests {
 
         let result =
             clusterj_with_name2_mode(&reads, Some(&refs), 1, 11, 0, 1, Name2Mode::Coverage);
+        let stable_id = mapped_isoform_id(&result, "read1").to_owned();
         let read_isoform = result
             .isoforms
             .iter()
-            .find(|tx| tx.name == "read1")
+            .find(|tx| tx.name == stable_id)
             .expect("read isoform missing");
         let name2 = read_isoform
             .extra_fields
@@ -2542,10 +2971,7 @@ mod tests {
             .unwrap_or("");
         assert!(name2.starts_with('|'));
         assert!(!name2.contains("read1"));
-        assert!(result
-            .read_to_isoform
-            .iter()
-            .any(|(read_id, iso_id)| read_id == "read1" && iso_id == "read1"));
+        assert!(stable_id.starts_with(crate::identity::NOVEL_ISOFORM_PREFIX));
     }
 
     #[test]
@@ -2566,10 +2992,11 @@ mod tests {
         )];
 
         let result = clusterj_with_name2_mode(&reads, Some(&refs), 1, 11, 0, 1, Name2Mode::None);
+        let stable_id = mapped_isoform_id(&result, "read1").to_owned();
         let read_isoform = result
             .isoforms
             .iter()
-            .find(|tx| tx.name == "read1")
+            .find(|tx| tx.name == stable_id)
             .expect("read isoform missing");
         let name2 = read_isoform
             .extra_fields
@@ -2577,10 +3004,7 @@ mod tests {
             .map(String::as_str)
             .unwrap_or("");
         assert_eq!(name2, "none");
-        assert!(result
-            .read_to_isoform
-            .iter()
-            .any(|(read_id, iso_id)| read_id == "read1" && iso_id == "read1"));
+        assert!(stable_id.starts_with(crate::identity::NOVEL_ISOFORM_PREFIX));
     }
 
     #[test]
@@ -2617,15 +3041,10 @@ mod tests {
         assert!(iso_names.contains("ref_b"));
         assert!(!iso_names.contains("read_trunc"));
 
-        let subread_sets: HashMap<&str, HashSet<&str>> = result
+        let subread_sets: HashMap<&str, HashSet<String>> = result
             .isoforms
             .iter()
-            .map(|tx| {
-                let raw = tx.extra_fields.first().map(|s| s.as_str()).unwrap_or("");
-                let sub = raw.split(",|").next().unwrap_or("");
-                let set: HashSet<&str> = sub.split(',').filter(|s| !s.is_empty()).collect();
-                (tx.name.as_str(), set)
-            })
+            .map(|tx| (tx.name.as_str(), decoded_subreads(tx)))
             .collect();
 
         assert!(subread_sets.get("ref_a").unwrap().contains("read_trunc"));
@@ -2643,9 +3062,9 @@ mod tests {
         let keep = junction_simple_merge(&mut tracks, 11);
 
         assert_eq!(keep, vec![2]);
-        assert!(tracks[2].subreads.contains("long_sl"));
-        assert!(tracks[2].subreads.contains("short_sl"));
-        assert!(tracks[2].subreads.contains("same_sl"));
+        assert!(has_subread(&tracks[2], "long_sl"));
+        assert!(has_subread(&tracks[2], "short_sl"));
+        assert!(has_subread(&tracks[2], "same_sl"));
     }
 
     #[test]
@@ -2670,8 +3089,8 @@ mod tests {
         let keep = junction_simple_merge(&mut tracks, 11);
 
         assert_eq!(keep, vec![0]);
-        assert!(tracks[0].subreads.contains("long_sl"));
-        assert!(tracks[0].subreads.contains("short_sl"));
+        assert!(has_subread(&tracks[0], "long_sl"));
+        assert!(has_subread(&tracks[0], "short_sl"));
     }
 
     #[test]
@@ -2696,7 +3115,7 @@ mod tests {
         let keep = junction_simple_merge(&mut tracks, 11);
 
         assert_eq!(keep, vec![0]);
-        assert!(tracks[0].subreads.contains("short_sl"));
+        assert!(has_subread(&tracks[0], "short_sl"));
     }
 
     #[test]
@@ -2729,8 +3148,10 @@ mod tests {
         let iso_names: HashSet<_> = result.isoforms.iter().map(|tx| tx.name.as_str()).collect();
 
         assert!(iso_names.contains("ref"));
-        assert!(iso_names.contains("alt_sl_a"));
-        assert!(!iso_names.contains("alt_sl_b"));
+        let retained = mapped_isoform_id(&result, "alt_sl_a");
+        assert_eq!(retained, mapped_isoform_id(&result, "alt_sl_b"));
+        assert!(retained.starts_with(crate::identity::NOVEL_ISOFORM_PREFIX));
+        assert!(iso_names.contains(retained));
     }
 
     #[test]
@@ -2784,21 +3205,25 @@ mod tests {
         let iso_names: HashSet<_> = result.isoforms.iter().map(|tx| tx.name.as_str()).collect();
 
         assert!(iso_names.contains("ref"));
-        assert!(iso_names.contains("early_stop_a"));
-        assert!(!iso_names.contains("early_stop_b"));
-        assert!(!iso_names.contains("early_stop_c"));
-        assert!(!iso_names.contains("early_stop_d"));
-        assert!(!iso_names.contains("early_stop_e"));
+        let retained = mapped_isoform_id(&result, "early_stop_a");
+        assert!(retained.starts_with(crate::identity::NOVEL_ISOFORM_PREFIX));
+        for read in [
+            "early_stop_b",
+            "early_stop_c",
+            "early_stop_d",
+            "early_stop_e",
+        ] {
+            assert_eq!(mapped_isoform_id(&result, read), retained);
+        }
 
         let early_stop_tx = result
             .isoforms
             .iter()
-            .find(|tx| tx.name == "early_stop_a")
+            .find(|tx| tx.name == retained)
             .expect("early-stop isoform missing");
-        assert!(early_stop_tx
-            .extra_fields
-            .first()
-            .is_some_and(|name2| name2.contains("early_stop_b") && name2.contains("early_stop_e")));
+        let early_stop_reads = decoded_subreads(early_stop_tx);
+        assert!(early_stop_reads.contains("early_stop_b"));
+        assert!(early_stop_reads.contains("early_stop_e"));
     }
 
     #[test]
@@ -2913,7 +3338,50 @@ mod tests {
         let iso_names: HashSet<_> = result.isoforms.iter().map(|tx| tx.name.as_str()).collect();
 
         assert!(iso_names.contains("ref"));
-        assert!(iso_names.contains("read_sl_trunc_b"));
+        let retained = mapped_isoform_id(&result, "read_sl_trunc_a");
+        assert_eq!(retained, mapped_isoform_id(&result, "read_sl_trunc_b"));
+        assert!(retained.starts_with(crate::identity::NOVEL_ISOFORM_PREFIX));
+    }
+
+    #[test]
+    fn batching_preserves_distinct_alignments_with_the_same_read_id() {
+        let refs = vec![make_tx(
+            "ref",
+            Strand::Plus,
+            &[(80, 170)],
+            "isoform_anno",
+            100,
+        )];
+        let reads = vec![
+            make_tx(
+                "duplicate_id",
+                Strand::Plus,
+                &[(50, 150)],
+                "nanopore_read",
+                100,
+            ),
+            make_tx(
+                "duplicate_id",
+                Strand::Plus,
+                &[(100, 200)],
+                "nanopore_read",
+                100,
+            ),
+        ];
+
+        let unbatched =
+            clusterj_with_name2_mode(&reads, Some(&refs), 1, 11, 0, 10, Name2Mode::Full);
+        let batched = clusterj_with_name2_mode(&reads, Some(&refs), 1, 11, 1, 10, Name2Mode::Full);
+
+        assert_eq!(batched.isoforms, unbatched.isoforms);
+        assert_eq!(batched.read_to_isoform, unbatched.read_to_isoform);
+        let mapped = batched
+            .read_to_isoform
+            .iter()
+            .filter(|(read_id, _)| read_id == "duplicate_id")
+            .map(|(_, isoform_id)| isoform_id)
+            .collect::<HashSet<_>>();
+        assert_eq!(mapped.len(), 2);
     }
 
     #[test]
@@ -2943,12 +3411,12 @@ mod tests {
         ];
 
         let protected = clusterj_with_name2_mode(&reads, Some(&refs), 1, 11, 0, 1, Name2Mode::Full);
-        let protected_names: HashSet<_> = protected
-            .isoforms
-            .iter()
-            .map(|tx| tx.name.as_str())
-            .collect();
-        assert!(protected_names.contains("read_sl_trunc_b"));
+        let protected_target = mapped_isoform_id(&protected, "read_sl_trunc_a");
+        assert_eq!(
+            protected_target,
+            mapped_isoform_id(&protected, "read_sl_trunc_b")
+        );
+        assert!(protected_target.starts_with(crate::identity::NOVEL_ISOFORM_PREFIX));
 
         for batch_size in [0, 1] {
             let no_signal = clusterj_with_name2_mode(
@@ -3024,7 +3492,8 @@ mod tests {
         );
 
         let counts =
-            crate::count::count_by_read_to_isoform(&result.isoforms, &result.read_to_isoform);
+            crate::count::count_by_read_to_isoform(&result.isoforms, &result.read_to_isoform)
+                .unwrap();
         let ref_count = counts
             .iter()
             .find(|record| record.isoform_id == "ref")
@@ -3062,13 +3531,14 @@ mod tests {
         let iso_names: HashSet<_> = result.isoforms.iter().map(|tx| tx.name.as_str()).collect();
 
         assert!(iso_names.contains("ref"));
-        assert!(iso_names.contains("terminal_sl_b"));
-        assert!(!iso_names.contains("terminal_sl_a"));
+        let retained = mapped_isoform_id(&result, "terminal_sl_a");
+        assert_eq!(retained, mapped_isoform_id(&result, "terminal_sl_b"));
+        assert!(retained.starts_with(crate::identity::NOVEL_ISOFORM_PREFIX));
         assert_eq!(
             result.read_to_isoform,
             vec![
-                ("terminal_sl_a".to_owned(), "terminal_sl_b".to_owned()),
-                ("terminal_sl_b".to_owned(), "terminal_sl_b".to_owned()),
+                ("terminal_sl_a".to_owned(), retained.to_owned()),
+                ("terminal_sl_b".to_owned(), retained.to_owned()),
             ]
         );
     }
@@ -3125,6 +3595,298 @@ mod tests {
     }
 
     #[test]
+    fn explicit_provenance_protects_plain_reference_and_maps_annotated_read() {
+        let refs = vec![make_plain_tx_on(
+            "chr1",
+            "ref_plain",
+            Strand::Plus,
+            &[(100, 110), (120, 130), (140, 150)],
+            100,
+        )];
+        // Biological annotation must not override the fact that this record came from the reads
+        // input.
+        let reads = vec![make_tx(
+            "read_with_reference_annotation",
+            Strand::Plus,
+            &[(100, 110), (120, 130), (140, 150)],
+            "isoform_anno",
+            1,
+        )];
+
+        let (result, summary) = cluster_with_summary(&reads, Some(&refs));
+
+        assert_eq!(result.isoforms.len(), 1);
+        assert_eq!(result.isoforms[0].name, "ref_plain");
+        assert_eq!(
+            result.read_to_isoform,
+            vec![(
+                "read_with_reference_annotation".to_owned(),
+                "ref_plain".to_owned()
+            )]
+        );
+        assert!(result.unused.is_empty());
+        assert_eq!(summary.input_reads, 1);
+        assert_eq!(summary.represented_reads, 1);
+        assert_eq!(summary.mapping_rows, 1);
+    }
+
+    #[test]
+    fn read_id_identical_to_reference_id_is_not_suppressed() {
+        let refs = vec![make_plain_tx_on(
+            "chr1",
+            "shared_id",
+            Strand::Plus,
+            &[(100, 110), (120, 130)],
+            100,
+        )];
+        let reads = vec![make_plain_tx_on(
+            "chr1",
+            "shared_id",
+            Strand::Plus,
+            &[(100, 110), (120, 130)],
+            1,
+        )];
+
+        let (result, summary) = cluster_with_summary(&reads, Some(&refs));
+
+        assert_eq!(
+            result.read_to_isoform,
+            vec![("shared_id".to_owned(), "shared_id".to_owned())]
+        );
+        assert!(result.unused.is_empty());
+        assert_eq!(summary.represented_reads, 1);
+        let counts =
+            crate::count::count_by_read_to_isoform(&result.isoforms, &result.read_to_isoform)
+                .unwrap();
+        assert_eq!(counts.len(), 1);
+        assert_eq!(counts[0].isoform_id, "shared_id");
+        assert_eq!(counts[0].count, 1.0);
+    }
+
+    #[test]
+    fn unmatched_chromosome_strand_unknown_strand_and_locus_are_unused() {
+        let refs = vec![make_plain_tx_on(
+            "chr1",
+            "ref",
+            Strand::Plus,
+            &[(100, 110), (120, 130)],
+            100,
+        )];
+        let reads = vec![
+            make_plain_tx_on(
+                "chr1",
+                "read_match",
+                Strand::Plus,
+                &[(100, 110), (120, 130)],
+                1,
+            ),
+            make_plain_tx_on(
+                "chr2",
+                "read_wrong_chrom",
+                Strand::Plus,
+                &[(100, 110), (120, 130)],
+                1,
+            ),
+            make_plain_tx_on(
+                "chr1",
+                "read_wrong_strand",
+                Strand::Minus,
+                &[(100, 110), (120, 130)],
+                1,
+            ),
+            make_plain_tx_on(
+                "chr1",
+                "read_unknown_strand",
+                Strand::Unknown,
+                &[(100, 110), (120, 130)],
+                1,
+            ),
+            make_plain_tx_on(
+                "chr1",
+                "read_disjoint",
+                Strand::Plus,
+                &[(500, 510), (520, 530)],
+                1,
+            ),
+        ];
+
+        let (result, summary) = cluster_with_summary(&reads, Some(&refs));
+        let unused_names: HashSet<&str> = result.unused.iter().map(|tx| tx.name.as_str()).collect();
+
+        assert_eq!(
+            result.read_to_isoform,
+            vec![("read_match".to_owned(), "ref".to_owned())]
+        );
+        assert_eq!(
+            unused_names,
+            HashSet::from([
+                "read_wrong_chrom",
+                "read_wrong_strand",
+                "read_unknown_strand",
+                "read_disjoint",
+            ])
+        );
+        assert_eq!(summary.input_reads, 5);
+        assert_eq!(summary.represented_reads, 1);
+        assert_eq!(summary.rare_reads, 0);
+        assert_eq!(summary.unmatched_reads, 4);
+        assert_eq!(summary.unused_reads, 4);
+    }
+
+    #[test]
+    fn absent_and_empty_reference_catalogs_return_every_read_as_unused() {
+        let reads = vec![
+            make_plain_tx_on("chr1", "read_a", Strand::Plus, &[(100, 110), (120, 130)], 1),
+            make_plain_tx_on("chr2", "read_b", Strand::Unknown, &[(200, 210)], 1),
+        ];
+
+        let empty_references: Vec<Transcript> = Vec::new();
+        for references in [None, Some(empty_references.as_slice())] {
+            let (result, summary) = cluster_with_summary(&reads, references);
+            assert!(result.isoforms.is_empty());
+            assert!(result.read_to_isoform.is_empty());
+            assert_eq!(result.unused, reads);
+            assert_eq!(summary.input_reads, 2);
+            assert_eq!(summary.represented_reads, 0);
+            assert_eq!(summary.unmatched_reads, 2);
+            assert_eq!(summary.unused_reads, 2);
+        }
+    }
+
+    #[test]
+    fn duplicate_read_ids_are_conserved_as_distinct_instances() {
+        let refs = vec![make_plain_tx_on(
+            "chr1",
+            "ref",
+            Strand::Plus,
+            &[(100, 110), (120, 130)],
+            100,
+        )];
+        let reads = vec![
+            make_plain_tx_on(
+                "chr1",
+                "duplicate_id",
+                Strand::Plus,
+                &[(100, 110), (120, 130)],
+                1,
+            ),
+            make_plain_tx_on(
+                "chr2",
+                "duplicate_id",
+                Strand::Plus,
+                &[(100, 110), (120, 130)],
+                1,
+            ),
+        ];
+
+        let (result, summary) = cluster_with_summary(&reads, Some(&refs));
+
+        assert_eq!(
+            result.read_to_isoform,
+            vec![("duplicate_id".to_owned(), "ref".to_owned())]
+        );
+        assert_eq!(result.unused.len(), 1);
+        assert_eq!(result.unused[0].name, "duplicate_id");
+        assert_eq!(summary.input_reads, 2);
+        assert_eq!(summary.represented_reads, 1);
+        assert_eq!(summary.unmatched_reads, 1);
+        assert_eq!(summary.unused_reads, 1);
+    }
+
+    #[test]
+    fn duplicate_mapped_read_ids_produce_one_mapping_row_per_instance() {
+        let refs = vec![make_plain_tx_on(
+            "chr1",
+            "ref",
+            Strand::Plus,
+            &[(100, 110), (120, 130)],
+            100,
+        )];
+        let duplicate = make_plain_tx_on(
+            "chr1",
+            "duplicate_id",
+            Strand::Plus,
+            &[(100, 110), (120, 130)],
+            1,
+        );
+        let reads = vec![duplicate.clone(), duplicate];
+
+        let (result, summary) = cluster_with_summary(&reads, Some(&refs));
+
+        assert_eq!(
+            result.read_to_isoform,
+            vec![
+                ("duplicate_id".to_owned(), "ref".to_owned()),
+                ("duplicate_id".to_owned(), "ref".to_owned()),
+            ]
+        );
+        assert!(result.unused.is_empty());
+        assert_eq!(summary.input_reads, 2);
+        assert_eq!(summary.represented_reads, 2);
+        assert_eq!(summary.mapping_rows, 2);
+    }
+
+    #[test]
+    fn summary_distinguishes_rare_reads_from_unmatched_reads() {
+        let refs = vec![make_plain_tx_on(
+            "chr1",
+            "ref",
+            Strand::Plus,
+            &[(100, 110), (200, 210)],
+            100,
+        )];
+        let reads = vec![make_plain_tx_on(
+            "chr1",
+            "rare_read",
+            Strand::Plus,
+            &[(100, 150), (201, 210)],
+            1,
+        )];
+
+        let (result, summary) = cluster_with_summary(&reads, Some(&refs));
+
+        assert!(result.read_to_isoform.is_empty());
+        assert_eq!(result.unused, reads);
+        assert_eq!(summary.input_reads, 1);
+        assert_eq!(summary.represented_reads, 0);
+        assert_eq!(summary.rare_reads, 1);
+        assert_eq!(summary.unmatched_reads, 0);
+        assert_eq!(summary.unused_reads, 1);
+    }
+
+    #[test]
+    fn reference_is_never_discarded_when_support_cutoff_exceeds_reference_weight() {
+        let refs = vec![make_plain_tx_on(
+            "chr1",
+            "ref",
+            Strand::Plus,
+            &[(100, 110), (200, 210)],
+            100,
+        )];
+        let (result, summary) = clusterj_with_options_and_summary(
+            &[],
+            Some(&refs),
+            1,
+            DEFAULT_SW_SCORE,
+            0,
+            1,
+            Name2Mode::Full,
+            SlMergeOptions::default(),
+            ThreePrimeMergeOptions::default(),
+            JunctionCorrectionOptions {
+                min_support: 100,
+                offset: DEFAULT_JUNCTION_CORRECTION_OFFSET,
+            },
+        );
+
+        assert_eq!(result.isoforms.len(), 1);
+        assert_eq!(result.isoforms[0].name, "ref");
+        assert!(result.read_to_isoform.is_empty());
+        assert!(result.unused.is_empty());
+        assert_eq!(summary, JunctionClusterSummary::default());
+    }
+
+    #[test]
     fn threaded_execution_is_deterministic() {
         let refs = vec![
             make_tx(
@@ -3158,5 +3920,105 @@ mod tests {
         assert_eq!(single.isoforms, threaded.isoforms);
         assert_eq!(single.read_to_isoform, threaded.read_to_isoform);
         assert_eq!(single.unused, threaded.unused);
+    }
+
+    #[test]
+    fn stable_novel_ids_and_payloads_are_input_order_independent() {
+        let refs = vec![make_tx(
+            "ref",
+            Strand::Plus,
+            &[(100, 200)],
+            "isoform_anno",
+            100,
+        )];
+        let reads = vec![
+            make_tx("read,z|%", Strand::Plus, &[(50, 150)], "nanopore_read", 1),
+            make_tx("read,a", Strand::Plus, &[(50, 150)], "nanopore_read", 1),
+        ];
+
+        let forward = clusterj_with_name2_mode(&reads, Some(&refs), 1, 11, 0, 1, Name2Mode::Full);
+        let mut reversed_reads = reads.clone();
+        reversed_reads.reverse();
+        let reversed =
+            clusterj_with_name2_mode(&reversed_reads, Some(&refs), 4, 11, 0, 1, Name2Mode::Full);
+
+        assert_eq!(forward.isoforms, reversed.isoforms);
+        assert_eq!(forward.read_to_isoform, reversed.read_to_isoform);
+        let novel_id = mapped_isoform_id(&forward, "read,z|%");
+        assert_eq!(novel_id, mapped_isoform_id(&forward, "read,a"));
+        assert!(novel_id.starts_with(crate::identity::NOVEL_ISOFORM_PREFIX));
+        let novel = forward
+            .isoforms
+            .iter()
+            .find(|tx| tx.name == novel_id)
+            .unwrap();
+        assert_eq!(
+            decoded_subreads(novel),
+            HashSet::from(["read,z|%".to_owned(), "read,a".to_owned()])
+        );
+        assert!(novel.extra_fields[0].contains("%2C"));
+        assert!(novel.extra_fields[0].contains("%7C"));
+        assert!(novel.extra_fields[0].contains("%25"));
+    }
+
+    #[test]
+    fn clustering_rejects_duplicate_or_reserved_reference_ids() {
+        let duplicate = vec![
+            make_tx("same", Strand::Plus, &[(0, 10)], "isoform_anno", 100),
+            make_tx("same", Strand::Plus, &[(20, 30)], "isoform_anno", 100),
+        ];
+        let error = try_clusterj(&[], Some(&duplicate), 1, DEFAULT_SW_SCORE, 0, 1).unwrap_err();
+        assert!(error.to_string().contains("duplicate reference isoform id"));
+
+        let reserved = vec![make_tx(
+            &format!("{}claimed", crate::identity::NOVEL_ISOFORM_PREFIX),
+            Strand::Plus,
+            &[(0, 10)],
+            "isoform_anno",
+            100,
+        )];
+        let error = try_clusterj(&[], Some(&reserved), 1, DEFAULT_SW_SCORE, 0, 1).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("reserved novel-isoform namespace"));
+    }
+
+    #[test]
+    fn rejects_zero_threads_and_support_at_library_boundary() {
+        assert!(try_clusterj(&[], None, 0, DEFAULT_SW_SCORE, 0, 1).is_err());
+
+        assert!(try_clusterj_with_options(
+            &[],
+            None,
+            1,
+            DEFAULT_SW_SCORE,
+            0,
+            1,
+            Name2Mode::Full,
+            SlMergeOptions {
+                min_five_prime_cluster_support: 0,
+                ..SlMergeOptions::default()
+            },
+            ThreePrimeMergeOptions::default(),
+            JunctionCorrectionOptions::default(),
+        )
+        .is_err());
+
+        assert!(try_clusterj_with_options(
+            &[],
+            None,
+            1,
+            DEFAULT_SW_SCORE,
+            0,
+            1,
+            Name2Mode::Full,
+            SlMergeOptions::default(),
+            ThreePrimeMergeOptions::default(),
+            JunctionCorrectionOptions {
+                min_support: 0,
+                ..JunctionCorrectionOptions::default()
+            },
+        )
+        .is_err());
     }
 }

@@ -1,0 +1,5 @@
+transcript_id	gene_id	transcript_class	simulated_read_count	support_bin	expression_bin
+truth_known_high	GENE_HIGH	known	8	high	high
+truth_novel_high	GENE_HIGH	novel	6	high	high
+truth_known_low	GENE_LOW	known	2	low	low
+truth_novel_low	GENE_LOW	novel	2	low	low

@@ -1,23 +1,13 @@
+mod common;
+
 use std::fs;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
+use common::TestDir;
 use trackcluster_rs::annotate::addgene::AddGeneOpts;
 
-fn fresh_temp_dir(prefix: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time went backwards")
-        .as_nanos();
-    let mut dir = std::env::temp_dir();
-    dir.push(format!(
-        "trackcluster_rs_{}_{}_{}",
-        prefix,
-        std::process::id(),
-        nanos
-    ));
-    fs::create_dir_all(&dir).expect("create temp dir");
-    dir
+fn fresh_temp_dir(prefix: &str) -> TestDir {
+    TestDir::new(prefix)
 }
 
 #[test]

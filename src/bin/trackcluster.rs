@@ -1,3 +1,3 @@
 fn main() -> anyhow::Result<()> {
-    trackcluster_rs::cli::run_from_env()
+    trackcluster_rs::run_cli_from_env()
 }

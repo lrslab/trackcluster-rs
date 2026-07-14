@@ -5,10 +5,16 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  verify:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
   build:
+    needs: verify
     strategy:
       matrix:
         include:
@@ -20,33 +26,177 @@ jobs:
             os: macos-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
         with:
           toolchain: 1.90.0
           targets: ${{ matrix.target }}
 
       - name: Install cross (Linux builds)
         if: matrix.os == 'ubuntu-latest'
-        run: cargo install cross --locked
+        run: cargo install cross --locked --version 0.2.5
+
+      - name: Verify tag matches Cargo version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[0].version')
+          test "${GITHUB_REF_NAME}" = "v${version}"
 
       - name: Build
         run: |
           if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
-            cross build --release --target ${{ matrix.target }}
+            cross build --locked --release --target ${{ matrix.target }}
           else
-            cargo build --release --target ${{ matrix.target }}
+            cargo build --locked --release --target ${{ matrix.target }}
           fi
 
       - name: Package
+        shell: bash
         run: |
-          cd target/${{ matrix.target }}/release
-          tar czf ../../../trackcluster-${{ github.ref_name }}-${{ matrix.target }}.tar.gz \
-            trackcluster clusterj_batch
+          set -euo pipefail
+          archive="trackcluster-${{ github.ref_name }}-${{ matrix.target }}"
+          stage="target/release-stage/$archive"
+          mkdir -p "$stage/docs/behavior" "$stage/scripts"
+          cp "target/${{ matrix.target }}/release/trackcluster" "$stage/"
+          cp "target/${{ matrix.target }}/release/clusterj_batch" "$stage/"
+          cp README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "$stage/"
+          cp \
+            docs/CLI.md \
+            docs/FORMATS.md \
+            docs/INTERCHANGE.md \
+            docs/PIPELINE.md \
+            "$stage/docs/"
+          cp docs/behavior/cluster.md docs/behavior/desc.md "$stage/docs/behavior/"
+          cp scripts/run_full_flow_rust.sh "$stage/scripts/"
+          cp -R examples "$stage/"
+          python3 - "$stage" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+          from urllib.parse import unquote
+
+          root = Path(sys.argv[1]).resolve()
+          failures = []
+          for document in root.rglob("*.md"):
+              text = document.read_text(encoding="utf-8")
+              for target in re.findall(r"!?\[[^]]*\]\(([^)]+)\)", text):
+                  target = target.strip().split()[0]
+                  if target.startswith(("http://", "https://", "mailto:", "#")):
+                      continue
+                  relative = unquote(target.split("#", 1)[0].split("?", 1)[0])
+                  if not relative:
+                      continue
+                  resolved = (document.parent / relative).resolve()
+                  try:
+                      resolved.relative_to(root)
+                  except ValueError:
+                      failures.append(f"{document.relative_to(root)} escapes release root: {target}")
+                      continue
+                  if not resolved.exists():
+                      failures.append(f"{document.relative_to(root)} missing target: {target}")
+          if failures:
+              raise SystemExit("\n".join(failures))
+          PY
+          tar -C target/release-stage -czf "$archive.tar.gz" "$archive"
+          tar -tzf "$archive.tar.gz" > "$archive.contents"
+          required=(
+            trackcluster
+            clusterj_batch
+            README.md
+            CHANGELOG.md
+            LICENSE-MIT
+            LICENSE-APACHE
+            docs/CLI.md
+            docs/FORMATS.md
+            docs/INTERCHANGE.md
+            docs/PIPELINE.md
+            docs/behavior/cluster.md
+            docs/behavior/desc.md
+            scripts/run_full_flow_rust.sh
+            examples/README.md
+            examples/annotation.gff3
+            examples/minimal.bed
+            examples/reads.bed
+            examples/ref.bed
+            examples/samples.tsv
+            examples/S1.reads.bed
+            examples/S2.reads.bed
+          )
+          for path in "${required[@]}"; do
+            test -s "$stage/$path"
+            grep -Fx "$archive/$path" "$archive.contents" >/dev/null
+          done
+          test -x "$stage/scripts/run_full_flow_rust.sh"
+          version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[0].version')
+          grep -Fx "## $version" "$stage/CHANGELOG.md" >/dev/null
+          if grep -Ev "^$archive(/|$)" "$archive.contents"; then
+            echo "archive contains a path outside its release root"
+            exit 1
+          fi
+          if grep -F "../" "$archive.contents"; then
+            echo "archive contains a parent-directory path"
+            exit 1
+          fi
+          if grep -En 'tests/fixtures/|docs/DEMO_488\.md' "$stage/README.md"; then
+            echo "release README refers to repository-only content"
+            exit 1
+          fi
+          rm "$archive.contents"
+
+      - name: Smoke-test release archive
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="trackcluster-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          unpack=$(mktemp -d)
+          tar -xzf "$archive.tar.gz" -C "$unpack"
+          bin_dir="$unpack/$archive"
+          test -x "$bin_dir/trackcluster"
+          test -x "$bin_dir/clusterj_batch"
+          version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[0].version')
+          test "$("$bin_dir/trackcluster" --version)" = "trackcluster $version"
+          test "$("$bin_dir/clusterj_batch" --version)" = "clusterj-batch $version"
+          help=$("$bin_dir/trackcluster" --help)
+          grep -F "bam2bigg" <<<"$help"
+          grep -F "gff2bigg" <<<"$help"
+          if grep -F "import-sam" <<<"$help"; then
+            echo "removed import-sam command is still advertised"
+            exit 1
+          fi
+          "$bin_dir/clusterj_batch" --help
+          "$bin_dir/trackcluster" validate-bed \
+            --input "$bin_dir/examples/minimal.bed"
+          smoke_root=$(mktemp -d)
+          "$bin_dir/trackcluster" gff2bigg \
+            --gff "$bin_dir/examples/annotation.gff3" \
+            --out "$smoke_root/reference.bed"
+          "$bin_dir/trackcluster" validate-bed \
+            --input "$smoke_root/reference.bed"
+          "$bin_dir/trackcluster" flow \
+            --reads "$bin_dir/examples/reads.bed" \
+            --reference "$bin_dir/examples/ref.bed" \
+            --output-root "$smoke_root" \
+            --prefix release-smoke \
+            --threads 1 \
+            --force
+          test -s "$smoke_root/release-smoke_isoform.bed"
+          grep -Eq '^git_commit\t[0-9a-f]{40}$' \
+            "$smoke_root/clusterj_batch_summary.txt"
+          grep -Fx $'source_fingerprint\tclean' \
+            "$smoke_root/clusterj_batch_summary.txt"
+          "$bin_dir/scripts/run_full_flow_rust.sh" \
+            "$bin_dir/examples/reads.bed" \
+            "$bin_dir/examples/ref.bed" \
+            "$smoke_root/scripted" \
+            scripted-smoke \
+            1
+          test -s "$smoke_root/scripted/scripted-smoke_isoform.bed"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: trackcluster-${{ matrix.target }}
           path: trackcluster-*.tar.gz
@@ -54,13 +204,76 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: 1.90.0
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           merge-multiple: true
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Generate CycloneDX SBOM
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install cargo-cyclonedx --locked --version 0.5.9
+          cargo cyclonedx --format json --all-features --target all
+          sbom=$(find . -maxdepth 1 -type f \( -name '*.cdx.json' -o -name 'bom.json' \) -print -quit)
+          test -n "$sbom"
+          mv "$sbom" "trackcluster-${GITHUB_REF_NAME}.cdx.json"
+
+      - name: Generate SHA-256 checksums
+        run: sha256sum trackcluster-*.tar.gz trackcluster-*.cdx.json > SHA256SUMS
+
+      - name: Prepare curated release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[0].version')
+          python3 - "$version" <<'PY'
+          import sys
+          from pathlib import Path
+
+          version = sys.argv[1]
+          lines = Path("CHANGELOG.md").read_text(encoding="utf-8").splitlines()
+          header = f"## {version}"
+          try:
+              start = lines.index(header) + 1
+          except ValueError as error:
+              raise SystemExit(f"missing changelog section {header!r}") from error
+          end = next(
+              (index for index in range(start, len(lines)) if lines[index].startswith("## ")),
+              len(lines),
+          )
+          body = "\n".join(lines[start:end]).strip()
+          if not body:
+              raise SystemExit(f"empty changelog section {header!r}")
+          Path("RELEASE_NOTES.md").write_text(
+              f"# TrackCluster {version}\n\n{body}\n", encoding="utf-8"
+          )
+          PY
+
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
+          subject-path: |
+            trackcluster-*.tar.gz
+            trackcluster-*.cdx.json
+            SHA256SUMS
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        with:
+          body_path: RELEASE_NOTES.md
           generate_release_notes: true
-          files: trackcluster-*.tar.gz
+          files: |
+            trackcluster-*.tar.gz
+            trackcluster-*.cdx.json
+            SHA256SUMS

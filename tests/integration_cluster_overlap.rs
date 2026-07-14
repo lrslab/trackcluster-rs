@@ -1,37 +1,27 @@
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+
+use common::{assert_success, TestDir};
 
 fn repo_path(path: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(path)
 }
 
-fn fresh_temp_dir(prefix: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time went backwards")
-        .as_nanos();
-    let mut dir = std::env::temp_dir();
-    dir.push(format!(
-        "trackcluster_rs_{}_{}_{}",
-        prefix,
-        std::process::id(),
-        nanos
-    ));
-    fs::create_dir_all(&dir).expect("create temp dir");
-    dir
+fn fresh_temp_dir(prefix: &str) -> TestDir {
+    TestDir::new(prefix)
 }
 
 fn normalized_lines(path: &Path) -> Vec<String> {
     let content = fs::read_to_string(path).unwrap_or_default();
-    let mut lines: Vec<String> = content
+    let lines: Vec<String> = content
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(ToOwned::to_owned)
         .collect();
-    lines.sort();
     lines
 }
 
@@ -48,7 +38,7 @@ fn cluster_overlap_plain_bed12_reference_and_unmatched_reads_match_goldens() {
     let out_dir = fresh_temp_dir("cluster_overlap_plain");
     let out_bed = out_dir.join("isoform.bed");
 
-    let status = Command::new(exe)
+    let output = Command::new(exe)
         .args([
             "cluster",
             "-s",
@@ -58,9 +48,9 @@ fn cluster_overlap_plain_bed12_reference_and_unmatched_reads_match_goldens() {
             "-o",
             out_bed.to_str().unwrap(),
         ])
-        .status()
+        .output()
         .expect("run overlap cluster");
-    assert!(status.success());
+    assert_success(&output, "overlap-cluster golden run");
 
     let produced_mapping = out_bed.with_extension("read_to_isoform.tsv");
     let produced_unused = out_bed.with_extension("unused.bed");

@@ -24,8 +24,12 @@ Rust provides overlap-mode clustering in `src/cluster/cluster_overlap.rs`, expos
 Behavior:
 - It performs locus splitting first (span-based), then applies the same two-pass distance/merge idea using native overlap calculations (no external tools).
 - For large loci, flow/CLI can optionally pre-merge reads in batches before the final full two-pass overlap clustering (`--batch-size`, `--batch-rounds`).
-- Parameters default to the Python flow defaults and are configurable from the CLI/flow surface:
-  - `cutoff1=0.05`, `cutoff2=0.01`, `intronweight=0.5`, `scorecutoff=11`
+- The distance defaults are `cutoff1=0.05`, `cutoff2=0.01`, and
+  `intronweight=0.5` on both surfaces. The score cutoff differs by entry point:
+  direct `trackcluster cluster` defaults `--sw-score` to `11`, while
+  `trackcluster flow --cluster-mode cluster` defaults it to `-1`, consistent
+  with the flow-wide no-SL default. Pass `--sw-score 11` to flow explicitly
+  when BED score is valid SL/SW 5' evidence.
 - With a non-negative `scorecutoff`, the second pass matches the Python SL boundary behavior: a short read is collapsed only when `score < scorecutoff`; reads with `score == scorecutoff` are retained as their own track. With `--sw-score -1`, Rust treats BED scores as no valid-5' signal and ordinary short-read merging still runs.
 - In batched `flow --cluster-mode cluster` runs, per-gene overlap outputs use the `*_simple_coverage.bed` suffix and batch summary files use the `cluster_batch_*` prefix.
 
@@ -34,7 +38,9 @@ Current CLI exposure:
 - `trackcluster flow --cluster-mode cluster` runs the same overlap mode per gene after `preparedir`.
 - There is no separate `cluster_batch` binary; the dedicated batch binary remains `clusterj_batch` for junction mode.
 
-This is intended as a starting point; full parity should be validated/adjusted using goldens.
+Compatibility is guarded by frozen legacy and scientific-truth goldens. Changes
+to these merge boundaries or defaults require corresponding behavior-document
+and regression-fixture updates.
 
 ## Junction-mode correction controls
 
@@ -73,6 +79,10 @@ The CLI controls are:
 - `--3prime-cluster-offset` (default: active `--junction-correction-offset`): window used to sum nearby same-junction 3' support.
 - `--3prime-min-support` (default `5`): minimum nearby non-reference read support required for protection.
 
-The rule is strand-aware. On plus-strand transcripts, the biological 3' end is `tx_end`; on minus-strand transcripts, it is `tx_start`, so a minus-strand 3' early stop appears as a higher `tx_start`/lower genomic terminal boundary relative to the full-length isoform.
+The rule is strand-aware. On plus-strand transcripts, the biological 3' end is
+`tx_end`; on minus-strand transcripts, it is `tx_start`. The minus-strand 3'
+end lies on the lower-coordinate side, but an early stop truncates that side
+and therefore appears as a **higher** `tx_start` (a higher genomic terminal
+boundary) than the full-length isoform.
 
 Unique counting remains catalog-aware after these isoforms are retained: reads are assigned to the closest compatible isoform by junction compatibility and terminal distance, so retained 3' early-stop reads count to the shorter terminal isoform instead of being reassigned to a longer same-junction reference.

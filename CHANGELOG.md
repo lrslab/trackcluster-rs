@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+## 0.2.0
+
+This is a breaking pre-1.0 release. Before upgrading an existing workflow,
+review the [0.2.0 output migration](docs/FORMATS.md#020-output-migration),
+especially the versioned novel-isoform/name2 identities and count/description
+schemas.
+
+- Add `bam2bigg` (`bam-to-bigg` alias) for streaming pure-Rust conversion of genome-aligned BAM records to TrackCluster bigGenePred-compatible BED12+8, with a default MAPQ cutoff of `30`, BAM-stem sample grouping, and opt-in secondary/supplementary retention.
+- Add `gff2bigg` (`gff-to-bigg` alias) for deterministic conversion of GFF3 or GTF exon annotations to validated reference BED12+8 catalogs, with quote-aware syntax auto-detection, strict GFF3 parent identity checks, and configurable GFF3 gene-label attributes.
+- Add `export` for GTF 2.2, GFF3, and SQANTI3 input-audit TSV generation from a BED transcript catalog.
+- Expand `validate-bed` with an explicit `--lenient` legacy-repair subset and a schema-versioned `--report` summary while retaining strict validation by default.
+- Define the converter output contract: BAM CIGAR `N` and annotation exons form BED blocks; converter outputs carry all eight TrackCluster metadata fields and intentionally do not project CDS, UTR, or annotation phase.
+- Publish converter outputs atomically so malformed BAM/GFF/GTF input cannot replace a previous successful destination.
+- Version ambiguous output contracts: count CSV is RFC 4180 with `gene,isoform_id,count`, description tables use `trackcluster-description-v2` headers, novel isoforms use lossless `tc_novel_v1:` structural IDs, and full `name2` payloads use percent-encoded `tc_name2_v1:` values.
+- Enforce catalog and molecule identity at merge/count boundaries, including duplicate/reserved reference-ID rejection, globally unique structural novel IDs, idempotent duplicate mapping rows, and rejection of conflicting alignments for one molecule ID during unique assignment.
+- Encode validated biological gene IDs into deterministic filesystem keys, publish versioned biological-ID/key maps and per-directory identity markers, keep `--gene-list`/`--downsample-gene` in the biological-ID namespace, and reject keys reserved by top-level preparation, flow, or batch artifacts before mutation.
+- Add versioned per-gene completion manifests with request, input, tool, seed, and output-integrity fingerprints; reuse only exact verified results, publish the manifest last, and make count-only verification all-or-nothing.
+- Add record-local invalid-read recovery with auditable rejected-read TSVs, plus recoverable gene-local batch failures that exclude stale artifacts under the default continue policy; strict read and gene-error modes remain available, and batch error reports are emitted only when errors occur.
+- Make binary release archives self-contained with the changelog, core offline documentation, and synthetic runnable examples; release builds now depend on the reusable full CI workflow and smoke-test only unpacked archive contents.
+- Keep mode-specific count artifacts exact across reruns: unique modes publish auditable mapping/provenance files, while successful fractional reruns remove stale unique-only outputs.
+- Make count-only reuse fail closed on empty or conflicting prefix-scoped gene metadata, use a versioned cluster-batch gene map instead of directory discovery when prefix metadata is absent, rebuild scale factors from manifest-verified per-gene downsampling records, and refuse independently downsampled multi-gene molecules rather than publish biased abundance estimates.
+- Preserve structurally distinct alignments that share a read ID across junction-batching boundaries, reject junction snaps that would create an empty exon, and make standalone multi-sample counting tag delimiter-bearing raw read IDs exactly as manifest flow does.
+- Preserve leading/trailing whitespace in read-to-isoform TSV identities and use overflow-safe terminal-distance comparisons across the full BED coordinate domain.
+- Reject input/output and pairwise output aliases before standalone commands publish files, stage prepared generations behind an authoritative gene-list commit marker, require explicit batch gene selection outside inline preparation, and reject symlink-substituted cache manifests, artifacts, or atomic temporary files.
+- Treat `flow`, `preparedir`, and output-root recount directories as pipeline-owned trees: external inputs must stay outside them, and pre-existing symlink or hard-link aliases are rejected before any mutation; bucket scratch directories are uniquely reserved and cleaned on failure.
+- Preserve the source commit from Cargo's packaged VCS metadata, keep clean Git builds identifiable, and hash the actual tree for Cargo-package or dirty-checkout builds so edited sources cannot share cached per-gene results.
+- Remove the non-portable internal 488 walkthrough from public documentation and keep maintainer/design documents out of the crates.io source package.
+
 ## 0.1.18
 - Change the junction-mode default `--sw-score` for `clusterj`, `flow`, and `clusterj_batch` from `11` to `-1`, so no-SL/no-valid-5'-score datasets use ordinary truncation merging by default instead of treating BED scores as SL/SW 5' evidence.
 - Keep SL/SW-supported 5' protection available for scored datasets by passing an explicit non-negative cutoff such as `--sw-score 11`; platform presets still control junction, SL 5', and 3' offsets but no longer opt into score-based 5' protection implicitly.

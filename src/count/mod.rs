@@ -1,17 +1,35 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use crate::model::{Coord, Interval, Strand, Transcript};
 
 pub mod multi;
 
-const GENE_NAME_COL: usize = 5;
-const UNIQUE_ASSIGNMENT_JUNCTION_OFFSET: u32 = 15;
+pub const DEFAULT_UNIQUE_ASSIGNMENT_JUNCTION_OFFSET: u32 = 15;
 const UNIQUE_CATALOG_BIN_SIZE: u32 = 16_384;
+
+/// Options that control unique read-to-isoform assignment.
+///
+/// Callers that persist selected mappings should record these options alongside
+/// the output so that the assignment can be reproduced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UniqueAssignmentOptions {
+    /// Maximum absolute difference allowed at each end of a matched intron.
+    pub junction_offset: u32,
+}
+
+impl Default for UniqueAssignmentOptions {
+    fn default() -> Self {
+        Self {
+            junction_offset: DEFAULT_UNIQUE_ASSIGNMENT_JUNCTION_OFFSET,
+        }
+    }
+}
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct CountRecord {
+    pub gene: String,
     pub isoform_id: String,
     pub count: f64,
 }
@@ -136,73 +154,51 @@ impl SpanCandidateIndex {
     }
 }
 
-pub(crate) fn parse_subreads(tx: &Transcript) -> Vec<&str> {
-    let Some(name2) = tx.extra_fields.first() else {
-        return Vec::new();
+pub(crate) fn parse_subreads(
+    tx: &Transcript,
+) -> Result<Vec<String>, crate::identity::IdentityError> {
+    let Some(name2) = tx.metadata().name2() else {
+        return Ok(Vec::new());
     };
-    if !name2.contains(',') {
-        return Vec::new();
-    }
-    let sub_part = name2.split(",|").next().unwrap_or(name2.as_str());
-    sub_part
-        .split(',')
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .collect()
+    crate::identity::decode_name2(name2)
 }
 
-pub fn count_by_subreads(isoforms: &[Transcript], references: &[Transcript]) -> Vec<CountRecord> {
-    let ref_names: HashSet<&str> = references.iter().map(|tx| tx.name.as_str()).collect();
-
-    let mut occ: HashMap<&str, u32> = HashMap::new();
+pub(crate) fn has_embedded_subreads(
+    isoforms: &[Transcript],
+) -> Result<bool, crate::identity::IdentityError> {
     for isoform in isoforms {
-        for name in parse_subreads(isoform) {
-            if ref_names.contains(name) {
-                continue;
-            }
-            *occ.entry(name).or_insert(0) += 1;
+        if !parse_subreads(isoform)?.is_empty() {
+            return Ok(true);
         }
     }
+    Ok(false)
+}
 
-    isoforms
-        .iter()
-        .map(|isoform| {
-            let mut coverage = 0.0f64;
-            let mut subreads = parse_subreads(isoform);
-            subreads.sort_unstable();
-            for name in subreads {
-                if ref_names.contains(name) {
-                    continue;
-                }
-                let denom = occ.get(name).copied().unwrap_or(0);
-                if denom > 0 {
-                    coverage += 1.0f64 / denom as f64;
-                }
-            }
-
-            CountRecord {
-                isoform_id: isoform.name.clone(),
-                count: coverage,
-            }
-        })
-        .collect()
+pub fn count_by_subreads(
+    isoforms: &[Transcript],
+    _references: &[Transcript],
+) -> anyhow::Result<Vec<CountRecord>> {
+    let mut pairs = Vec::new();
+    for isoform in isoforms {
+        for name in parse_subreads(isoform)? {
+            pairs.push((name, isoform.name.clone()));
+        }
+    }
+    count_by_read_to_isoform(isoforms, &pairs)
 }
 
 pub fn read_to_isoform_from_subreads(
     isoforms: &[Transcript],
-    references: &[Transcript],
-) -> Vec<(String, String)> {
-    let ref_names: HashSet<&str> = references.iter().map(|tx| tx.name.as_str()).collect();
+    _references: &[Transcript],
+) -> anyhow::Result<Vec<(String, String)>> {
+    crate::identity::validate_isoform_ids(isoforms)?;
     let mut pairs = Vec::new();
     for isoform in isoforms {
-        for read_name in parse_subreads(isoform) {
-            if ref_names.contains(read_name) {
-                continue;
-            }
-            pairs.push((read_name.to_owned(), isoform.name.clone()));
+        for read_name in parse_subreads(isoform)? {
+            pairs.push((read_name, isoform.name.clone()));
         }
     }
-    pairs
+    Ok(pairs)
 }
 
 pub fn read_read_to_isoform_tsv<P: AsRef<Path>>(
@@ -214,7 +210,6 @@ pub fn read_read_to_isoform_tsv<P: AsRef<Path>>(
     let mut pairs: Vec<(String, String)> = Vec::new();
     for (line_no, line) in reader.lines().enumerate() {
         let line = line?;
-        let line = line.trim();
         if line.is_empty() {
             continue;
         }
@@ -226,13 +221,11 @@ pub fn read_read_to_isoform_tsv<P: AsRef<Path>>(
             ));
         };
 
-        let read_id = read_id.trim();
-        let isoform_id = isoform_id.trim();
-        if read_id.is_empty() || isoform_id.is_empty() {
+        if read_id.is_empty() || isoform_id.is_empty() || isoform_id.contains('\t') {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
-                    "empty read/isoform value at read_to_isoform line {}",
+                    "read_to_isoform line {} must contain exactly two non-empty TSV fields",
                     line_no + 1
                 ),
             ));
@@ -248,18 +241,38 @@ fn transcript_exon_len(tx: &Transcript) -> u64 {
     tx.exons.iter().map(|exon| u64::from(exon.len())).sum()
 }
 
-fn read_structures_by_name(reads: &[Transcript]) -> HashMap<&str, &Transcript> {
-    let mut reads_by_name: HashMap<&str, &Transcript> = HashMap::new();
-    for read in reads {
+fn same_read_alignment(left: &Transcript, right: &Transcript) -> bool {
+    left.chrom == right.chrom
+        && left.strand == right.strand
+        && left.tx_start == right.tx_start
+        && left.tx_end == right.tx_end
+        && left.exons == right.exons
+        && gene_name(left) == gene_name(right)
+}
+
+fn read_structures_by_name(reads: &[Transcript]) -> anyhow::Result<HashMap<&str, &Transcript>> {
+    let mut reads_by_name: HashMap<&str, (usize, &Transcript)> = HashMap::new();
+    for (index, read) in reads.iter().enumerate() {
         let read_id = read.name.as_str();
+        if read_id.is_empty() {
+            anyhow::bail!("read id must not be empty at reads index {index}");
+        }
         match reads_by_name.get(read_id).copied() {
-            Some(existing) if transcript_exon_len(read) <= transcript_exon_len(existing) => {}
-            _ => {
-                reads_by_name.insert(read_id, read);
+            Some((first_index, existing)) if !same_read_alignment(existing, read) => {
+                anyhow::bail!(
+                    "read id {read_id:?} has conflicting alignments at reads indices {first_index} and {index}; unique assignment requires one unambiguous structure per molecule (identical duplicate rows are allowed)"
+                );
+            }
+            Some(_) => {}
+            None => {
+                reads_by_name.insert(read_id, (index, read));
             }
         }
     }
-    reads_by_name
+    Ok(reads_by_name
+        .into_iter()
+        .map(|(read_id, (_, read))| (read_id, read))
+        .collect())
 }
 
 fn transcript_exon_overlap(left: &Transcript, right: &Transcript) -> u64 {
@@ -273,12 +286,41 @@ fn transcript_exon_overlap(left: &Transcript, right: &Transcript) -> u64 {
 }
 
 fn gene_name(tx: &Transcript) -> Option<&str> {
-    let gene = tx.extra_fields.get(GENE_NAME_COL)?.trim();
-    if gene.is_empty() || gene == "none" {
-        None
-    } else {
-        Some(gene)
+    tx.metadata()
+        .gene_id()
+        .map(str::trim)
+        .filter(|gene| !gene.is_empty() && *gene != "none")
+}
+
+fn gene_tokens(field: &str) -> impl Iterator<Item = &str> {
+    field
+        .split("||")
+        .map(str::trim)
+        .filter(|gene| !gene.is_empty() && *gene != "none")
+}
+
+fn transcript_gene_tokens(tx: &Transcript) -> impl Iterator<Item = &str> {
+    gene_name(tx).into_iter().flat_map(gene_tokens)
+}
+
+/// Gene metadata is compatible when either side is genuinely unannotated, or
+/// when the two annotated gene sets intersect. Prepared reads may carry a
+/// `GENEA||GENEB` field after overlap assignment, while a per-gene catalog
+/// record normally carries only one of those identifiers.
+fn gene_metadata_compatible(left: &Transcript, right: &Transcript) -> bool {
+    let left_field = gene_name(left);
+    let right_field = gene_name(right);
+    let left_has_gene = left_field.is_some_and(|field| gene_tokens(field).next().is_some());
+    let right_has_gene = right_field.is_some_and(|field| gene_tokens(field).next().is_some());
+
+    if !left_has_gene || !right_has_gene {
+        return true;
     }
+
+    let left_field = left_field.expect("checked above");
+    let right_field = right_field.expect("checked above");
+    gene_tokens(left_field)
+        .any(|left_gene| gene_tokens(right_field).any(|right_gene| left_gene == right_gene))
 }
 
 fn junctions_match(left: Interval, right: Interval, offset: u32) -> bool {
@@ -311,38 +353,54 @@ fn lower_bound_introns_by_start(introns: &[Interval], start: Coord) -> usize {
     left
 }
 
-fn retained_regions_by_isoform(isoforms: &[Transcript]) -> HashMap<String, Vec<Interval>> {
-    let mut out = HashMap::new();
-    let mut gene_introns = Vec::new();
-    for isoform in isoforms {
-        gene_introns.extend(isoform.introns());
+fn retained_regions_by_isoform(isoforms: &[Transcript]) -> Vec<Vec<Interval>> {
+    let mut out = vec![Vec::new(); isoforms.len()];
+    let mut domains: HashMap<CatalogKey, Vec<usize>> = HashMap::new();
+    for (isoform_idx, isoform) in isoforms.iter().enumerate() {
+        domains
+            .entry(CatalogKey::new(
+                gene_name(isoform),
+                &isoform.chrom,
+                isoform.strand,
+            ))
+            .or_default()
+            .push(isoform_idx);
     }
-    gene_introns.sort_unstable();
-    gene_introns.dedup();
 
-    if gene_introns.is_empty() {
-        return out;
-    }
+    // Missing gene metadata is an explicit domain of its own. It may share
+    // introns only with other unannotated isoforms on the same chromosome and
+    // strand, never with annotated genes or another chromosome/strand.
+    for domain_indices in domains.values() {
+        let mut domain_introns = Vec::new();
+        for &isoform_idx in domain_indices {
+            domain_introns.extend(isoforms[isoform_idx].introns());
+        }
+        domain_introns.sort_unstable();
+        domain_introns.dedup();
 
-    for isoform in isoforms {
-        let mut retained_regions = Vec::new();
-        for exon in &isoform.exons {
-            let mut idx = lower_bound_introns_by_start(&gene_introns, exon.start);
-            while idx < gene_introns.len() && gene_introns[idx].start <= exon.end {
-                let intron = gene_introns[idx];
-                if !intron.is_empty() && interval_contains(*exon, intron) {
-                    retained_regions.push(intron);
+        if domain_introns.is_empty() {
+            continue;
+        }
+
+        for &isoform_idx in domain_indices {
+            let isoform = &isoforms[isoform_idx];
+            let retained_regions = &mut out[isoform_idx];
+            for exon in &isoform.exons {
+                let mut idx = lower_bound_introns_by_start(&domain_introns, exon.start);
+                while idx < domain_introns.len() && domain_introns[idx].start <= exon.end {
+                    let intron = domain_introns[idx];
+                    if !intron.is_empty() && interval_contains(*exon, intron) {
+                        retained_regions.push(intron);
+                    }
+                    idx += 1;
                 }
-                idx += 1;
             }
-        }
 
-        retained_regions.sort_unstable();
-        retained_regions.dedup();
-        if !retained_regions.is_empty() {
-            out.insert(isoform.name.clone(), retained_regions);
+            retained_regions.sort_unstable();
+            retained_regions.dedup();
         }
     }
+
     out
 }
 
@@ -358,9 +416,47 @@ fn read_supports_retained_region(read: &Transcript, region: Interval) -> bool {
 }
 
 fn retained_regions_supported_by_read(read: &Transcript, retained_regions: &[Interval]) -> bool {
-    retained_regions
+    let read_span = read_span(read);
+    let mut covered_regions = retained_regions
         .iter()
-        .any(|region| read_supports_retained_region(read, *region))
+        .copied()
+        .filter(|region| region.overlap_len(read_span) > 0)
+        .peekable();
+
+    // A partial read cannot establish retention when it never reaches a
+    // retained region. When it reaches several regions, every reached region
+    // must have a boundary spanned by a read exon; support for one retained
+    // intron must not mask a splice through another.
+    covered_regions.peek().is_some()
+        && covered_regions.all(|region| read_supports_retained_region(read, region))
+}
+
+/// Return a maximum-cardinality, minimum-distance ordered intron alignment.
+///
+/// Every read intron and isoform intron can occur in at most one pair. Closely
+/// spaced microfeatures therefore remain distinct: there is deliberately no
+/// rule allowing one intron to satisfy multiple counterparts. Introns are in
+/// ascending genomic order for both strands, which preserves their relative
+/// order even though biological traversal is reversed on the minus strand.
+/// Exact score ties retain the previously established prefix alignment, making
+/// ambiguous repeated offsets deterministic.
+pub(crate) fn ordered_one_to_one_intron_matches(
+    read_introns: &[Interval],
+    isoform_introns: &[Interval],
+    offset: u32,
+) -> Vec<(usize, usize)> {
+    crate::matching::ordered_one_to_one_matches_by(
+        read_introns.len(),
+        isoform_introns.len(),
+        |read_idx, isoform_idx| {
+            let read_intron = read_introns[read_idx];
+            let isoform_intron = isoform_introns[isoform_idx];
+            junctions_match(read_intron, isoform_intron, offset).then(|| {
+                u64::from(read_intron.start.get().abs_diff(isoform_intron.start.get()))
+                    + u64::from(read_intron.end.get().abs_diff(isoform_intron.end.get()))
+            })
+        },
+    )
 }
 
 fn matching_intron_indices(
@@ -368,16 +464,12 @@ fn matching_intron_indices(
     isoform_introns: &[Interval],
     offset: u32,
 ) -> (HashSet<usize>, HashSet<usize>) {
-    let mut matched_read = HashSet::new();
-    let mut matched_isoform = HashSet::new();
-    for (read_idx, read_intron) in read_introns.iter().enumerate() {
-        for (isoform_idx, isoform_intron) in isoform_introns.iter().enumerate() {
-            if junctions_match(*read_intron, *isoform_intron, offset) {
-                matched_read.insert(read_idx);
-                matched_isoform.insert(isoform_idx);
-            }
-        }
-    }
+    let matches = ordered_one_to_one_intron_matches(read_introns, isoform_introns, offset);
+    let matched_read = matches.iter().map(|(read_idx, _)| *read_idx).collect();
+    let matched_isoform = matches
+        .iter()
+        .map(|(_, isoform_idx)| *isoform_idx)
+        .collect();
     (matched_read, matched_isoform)
 }
 
@@ -425,14 +517,16 @@ fn junctionless_read_candidate(
     })
 }
 
-fn catalog_assignment_candidate(read: &Transcript, isoform: &Transcript) -> bool {
+fn catalog_assignment_candidate(
+    read: &Transcript,
+    isoform: &Transcript,
+    junction_offset: u32,
+) -> bool {
     if read.chrom != isoform.chrom || read.strand != isoform.strand {
         return false;
     }
-    if let (Some(read_gene), Some(isoform_gene)) = (gene_name(read), gene_name(isoform)) {
-        if read_gene != isoform_gene {
-            return false;
-        }
+    if !gene_metadata_compatible(read, isoform) {
+        return false;
     }
     if transcript_exon_overlap(read, isoform) == 0 {
         return false;
@@ -447,11 +541,8 @@ fn catalog_assignment_candidate(read: &Transcript, isoform: &Transcript) -> bool
         return false;
     }
 
-    let (matched_read_introns, matched_isoform_introns) = matching_intron_indices(
-        &read_introns,
-        &isoform_introns,
-        UNIQUE_ASSIGNMENT_JUNCTION_OFFSET,
-    );
+    let (matched_read_introns, matched_isoform_introns) =
+        matching_intron_indices(&read_introns, &isoform_introns, junction_offset);
 
     matched_read_introns.len() == read_introns.len()
         && unmatched_isoform_introns_overlapped_by_read_exons(
@@ -506,14 +597,15 @@ fn read_span(read: &Transcript) -> Interval {
     }
 }
 
-fn assignment_score(read: &Transcript, isoform: &Transcript) -> AssignmentScore {
+fn assignment_score(
+    read: &Transcript,
+    isoform: &Transcript,
+    junction_offset: u32,
+) -> AssignmentScore {
     let read_introns = read.introns();
     let isoform_introns = isoform.introns();
-    let (matched_read_introns, matched_isoform_introns) = matching_intron_indices(
-        &read_introns,
-        &isoform_introns,
-        UNIQUE_ASSIGNMENT_JUNCTION_OFFSET,
-    );
+    let (matched_read_introns, matched_isoform_introns) =
+        matching_intron_indices(&read_introns, &isoform_introns, junction_offset);
 
     let read_len = transcript_exon_len(read);
     let isoform_len = exon_len_within_span(isoform, read_span(read));
@@ -547,11 +639,14 @@ fn build_catalog_span_indices(isoforms: &[Transcript]) -> HashMap<CatalogKey, Sp
             .entry(CatalogKey::new(None, &isoform.chrom, isoform.strand))
             .or_default()
             .push(idx);
-        if let Some(gene) = gene_name(isoform) {
-            grouped
-                .entry(CatalogKey::new(Some(gene), &isoform.chrom, isoform.strand))
-                .or_default()
-                .push(idx);
+        let mut seen_genes = HashSet::new();
+        for gene in transcript_gene_tokens(isoform) {
+            if seen_genes.insert(gene) {
+                grouped
+                    .entry(CatalogKey::new(Some(gene), &isoform.chrom, isoform.strand))
+                    .or_default()
+                    .push(idx);
+            }
         }
     }
 
@@ -590,17 +685,36 @@ pub fn select_unique_best_read_to_isoform(
     isoforms: &[Transcript],
     read_to_isoform: &[(String, String)],
 ) -> anyhow::Result<Vec<(String, String)>> {
-    let reads_by_name = read_structures_by_name(reads);
+    select_unique_best_read_to_isoform_with_options(
+        reads,
+        isoforms,
+        read_to_isoform,
+        UniqueAssignmentOptions::default(),
+    )
+}
 
-    let isoforms_by_name: HashMap<&str, &Transcript> = isoforms
-        .iter()
-        .map(|isoform| (isoform.name.as_str(), isoform))
-        .collect();
+pub fn select_unique_best_read_to_isoform_with_options(
+    reads: &[Transcript],
+    isoforms: &[Transcript],
+    read_to_isoform: &[(String, String)],
+    options: UniqueAssignmentOptions,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let reads_by_name = read_structures_by_name(reads)?;
+
+    let mut isoforms_by_name: HashMap<&str, usize> = HashMap::with_capacity(isoforms.len());
+    for (isoform_idx, isoform) in isoforms.iter().enumerate() {
+        if let Some(previous_idx) = isoforms_by_name.insert(isoform.name.as_str(), isoform_idx) {
+            anyhow::bail!(
+                "duplicate isoform id {:?} at catalog indices {previous_idx} and {isoform_idx}; unique assignment requires globally unique isoform ids",
+                isoform.name
+            );
+        }
+    }
     let retained_regions = retained_regions_by_isoform(isoforms);
     let catalog_indices = build_catalog_span_indices(isoforms);
     let mut genes_present: HashSet<&str> = HashSet::new();
     for isoform in isoforms {
-        if let Some(gene) = gene_name(isoform) {
+        for gene in transcript_gene_tokens(isoform) {
             genes_present.insert(gene);
         }
     }
@@ -633,31 +747,13 @@ pub fn select_unique_best_read_to_isoform(
         };
         catalog_candidate_indices.clear();
         let stamp = next_catalog_stamp(&mut catalog_seen, &mut catalog_stamp);
+        let read_genes = transcript_gene_tokens(read).collect::<Vec<_>>();
+        let read_has_annotated_gene = !read_genes.is_empty();
         let mut domain_found = false;
-        if let Some(gene) = gene_name(read) {
-            if genes_present.contains(gene) {
-                domain_found = true;
-                collect_catalog_candidates_for_key(
-                    &catalog_indices,
-                    CatalogKey::new(Some(gene), &read.chrom, read.strand),
-                    read,
-                    isoforms,
-                    &mut catalog_seen,
-                    stamp,
-                    &mut catalog_candidate_indices,
-                );
-            }
-        } else if let Some(mapped_candidates) = grouped.get(read_id) {
-            let mut seen_genes: HashSet<&str> = HashSet::new();
-            for isoform_id in mapped_candidates {
-                let Some(gene) = isoforms_by_name
-                    .get(*isoform_id)
-                    .copied()
-                    .and_then(gene_name)
-                else {
-                    continue;
-                };
-                if seen_genes.insert(gene) {
+        if read_has_annotated_gene {
+            let mut seen_genes = HashSet::new();
+            for gene in read_genes {
+                if seen_genes.insert(gene) && genes_present.contains(gene) {
                     domain_found = true;
                     collect_catalog_candidates_for_key(
                         &catalog_indices,
@@ -670,9 +766,33 @@ pub fn select_unique_best_read_to_isoform(
                     );
                 }
             }
+        } else if let Some(mapped_candidates) = grouped.get(read_id) {
+            let mut seen_genes: HashSet<&str> = HashSet::new();
+            for isoform_id in mapped_candidates {
+                let Some(isoform) = isoforms_by_name
+                    .get(*isoform_id)
+                    .map(|&isoform_idx| &isoforms[isoform_idx])
+                else {
+                    continue;
+                };
+                for gene in transcript_gene_tokens(isoform) {
+                    if seen_genes.insert(gene) {
+                        domain_found = true;
+                        collect_catalog_candidates_for_key(
+                            &catalog_indices,
+                            CatalogKey::new(Some(gene), &read.chrom, read.strand),
+                            read,
+                            isoforms,
+                            &mut catalog_seen,
+                            stamp,
+                            &mut catalog_candidate_indices,
+                        );
+                    }
+                }
+            }
         }
 
-        if !domain_found {
+        if !read_has_annotated_gene && !domain_found {
             collect_catalog_candidates_for_key(
                 &catalog_indices,
                 CatalogKey::new(None, &read.chrom, read.strand),
@@ -691,7 +811,7 @@ pub fn select_unique_best_read_to_isoform(
             .expect("read id collected from grouped keys");
         for &isoform_idx in &catalog_candidate_indices {
             let isoform = &isoforms[isoform_idx];
-            if catalog_assignment_candidate(read, isoform) {
+            if catalog_assignment_candidate(read, isoform, options.junction_offset) {
                 candidates.push(isoform.name.as_str());
             }
         }
@@ -704,11 +824,16 @@ pub fn select_unique_best_read_to_isoform(
                 isoforms_by_name
                     .get(*isoform_id)
                     .copied()
-                    .is_some_and(|isoform| {
-                        catalog_assignment_candidate(read, isoform)
-                            && retained_regions.get(*isoform_id).is_none_or(|regions| {
-                                retained_regions_supported_by_read(read, regions)
-                            })
+                    .is_some_and(|isoform_idx| {
+                        catalog_assignment_candidate(
+                            read,
+                            &isoforms[isoform_idx],
+                            options.junction_offset,
+                        ) && (retained_regions[isoform_idx].is_empty()
+                            || retained_regions_supported_by_read(
+                                read,
+                                &retained_regions[isoform_idx],
+                            ))
                     })
             });
         }
@@ -732,11 +857,11 @@ provide the matching --reads/manifest reads BED"
 
         let mut best: Option<(AssignmentScore, &str)> = None;
         for isoform_id in candidates {
-            let isoform = isoforms_by_name
+            let isoform_idx = isoforms_by_name
                 .get(isoform_id)
                 .copied()
                 .expect("validated above");
-            let score = assignment_score(read, isoform);
+            let score = assignment_score(read, &isoforms[isoform_idx], options.junction_offset);
             if best.as_ref().is_none_or(|(best_score, best_isoform_id)| {
                 &score < best_score
                     || (&score == best_score
@@ -759,40 +884,96 @@ provide the matching --reads/manifest reads BED"
 pub fn count_by_read_to_isoform(
     isoforms: &[Transcript],
     read_to_isoform: &[(String, String)],
-) -> Vec<CountRecord> {
+) -> anyhow::Result<Vec<CountRecord>> {
+    crate::identity::validate_isoform_ids(isoforms)?;
+    let isoform_ids: HashSet<&str> = isoforms.iter().map(|tx| tx.name.as_str()).collect();
+    let mut unique_pairs: std::collections::BTreeSet<(&str, &str)> =
+        std::collections::BTreeSet::new();
+    for (read_id, isoform_id) in read_to_isoform {
+        if read_id.is_empty() {
+            anyhow::bail!("read_to_isoform contains an empty read id");
+        }
+        if !isoform_ids.contains(isoform_id.as_str()) {
+            anyhow::bail!(
+                "read_to_isoform references isoform id {isoform_id:?} that is missing from isoform BED"
+            );
+        }
+        unique_pairs.insert((read_id.as_str(), isoform_id.as_str()));
+    }
+
     let mut read_occurrence: HashMap<&str, u32> = HashMap::new();
-    for (read_id, _) in read_to_isoform {
-        *read_occurrence.entry(read_id.as_str()).or_insert(0) += 1;
+    for &(read_id, _) in &unique_pairs {
+        *read_occurrence.entry(read_id).or_insert(0) += 1;
     }
 
     let mut counts: HashMap<&str, f64> = HashMap::new();
-    for (read_id, isoform_id) in read_to_isoform {
-        let denom = read_occurrence.get(read_id.as_str()).copied().unwrap_or(0);
+    for &(read_id, isoform_id) in &unique_pairs {
+        let denom = read_occurrence.get(read_id).copied().unwrap_or(0);
         if denom == 0 {
             continue;
         }
-        *counts.entry(isoform_id.as_str()).or_insert(0.0) += 1.0f64 / denom as f64;
+        *counts.entry(isoform_id).or_insert(0.0) += 1.0f64 / denom as f64;
     }
 
-    isoforms
+    Ok(isoforms
         .iter()
         .map(|isoform| CountRecord {
+            gene: gene_name(isoform).unwrap_or("none").to_owned(),
             isoform_id: isoform.name.clone(),
             count: counts.get(isoform.name.as_str()).copied().unwrap_or(0.0),
         })
-        .collect()
+        .collect())
 }
 
 pub fn write_counts_csv<P: AsRef<Path>>(
     path: P,
     records: &[CountRecord],
-) -> Result<(), std::io::Error> {
-    let mut writer = std::io::BufWriter::new(std::fs::File::create(path)?);
-    writeln!(&mut writer, "isoform_id,count")?;
+) -> Result<(), csv::Error> {
+    let file = std::fs::File::create(path)?;
+    let mut writer = std::io::BufWriter::new(file);
+    write_counts_csv_to_writer(&mut writer, records)
+}
+
+/// Serialize count records as CSV to an existing writer.
+pub fn write_counts_csv_to_writer<W: std::io::Write>(
+    writer: &mut W,
+    records: &[CountRecord],
+) -> Result<(), csv::Error> {
+    let mut writer = csv::WriterBuilder::new().from_writer(writer);
+    writer.write_record(["gene", "isoform_id", "count"])?;
     for record in records {
-        writeln!(&mut writer, "{},{}", record.isoform_id, record.count)?;
+        writer.write_record([
+            record.gene.as_str(),
+            record.isoform_id.as_str(),
+            &record.count.to_string(),
+        ])?;
     }
+    writer.flush()?;
     Ok(())
+}
+
+/// Serialize the effective unique-assignment policy as a small, stable TSV.
+pub fn unique_assignment_provenance_tsv(options: UniqueAssignmentOptions) -> String {
+    format!(
+        "format_version\t1\nassignment_mode\tunique\nunique_assignment_junction_offset\t{}\nintron_matcher\tordered_one_to_one_max_cardinality_min_delta\nmicrofeature_collapse\tfalse\n",
+        options.junction_offset
+    )
+}
+
+/// Write the effective unique-assignment policy next to a derived output.
+pub fn write_unique_assignment_provenance<P: AsRef<Path>>(
+    path: P,
+    options: UniqueAssignmentOptions,
+) -> Result<(), std::io::Error> {
+    std::fs::write(path, unique_assignment_provenance_tsv(options))
+}
+
+/// Write effective unique-assignment policy to an existing writer.
+pub fn write_unique_assignment_provenance_to_writer<W: std::io::Write>(
+    writer: &mut W,
+    options: UniqueAssignmentOptions,
+) -> Result<(), std::io::Error> {
+    writer.write_all(unique_assignment_provenance_tsv(options).as_bytes())
 }
 
 #[cfg(test)]
@@ -838,6 +1019,17 @@ mod tests {
         name2: &str,
         gene: &str,
     ) -> Transcript {
+        make_tx_in_domain(name, "chr1", strand, exons, name2, Some(gene))
+    }
+
+    fn make_tx_in_domain(
+        name: &str,
+        chrom: &str,
+        strand: Strand,
+        exons: &[(u32, u32)],
+        name2: &str,
+        gene: Option<&str>,
+    ) -> Transcript {
         let tx_start = exons.iter().map(|(s, _)| *s).min().unwrap_or(0);
         let tx_end = exons.iter().map(|(_, e)| *e).max().unwrap_or(0);
         let exons = exons
@@ -845,8 +1037,20 @@ mod tests {
             .map(|(s, e)| Interval::new(Coord::new(*s), Coord::new(*e)).unwrap())
             .collect::<Vec<_>>();
 
+        let extra_fields = match gene {
+            Some(gene) => vec![
+                name2.to_owned(),
+                "none".to_owned(),
+                "none".to_owned(),
+                "none".to_owned(),
+                "none".to_owned(),
+                gene.to_owned(),
+            ],
+            None => vec![name2.to_owned()],
+        };
+
         Transcript::new(
-            "chr1".to_owned(),
+            chrom.to_owned(),
             strand,
             Coord::new(tx_start),
             Coord::new(tx_end),
@@ -857,14 +1061,7 @@ mod tests {
                 thick_start: Coord::new(tx_start),
                 thick_end: Coord::new(tx_end),
                 item_rgb: "0".to_owned(),
-                extra_fields: vec![
-                    name2.to_owned(),
-                    "none".to_owned(),
-                    "none".to_owned(),
-                    "none".to_owned(),
-                    "none".to_owned(),
-                    gene.to_owned(),
-                ],
+                extra_fields,
             },
         )
         .unwrap()
@@ -879,7 +1076,7 @@ mod tests {
             make_tx("iso3", &[(0, 10)], ",|0"), // empty
         ];
 
-        let records = count_by_subreads(&isoforms, &references);
+        let records = count_by_subreads(&isoforms, &references).unwrap();
         let iso1 = records.iter().find(|r| r.isoform_id == "iso1").unwrap();
         let iso2 = records.iter().find(|r| r.isoform_id == "iso2").unwrap();
         let iso3 = records.iter().find(|r| r.isoform_id == "iso3").unwrap();
@@ -902,8 +1099,8 @@ mod tests {
             ("r2".to_owned(), "iso2".to_owned()),
         ];
 
-        let by_subreads = count_by_subreads(&isoforms, &references);
-        let by_mapping = count_by_read_to_isoform(&isoforms, &pairs);
+        let by_subreads = count_by_subreads(&isoforms, &references).unwrap();
+        let by_mapping = count_by_read_to_isoform(&isoforms, &pairs).unwrap();
         assert_eq!(by_subreads.len(), by_mapping.len());
 
         for (left, right) in by_subreads.iter().zip(by_mapping.iter()) {
@@ -913,20 +1110,102 @@ mod tests {
     }
 
     #[test]
-    fn builds_mapping_from_embedded_subreads() {
+    fn duplicate_mapping_rows_are_idempotent_for_molecule_counts() {
+        let isoforms = vec![
+            make_tx_with_gene("iso1", &[(0, 10)], "none", "GENEA"),
+            make_tx_with_gene("iso2", &[(0, 10)], "none", "GENEA"),
+        ];
+        let pairs = vec![
+            ("molecule".to_owned(), "iso1".to_owned()),
+            ("molecule".to_owned(), "iso1".to_owned()),
+            ("molecule".to_owned(), "iso2".to_owned()),
+        ];
+
+        let counts = count_by_read_to_isoform(&isoforms, &pairs).unwrap();
+        assert_eq!(counts[0].count, 0.5);
+        assert_eq!(counts[1].count, 0.5);
+        assert_eq!(counts.iter().map(|row| row.count).sum::<f64>(), 1.0);
+    }
+
+    #[test]
+    fn mapping_tsv_round_trips_boundary_whitespace_in_ids() {
+        let path = std::env::temp_dir().join(format!(
+            "trackcluster-mapping-whitespace-{}-{}.tsv",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let pairs = vec![
+            ("r".to_owned(), "iso1".to_owned()),
+            (" r ".to_owned(), "iso1".to_owned()),
+        ];
+        crate::cluster::output::write_read_to_isoform_tsv(&path, &pairs).unwrap();
+
+        let round_tripped = read_read_to_isoform_tsv(&path).unwrap();
+        assert_eq!(round_tripped, pairs);
+        let isoforms = vec![make_tx_with_gene("iso1", &[(0, 10)], "none", "GENEA")];
+        let counts = count_by_read_to_isoform(&isoforms, &round_tripped).unwrap();
+        assert_eq!(counts[0].count, 2.0);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn fractional_count_rejects_duplicate_catalog_ids() {
+        let isoforms = vec![
+            make_tx("duplicate", &[(0, 10)], "none"),
+            make_tx("duplicate", &[(20, 30)], "none"),
+        ];
+        let error = count_by_read_to_isoform(&isoforms, &[]).unwrap_err();
+        assert!(error.to_string().contains("duplicate isoform id"));
+    }
+
+    #[test]
+    fn count_csv_writes_gene_and_escapes_csv_fields() {
+        let path = std::env::temp_dir().join(format!(
+            "trackcluster-count-csv-{}-{}.csv",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let rows = vec![CountRecord {
+            gene: "GENE,\"quoted\"".to_owned(),
+            isoform_id: "iso,one".to_owned(),
+            count: 1.25,
+        }];
+
+        write_counts_csv(&path, &rows).unwrap();
+        let mut reader = csv::Reader::from_path(&path).unwrap();
+        assert_eq!(
+            reader.headers().unwrap().iter().collect::<Vec<_>>(),
+            ["gene", "isoform_id", "count"]
+        );
+        let record = reader.records().next().unwrap().unwrap();
+        assert_eq!(&record[0], "GENE,\"quoted\"");
+        assert_eq!(&record[1], "iso,one");
+        assert_eq!(&record[2], "1.25");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn builds_mapping_without_suppressing_read_reference_name_collisions() {
         let references = vec![make_tx("ref1", &[(0, 10)], "ref1")];
         let isoforms = vec![
             make_tx("iso1", &[(0, 10)], "r1,r2,|0"),
             make_tx("iso2", &[(0, 10)], "r2,ref1,|0"),
         ];
 
-        let pairs = read_to_isoform_from_subreads(&isoforms, &references);
+        let pairs = read_to_isoform_from_subreads(&isoforms, &references).unwrap();
         assert_eq!(
             pairs,
             vec![
                 ("r1".to_owned(), "iso1".to_owned()),
                 ("r2".to_owned(), "iso1".to_owned()),
                 ("r2".to_owned(), "iso2".to_owned()),
+                ("ref1".to_owned(), "iso2".to_owned()),
             ]
         );
     }
@@ -946,7 +1225,7 @@ mod tests {
         let unique = select_unique_best_read_to_isoform(&reads, &isoforms, &pairs).unwrap();
         assert_eq!(unique, vec![("r1".to_owned(), "closest_novel".to_owned())]);
 
-        let counts = count_by_read_to_isoform(&isoforms, &unique);
+        let counts = count_by_read_to_isoform(&isoforms, &unique).unwrap();
         let long_ref = counts
             .iter()
             .find(|record| record.isoform_id == "long_ref")
@@ -960,7 +1239,7 @@ mod tests {
     }
 
     #[test]
-    fn unique_assignment_uses_longest_duplicate_read_structure() {
+    fn unique_assignment_rejects_conflicting_alignments_for_one_molecule_id() {
         let reads = vec![
             make_tx("r1", &[(100, 110)], "none"),
             make_tx("r1", &[(100, 110), (200, 210)], "none"),
@@ -974,8 +1253,9 @@ mod tests {
             ("r1".to_owned(), "long_isoform".to_owned()),
         ];
 
-        let unique = select_unique_best_read_to_isoform(&reads, &isoforms, &pairs).unwrap();
-        assert_eq!(unique, vec![("r1".to_owned(), "long_isoform".to_owned())]);
+        let error = select_unique_best_read_to_isoform(&reads, &isoforms, &pairs).unwrap_err();
+        assert!(error.to_string().contains("conflicting alignments"));
+        assert!(error.to_string().contains("one unambiguous structure"));
     }
 
     #[test]
@@ -1031,6 +1311,42 @@ mod tests {
 
         let unique = select_unique_best_read_to_isoform(&reads, &isoforms, &pairs).unwrap();
         assert_eq!(unique, vec![("r1".to_owned(), "z_closest".to_owned())]);
+    }
+
+    #[test]
+    fn unique_assignment_intersects_multi_gene_metadata_without_cross_gene_leakage() {
+        let reads = vec![make_tx_with_gene(
+            "multi_gene_read",
+            &[(100, 110), (200, 210)],
+            "none",
+            "GENEA||GENEB",
+        )];
+        let isoforms = vec![
+            make_tx_with_gene(
+                "mapped_gene_a",
+                &[(50, 60), (100, 110), (200, 210)],
+                "none",
+                "GENEA",
+            ),
+            make_tx_with_gene("closest_gene_b", &[(100, 110), (200, 210)], "none", "GENEB"),
+            make_tx_with_gene(
+                "cross_gene_decoy",
+                &[(100, 110), (200, 210)],
+                "none",
+                "GENEC",
+            ),
+        ];
+        let pairs = vec![("multi_gene_read".to_owned(), "mapped_gene_a".to_owned())];
+
+        assert!(catalog_assignment_candidate(&reads[0], &isoforms[0], 15));
+        assert!(catalog_assignment_candidate(&reads[0], &isoforms[1], 15));
+        assert!(!catalog_assignment_candidate(&reads[0], &isoforms[2], 15));
+
+        let unique = select_unique_best_read_to_isoform(&reads, &isoforms, &pairs).unwrap();
+        assert_eq!(
+            unique,
+            vec![("multi_gene_read".to_owned(), "closest_gene_b".to_owned())]
+        );
     }
 
     #[test]
@@ -1213,6 +1529,332 @@ mod tests {
         assert_eq!(
             unique,
             vec![("r_retained".to_owned(), "Novel_retained".to_owned())]
+        );
+    }
+
+    #[test]
+    fn retained_introns_are_partitioned_by_gene_chromosome_and_strand() {
+        let retained = make_tx_in_domain(
+            "retained_a",
+            "chr1",
+            Strand::Plus,
+            &[(100, 200), (300, 310)],
+            "none",
+            Some("GENEA"),
+        );
+        let cross_domain_suppliers = vec![
+            make_tx_in_domain(
+                "chr2_supplier",
+                "chr2",
+                Strand::Plus,
+                &[(100, 130), (180, 200)],
+                "none",
+                Some("GENEA"),
+            ),
+            make_tx_in_domain(
+                "minus_supplier",
+                "chr1",
+                Strand::Minus,
+                &[(100, 130), (180, 200)],
+                "none",
+                Some("GENEA"),
+            ),
+            make_tx_in_domain(
+                "gene_b_supplier",
+                "chr1",
+                Strand::Plus,
+                &[(100, 130), (180, 200)],
+                "none",
+                Some("GENEB"),
+            ),
+        ];
+
+        let mut cross_domain_catalog = vec![retained.clone()];
+        cross_domain_catalog.extend(cross_domain_suppliers);
+        let regions = retained_regions_by_isoform(&cross_domain_catalog);
+        assert!(regions[0].is_empty());
+
+        cross_domain_catalog.push(make_tx_in_domain(
+            "same_domain_supplier",
+            "chr1",
+            Strand::Plus,
+            &[(100, 130), (180, 200)],
+            "none",
+            Some("GENEA"),
+        ));
+        let regions = retained_regions_by_isoform(&cross_domain_catalog);
+        assert_eq!(
+            regions[0],
+            vec![Interval::new(Coord::new(130), Coord::new(180)).unwrap()]
+        );
+    }
+
+    #[test]
+    fn unannotated_retained_introns_do_not_cross_chromosomes_or_strands() {
+        let retained = make_tx_in_domain(
+            "unannotated_retained",
+            "chr1",
+            Strand::Plus,
+            &[(100, 200)],
+            "none",
+            None,
+        );
+        let mut catalog = vec![
+            retained,
+            make_tx_in_domain(
+                "unannotated_chr2",
+                "chr2",
+                Strand::Plus,
+                &[(100, 130), (180, 200)],
+                "none",
+                None,
+            ),
+            make_tx_in_domain(
+                "unannotated_minus",
+                "chr1",
+                Strand::Minus,
+                &[(100, 130), (180, 200)],
+                "none",
+                None,
+            ),
+        ];
+        assert!(retained_regions_by_isoform(&catalog)[0].is_empty());
+
+        catalog.push(make_tx_in_domain(
+            "unannotated_same_domain",
+            "chr1",
+            Strand::Plus,
+            &[(100, 130), (180, 200)],
+            "none",
+            None,
+        ));
+        assert_eq!(
+            retained_regions_by_isoform(&catalog)[0],
+            vec![Interval::new(Coord::new(130), Coord::new(180)).unwrap()]
+        );
+    }
+
+    #[test]
+    fn unrelated_chromosome_isoform_cannot_change_unique_assignment() {
+        let read = make_tx_in_domain(
+            "r_suffix",
+            "chr1",
+            Strand::Plus,
+            &[(300, 310), (400, 410)],
+            "none",
+            Some("GENEA"),
+        );
+        let isoform_a = make_tx_in_domain(
+            "isoform_a",
+            "chr1",
+            Strand::Plus,
+            &[(100, 200), (300, 310), (400, 410)],
+            "none",
+            Some("GENEA"),
+        );
+        let pairs = vec![("r_suffix".to_owned(), "isoform_a".to_owned())];
+        let expected = vec![("r_suffix".to_owned(), "isoform_a".to_owned())];
+
+        let base = select_unique_best_read_to_isoform(
+            std::slice::from_ref(&read),
+            std::slice::from_ref(&isoform_a),
+            &pairs,
+        )
+        .unwrap();
+        assert_eq!(base, expected);
+
+        let unrelated = make_tx_in_domain(
+            "isoform_b",
+            "chr2",
+            Strand::Plus,
+            &[(100, 130), (180, 200)],
+            "none",
+            Some("GENEB"),
+        );
+        let expanded =
+            select_unique_best_read_to_isoform(&[read], &[isoform_a, unrelated], &pairs).unwrap();
+        assert_eq!(expanded, expected);
+    }
+
+    #[test]
+    fn unique_assignment_rejects_duplicate_isoform_ids() {
+        let isoforms = vec![
+            make_tx_with_gene("duplicate", &[(100, 110)], "none", "GENEA"),
+            make_tx_with_gene("duplicate", &[(200, 210)], "none", "GENEB"),
+        ];
+
+        let error = select_unique_best_read_to_isoform(&[], &isoforms, &[]).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("duplicate isoform id \"duplicate\""));
+        assert!(error.to_string().contains("indices 0 and 1"));
+    }
+
+    #[test]
+    fn retained_assignment_requires_support_for_every_reached_region() {
+        let retained_regions = vec![
+            Interval::new(Coord::new(130), Coord::new(180)).unwrap(),
+            Interval::new(Coord::new(230), Coord::new(280)).unwrap(),
+        ];
+        let supports_first_but_splices_second = make_tx(
+            "splices_second",
+            &[(100, 220), (240, 260), (290, 310)],
+            "none",
+        );
+        assert!(!retained_regions_supported_by_read(
+            &supports_first_but_splices_second,
+            &retained_regions
+        ));
+
+        let reaches_only_supported_first = make_tx("first_only", &[(100, 220)], "none");
+        assert!(retained_regions_supported_by_read(
+            &reaches_only_supported_first,
+            &retained_regions
+        ));
+
+        let reaches_neither = make_tx("suffix", &[(300, 310)], "none");
+        assert!(!retained_regions_supported_by_read(
+            &reaches_neither,
+            &retained_regions
+        ));
+    }
+
+    #[test]
+    fn one_isoform_intron_cannot_satisfy_two_read_introns() {
+        let read = make_tx(
+            "two_read_introns",
+            &[(90, 100), (110, 115), (125, 135)],
+            "none",
+        );
+        let isoform = make_tx("one_isoform_intron", &[(90, 107), (117, 135)], "none");
+
+        assert_eq!(
+            ordered_one_to_one_intron_matches(&read.introns(), &isoform.introns(), 15).len(),
+            1
+        );
+        assert!(!catalog_assignment_candidate(&read, &isoform, 15));
+    }
+
+    #[test]
+    fn one_read_intron_cannot_satisfy_two_isoform_introns() {
+        let read = make_tx("one_read_intron", &[(90, 107), (117, 135)], "none");
+        let isoform = make_tx(
+            "two_isoform_introns",
+            &[(90, 100), (110, 115), (125, 135)],
+            "none",
+        );
+
+        assert_eq!(
+            ordered_one_to_one_intron_matches(&read.introns(), &isoform.introns(), 15).len(),
+            1
+        );
+        assert!(!catalog_assignment_candidate(&read, &isoform, 15));
+    }
+
+    #[test]
+    fn ordered_intron_matching_is_strand_independent() {
+        for strand in [Strand::Plus, Strand::Minus] {
+            let read = make_tx_in_domain(
+                "read",
+                "chr1",
+                strand,
+                &[(90, 100), (110, 120), (130, 140)],
+                "none",
+                Some("GENEA"),
+            );
+            let isoform = make_tx_in_domain(
+                "isoform",
+                "chr1",
+                strand,
+                &[(90, 102), (112, 122), (132, 140)],
+                "none",
+                Some("GENEA"),
+            );
+
+            assert_eq!(
+                ordered_one_to_one_intron_matches(&read.introns(), &isoform.introns(), 2),
+                vec![(0, 0), (1, 1)]
+            );
+            assert!(catalog_assignment_candidate(&read, &isoform, 2));
+        }
+    }
+
+    #[test]
+    fn ordered_intron_matching_resolves_near_ties_by_total_delta() {
+        let read_introns = vec![
+            Interval::new(Coord::new(100), Coord::new(110)).unwrap(),
+            Interval::new(Coord::new(112), Coord::new(122)).unwrap(),
+        ];
+        let exact_tie = vec![Interval::new(Coord::new(106), Coord::new(116)).unwrap()];
+        assert_eq!(
+            ordered_one_to_one_intron_matches(&read_introns, &exact_tie, 15),
+            vec![(0, 0)]
+        );
+
+        let closer_to_second = vec![Interval::new(Coord::new(108), Coord::new(118)).unwrap()];
+        assert_eq!(
+            ordered_one_to_one_intron_matches(&read_introns, &closer_to_second, 15),
+            vec![(1, 0)]
+        );
+    }
+
+    #[test]
+    fn ordered_intron_matching_does_not_collapse_repeated_microfeatures() {
+        let read_introns = vec![
+            Interval::new(Coord::new(100), Coord::new(105)).unwrap(),
+            Interval::new(Coord::new(107), Coord::new(112)).unwrap(),
+        ];
+        let isoform_introns = vec![
+            Interval::new(Coord::new(102), Coord::new(107)).unwrap(),
+            Interval::new(Coord::new(109), Coord::new(114)).unwrap(),
+        ];
+
+        assert_eq!(
+            ordered_one_to_one_intron_matches(&read_introns, &isoform_introns, 10),
+            vec![(0, 0), (1, 1)]
+        );
+    }
+
+    #[test]
+    fn unique_assignment_junction_tolerance_is_configurable() {
+        let reads = vec![make_tx_with_gene(
+            "r1",
+            &[(90, 100), (110, 130)],
+            "none",
+            "GENEA",
+        )];
+        let isoforms = vec![make_tx_with_gene(
+            "iso1",
+            &[(90, 108), (118, 130)],
+            "none",
+            "GENEA",
+        )];
+        let pairs = vec![("r1".to_owned(), "iso1".to_owned())];
+
+        let strict = select_unique_best_read_to_isoform_with_options(
+            &reads,
+            &isoforms,
+            &pairs,
+            UniqueAssignmentOptions { junction_offset: 7 },
+        )
+        .unwrap();
+        assert!(strict.is_empty());
+
+        let tolerant = select_unique_best_read_to_isoform_with_options(
+            &reads,
+            &isoforms,
+            &pairs,
+            UniqueAssignmentOptions { junction_offset: 8 },
+        )
+        .unwrap();
+        assert_eq!(tolerant, pairs);
+        assert_eq!(
+            UniqueAssignmentOptions::default().junction_offset,
+            DEFAULT_UNIQUE_ASSIGNMENT_JUNCTION_OFFSET
+        );
+        assert!(
+            unique_assignment_provenance_tsv(UniqueAssignmentOptions { junction_offset: 8 })
+                .contains("unique_assignment_junction_offset\t8\n")
         );
     }
 

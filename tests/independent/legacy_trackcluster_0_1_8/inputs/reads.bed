@@ -1,0 +1,2 @@
+chrLegacy	140	200	legacy_read_known_truncated	1	+	0	0	0	2	20,20,	0,40,	none	none	none	-1,-1,	nanopore_read	GENE_LEGACY	synthetic	none
+chrLegacy	100	200	legacy_read_novel_junctions	1	+	0	0	0	3	20,20,10,	0,50,90,	none	none	none	-1,-1,-1,	nanopore_read	GENE_LEGACY	synthetic	none

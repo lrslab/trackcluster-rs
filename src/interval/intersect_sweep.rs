@@ -6,8 +6,11 @@ use crate::model::{Interval, Transcript};
 use super::{partition, StrandMode};
 
 #[derive(Clone, Copy, Debug, Default)]
+/// Options for span-intersection operations.
 pub struct IntersectOpts {
+    /// Whether strand must match.
     pub strand_mode: StrandMode,
+    /// Optional minimum number of overlapping bases.
     pub min_overlap_bp: Option<u32>,
 }
 
@@ -136,15 +139,23 @@ fn sweep_partition_pairs(
 
 /// Returns all `(a_index, b_index)` pairs whose transcript spans overlap (half-open).
 ///
-/// Requirements:
-/// - Inputs must be sorted by `(chrom, start, end, strand)` for linear-time per partition.
+/// Inputs may be in any order. The returned indices always refer to the original slices.
+/// Partition-local index lists are sorted internally. For `n = a.len() + b.len()`, `c`
+/// span-overlap candidates examined before minimum-overlap filtering, and `k` returned pairs, the
+/// sweep takes expected `O(n log n + c)` time; sorting the returned pairs adds `O(k log k)`.
 pub fn sweep_intersect_pairs(
     a: &[Transcript],
     b: &[Transcript],
     opts: &IntersectOpts,
 ) -> Vec<(usize, usize)> {
-    let a_parts = partition(a, opts.strand_mode);
-    let b_parts = partition(b, opts.strand_mode);
+    let mut a_parts = partition(a, opts.strand_mode);
+    let mut b_parts = partition(b, opts.strand_mode);
+    for indices in a_parts.values_mut() {
+        indices.sort_by_key(|&index| (a[index].tx_start, a[index].tx_end, index));
+    }
+    for indices in b_parts.values_mut() {
+        indices.sort_by_key(|&index| (b[index].tx_start, b[index].tx_end, index));
+    }
 
     let mut pairs: Vec<(usize, usize)> = Vec::new();
     for (key, a_indices) in a_parts {
@@ -249,6 +260,21 @@ mod tests {
     }
 
     #[test]
+    fn sweep_accepts_unsorted_inputs_and_preserves_original_indices() {
+        let a = vec![
+            make_tx("chr1", Strand::Plus, 30, 40, "a1"),
+            make_tx("chr1", Strand::Plus, 10, 20, "a0"),
+        ];
+        let b = vec![
+            make_tx("chr1", Strand::Plus, 35, 45, "b1"),
+            make_tx("chr1", Strand::Plus, 15, 16, "b0"),
+        ];
+        let opts = IntersectOpts::default();
+
+        assert_eq!(sweep_intersect_pairs(&a, &b, &opts), vec![(0, 0), (1, 1)]);
+    }
+
+    #[test]
     fn sweep_respects_min_overlap() {
         let mut a = vec![make_tx("chr1", Strand::Plus, 10, 20, "a")];
         let mut b = vec![make_tx("chr1", Strand::Plus, 19, 25, "b")];
@@ -297,11 +323,11 @@ mod tests {
             a_specs in prop::collection::vec((prop_oneof![Just("chr1".to_owned()), Just("chr2".to_owned())],
                                               prop_oneof![Just(Strand::Plus), Just(Strand::Minus), Just(Strand::Unknown)],
                                               0u32..200,
-                                              0u32..50), 0..12),
+                                              1u32..50), 0..12),
             b_specs in prop::collection::vec((prop_oneof![Just("chr1".to_owned()), Just("chr2".to_owned())],
                                               prop_oneof![Just(Strand::Plus), Just(Strand::Minus), Just(Strand::Unknown)],
                                               0u32..200,
-                                              0u32..50), 0..12),
+                                              1u32..50), 0..12),
             strand_mode in prop_oneof![Just(StrandMode::Ignore), Just(StrandMode::Match)],
             min_overlap_bp in prop_oneof![Just(None), (1u32..25).prop_map(Some)],
         ) {

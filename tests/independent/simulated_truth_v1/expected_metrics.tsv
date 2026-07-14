@@ -1,0 +1,12 @@
+scope	transcript_class	support_bin	expression_bin	truth_transcripts	predicted_transcripts	tp	fp	fn	precision	recall	f1	expected_abundance	observed_abundance	mean_absolute_error
+overall	all	all	all	4	4	4	0	0	1.000000	1.000000	1.000000	18.000000	18.000000	0.000000
+class	known	all	all	2	2	2	0	0	1.000000	1.000000	1.000000	10.000000	10.000000	0.000000
+class	novel	all	all	2	2	2	0	0	1.000000	1.000000	1.000000	8.000000	8.000000	0.000000
+support	all	high	all	2	2	2	0	0	1.000000	1.000000	1.000000	14.000000	14.000000	0.000000
+support	all	low	all	2	2	2	0	0	1.000000	1.000000	1.000000	4.000000	4.000000	0.000000
+expression	all	all	high	2	2	2	0	0	1.000000	1.000000	1.000000	14.000000	14.000000	0.000000
+expression	all	all	low	2	2	2	0	0	1.000000	1.000000	1.000000	4.000000	4.000000	0.000000
+class_support_expression	known	high	high	1	1	1	0	0	1.000000	1.000000	1.000000	8.000000	8.000000	0.000000
+class_support_expression	known	low	low	1	1	1	0	0	1.000000	1.000000	1.000000	2.000000	2.000000	0.000000
+class_support_expression	novel	high	high	1	1	1	0	0	1.000000	1.000000	1.000000	6.000000	6.000000	0.000000
+class_support_expression	novel	low	low	1	1	1	0	0	1.000000	1.000000	1.000000	2.000000	2.000000	0.000000

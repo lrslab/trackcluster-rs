@@ -1,0 +1,5 @@
+##gff-version 3
+chr1	example	gene	101	250	.	+	.	ID=gene1;Name=GENEA
+chr1	example	mRNA	101	250	.	+	.	ID=tx1;Parent=gene1
+chr1	example	exon	101	150	.	+	.	Parent=tx1
+chr1	example	exon	201	250	.	+	.	Parent=tx1

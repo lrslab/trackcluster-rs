@@ -207,6 +207,26 @@ fn make_clusterj_single_locus_inputs(
     (refs, reads)
 }
 
+fn make_clusterj_high_diversity_inputs(reads_len: usize, locus_start: u32) -> Vec<Transcript> {
+    (0..reads_len)
+        .map(|index| {
+            let middle_start = locus_start + 100 + (index as u32 * 7);
+            make_tx(
+                "chr1",
+                Strand::Plus,
+                format!("diverse-read-{index}"),
+                vec![
+                    (locus_start, locus_start + 40),
+                    (middle_start, middle_start + 30),
+                    (locus_start + 100_000, locus_start + 100_040),
+                ],
+                "nanopore_read",
+                0,
+            )
+        })
+        .collect()
+}
+
 fn make_cluster_overlap_inputs(
     seed: u64,
     refs_len: usize,
@@ -282,7 +302,10 @@ fn bench_clusterj_grouping(c: &mut Criterion) {
     for (refs_len, reads_len) in [(200usize, 2_000usize), (500, 5_000)] {
         let (refs, reads) = make_clusterj_inputs(2, refs_len, reads_len);
         group.bench_with_input(
-            BenchmarkId::new("clusterj", format!("{refs_len}_refs_{reads_len}_reads")),
+            BenchmarkId::new(
+                "clusterj_default",
+                format!("{refs_len}_refs_{reads_len}_reads"),
+            ),
             &(refs, reads),
             |bench, (refs, reads)| {
                 bench.iter(|| {
@@ -290,16 +313,36 @@ fn bench_clusterj_grouping(c: &mut Criterion) {
                         black_box(reads),
                         Some(black_box(refs)),
                         1,
-                        11,
+                        clusterj::DEFAULT_SW_SCORE,
                         500,
                         100,
-                        clusterj::Name2Mode::Full,
+                        clusterj::Name2Mode::Coverage,
                     );
                     black_box(result.isoforms.len());
                 });
             },
         );
     }
+
+    let (refs, reads) = make_clusterj_inputs(22, 100, 1_000);
+    group.bench_with_input(
+        BenchmarkId::new("clusterj_sl_full_payload", "100_refs_1000_reads"),
+        &(refs, reads),
+        |bench, (refs, reads)| {
+            bench.iter(|| {
+                let result = clusterj::clusterj_with_name2_mode(
+                    black_box(reads),
+                    Some(black_box(refs)),
+                    1,
+                    11,
+                    500,
+                    100,
+                    clusterj::Name2Mode::Full,
+                );
+                black_box(result.isoforms.len());
+            });
+        },
+    );
 
     group.finish();
 }
@@ -323,12 +366,47 @@ fn bench_clusterj_large_single_locus(c: &mut Criterion) {
                     black_box(reads),
                     Some(black_box(refs)),
                     1,
-                    11,
+                    clusterj::DEFAULT_SW_SCORE,
                     0,
                     1,
-                    clusterj::Name2Mode::Full,
+                    clusterj::Name2Mode::Coverage,
                 );
                 black_box(result.isoforms.len());
+            });
+        },
+    );
+
+    group.finish();
+}
+
+fn bench_clusterj_high_diversity_single_locus(c: &mut Criterion) {
+    let mut group = c.benchmark_group("clusterj_high_diversity");
+    group.sample_size(10);
+
+    let reads = make_clusterj_high_diversity_inputs(2_000, 100_000);
+    let refs = vec![make_tx(
+        "chr1",
+        Strand::Plus,
+        "diverse-reference".to_owned(),
+        vec![(100_000, 100_040), (100_100, 100_130), (200_000, 200_040)],
+        "isoform_anno",
+        100,
+    )];
+    group.bench_with_input(
+        BenchmarkId::new("mostly_nonmergeable_default", reads.len()),
+        &(refs, reads),
+        |bench, (refs, reads)| {
+            bench.iter(|| {
+                let result = clusterj::clusterj_with_name2_mode(
+                    black_box(reads),
+                    Some(black_box(refs)),
+                    1,
+                    clusterj::DEFAULT_SW_SCORE,
+                    500,
+                    100,
+                    clusterj::Name2Mode::Coverage,
+                );
+                black_box(result.isoforms.len() + result.unused.len());
             });
         },
     );
@@ -455,6 +533,7 @@ criterion_group!(
     bench_interval_sweep_intersect,
     bench_clusterj_grouping,
     bench_clusterj_large_single_locus,
+    bench_clusterj_high_diversity_single_locus,
     bench_cluster_overlap_synthetic_locus,
     bench_cluster_overlap_batch_sizes
 );

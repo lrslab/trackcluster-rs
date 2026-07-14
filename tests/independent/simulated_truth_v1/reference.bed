@@ -1,0 +1,2 @@
+chrSim	100	250	truth_known_high	100	+	0	0	0	3	30,30,30,	0,60,120,	none	none	none	-1,-1,-1,	isoform_anno	GENE_HIGH	synthetic	protein_coding
+chrSim	500	650	truth_known_low	100	+	0	0	0	3	30,30,30,	0,60,120,	none	none	none	-1,-1,-1,	isoform_anno	GENE_LOW	synthetic	protein_coding

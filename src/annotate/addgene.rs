@@ -3,8 +3,6 @@ use std::collections::{BTreeSet, HashMap};
 use crate::interval::{intersect_pairs, sort_by_coord, IntersectOpts, StrandMode};
 use crate::model::{Interval, Transcript};
 
-const GENE_NAME_COL: usize = 5;
-
 #[derive(Clone, Copy, Debug)]
 pub struct AddGeneOpts {
     pub fraction_read: f64,
@@ -17,6 +15,15 @@ impl Default for AddGeneOpts {
             fraction_read: 0.01,
             fraction_ref: 0.05,
         }
+    }
+}
+
+impl AddGeneOpts {
+    /// Validate overlap fractions before gene assignment.
+    pub fn validate(self) -> Result<(), crate::config::ParameterError> {
+        crate::config::UnitFraction::new("read overlap fraction", self.fraction_read)?;
+        crate::config::UnitFraction::new("reference overlap fraction", self.fraction_ref)?;
+        Ok(())
     }
 }
 
@@ -39,18 +46,8 @@ fn span_overlap_len(a: &Transcript, b: &Transcript) -> u32 {
     span(a).overlap_len(span(b))
 }
 
-fn set_extra(tx: &mut Transcript, idx: usize, value: String) {
-    if tx.extra_fields.len() <= idx {
-        tx.extra_fields.resize(idx + 1, "none".to_owned());
-    }
-    tx.extra_fields[idx] = value;
-}
-
 fn gene_name(tx: &Transcript) -> &str {
-    tx.extra_fields
-        .get(GENE_NAME_COL)
-        .map(|value| value.as_str())
-        .unwrap_or(tx.name.as_str())
+    tx.metadata().gene_id_field().unwrap_or(tx.name.as_str())
 }
 
 pub fn dedup_longest_by_name(reads: &[Transcript]) -> Vec<Transcript> {
@@ -76,12 +73,15 @@ pub fn dedup_longest_by_name(reads: &[Transcript]) -> Vec<Transcript> {
     out
 }
 
-pub fn add_gene_no_dedup(
+fn add_gene_no_dedup_impl(
     reads: &[Transcript],
     references: &[Transcript],
     opts: AddGeneOpts,
 ) -> Vec<Transcript> {
     let mut reads = reads.to_vec();
+    for read in &mut reads {
+        read.metadata_mut().set_gene_id("none");
+    }
 
     let mut reads_sorted = reads.clone();
     let mut refs_sorted: Vec<Transcript> = references.to_vec();
@@ -136,10 +136,40 @@ pub fn add_gene_no_dedup(
         }
 
         let joined = genes.iter().copied().collect::<Vec<_>>().join("||");
-        set_extra(read, GENE_NAME_COL, joined);
+        read.metadata_mut().set_gene_id(joined);
     }
 
     reads
+}
+
+/// Assign genes without deduplicating reads, returning invalid option errors.
+pub fn try_add_gene_no_dedup(
+    reads: &[Transcript],
+    references: &[Transcript],
+    opts: AddGeneOpts,
+) -> Result<Vec<Transcript>, crate::config::ParameterError> {
+    opts.validate()?;
+    Ok(add_gene_no_dedup_impl(reads, references, opts))
+}
+
+pub fn add_gene_no_dedup(
+    reads: &[Transcript],
+    references: &[Transcript],
+    opts: AddGeneOpts,
+) -> Vec<Transcript> {
+    try_add_gene_no_dedup(reads, references, opts)
+        .unwrap_or_else(|error| panic!("invalid gene-assignment options: {error}"))
+}
+
+/// Deduplicate and assign genes, returning invalid option errors.
+pub fn try_add_gene(
+    reads: &[Transcript],
+    references: &[Transcript],
+    opts: AddGeneOpts,
+) -> Result<Vec<Transcript>, crate::config::ParameterError> {
+    opts.validate()?;
+    let reads = dedup_longest_by_name(reads);
+    Ok(add_gene_no_dedup_impl(&reads, references, opts))
 }
 
 pub fn add_gene(
@@ -147,8 +177,8 @@ pub fn add_gene(
     references: &[Transcript],
     opts: AddGeneOpts,
 ) -> Vec<Transcript> {
-    let reads = dedup_longest_by_name(reads);
-    add_gene_no_dedup(&reads, references, opts)
+    try_add_gene(reads, references, opts)
+        .unwrap_or_else(|error| panic!("invalid gene-assignment options: {error}"))
 }
 
 #[cfg(test)]
@@ -203,10 +233,7 @@ mod tests {
 
         let out = add_gene(&reads, &refs, AddGeneOpts::default());
         assert_eq!(out.len(), 1);
-        assert_eq!(
-            out[0].extra_fields.get(GENE_NAME_COL).map(|s| s.as_str()),
-            Some("GENE1")
-        );
+        assert_eq!(out[0].metadata().gene_id(), Some("GENE1"));
     }
 
     #[test]
@@ -232,13 +259,37 @@ mod tests {
 
         let out = add_gene_no_dedup(&reads, &refs, AddGeneOpts::default());
         assert_eq!(out.len(), 2);
-        assert_eq!(
-            out[0].extra_fields.get(GENE_NAME_COL).map(|s| s.as_str()),
-            Some("GENE1")
-        );
-        assert_eq!(
-            out[1].extra_fields.get(GENE_NAME_COL).map(|s| s.as_str()),
-            Some("GENE1")
-        );
+        assert_eq!(out[0].metadata().gene_id(), Some("GENE1"));
+        assert_eq!(out[1].metadata().gene_id(), Some("GENE1"));
+    }
+
+    #[test]
+    fn add_gene_marks_unassigned_reads_as_none() {
+        let reads = vec![make_tx("unmatched", 100, 200, &[(100, 200)], "STALE_GENE")];
+
+        let out = add_gene_no_dedup(&reads, &[], AddGeneOpts::default());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].metadata().gene_id_field(), Some("none"));
+    }
+
+    #[test]
+    fn rejects_invalid_overlap_fractions_at_library_boundary() {
+        for opts in [
+            AddGeneOpts {
+                fraction_read: f64::NAN,
+                fraction_ref: 0.05,
+            },
+            AddGeneOpts {
+                fraction_read: -0.1,
+                fraction_ref: 0.05,
+            },
+            AddGeneOpts {
+                fraction_read: 0.01,
+                fraction_ref: 1.1,
+            },
+        ] {
+            assert!(try_add_gene(&[], &[], opts).is_err());
+            assert!(try_add_gene_no_dedup(&[], &[], opts).is_err());
+        }
     }
 }

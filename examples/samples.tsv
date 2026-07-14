@@ -1,0 +1,3 @@
+sample	group	reads
+S1	control	S1.reads.bed
+S2	treated	S2.reads.bed

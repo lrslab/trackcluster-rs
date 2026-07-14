@@ -5,11 +5,15 @@ use crate::model::Transcript;
 use super::StrandMode;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// Chromosome and optional strand key for an interval partition.
 pub struct PartitionKey {
+    /// Reference sequence name.
     pub chrom: String,
+    /// Strand key when strand matching is enabled.
     pub strand: Option<crate::model::Strand>,
 }
 
+/// Group transcript indices by chromosome and the selected strand policy.
 pub fn partition(
     transcripts: &[Transcript],
     strand_mode: StrandMode,

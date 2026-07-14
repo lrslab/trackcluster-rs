@@ -4,7 +4,7 @@ use crate::cluster::{clusterj::Name2Mode, result::ClusterResult};
 use crate::interval::{cluster_by_span, exonic_overlap_bp, StrandMode};
 use crate::model::{Interval, Strand, Transcript};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum TrackSource {
     Reference,
     Read,
@@ -58,17 +58,28 @@ struct PairDistance {
 struct Track {
     tx: Transcript,
     source: TrackSource,
-    subreads: HashSet<String>,
+    subreads: HashSet<ReadInstance>,
     exon_len: u32,
     introns: Vec<Interval>,
     intron_len: u32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ReadInstance {
+    index: usize,
+    name: String,
+}
+
 impl Track {
-    fn new(tx: Transcript, source: TrackSource) -> Self {
-        let mut subreads: HashSet<String> = HashSet::new();
+    fn new(tx: Transcript, source: TrackSource, read_index: Option<usize>) -> Self {
+        let mut subreads = HashSet::new();
         if source == TrackSource::Read {
-            subreads.insert(tx.name.clone());
+            subreads.insert(ReadInstance {
+                index: read_index.expect("read tracks require an input-instance index"),
+                name: tx.name.clone(),
+            });
+        } else {
+            debug_assert!(read_index.is_none());
         }
         let exon_len = tx.exons.iter().map(|exon| exon.len()).sum();
         let introns = tx.introns();
@@ -81,6 +92,14 @@ impl Track {
             introns,
             intron_len,
         }
+    }
+
+    fn reference(tx: Transcript) -> Self {
+        Self::new(tx, TrackSource::Reference, None)
+    }
+
+    fn read(tx: Transcript, index: usize) -> Self {
+        Self::new(tx, TrackSource::Read, Some(index))
     }
 
     fn is_reference(&self) -> bool {
@@ -135,13 +154,15 @@ impl Default for ClusterOptions {
     }
 }
 
-const NAME2_COL: usize = 0;
-
-fn set_extra(tx: &mut Transcript, idx: usize, value: String) {
-    if tx.extra_fields.len() <= idx {
-        tx.extra_fields.resize(idx + 1, "none".to_owned());
+impl ClusterOptions {
+    /// Validate scientific overlap options.
+    pub fn validate(self) -> Result<(), crate::config::ParameterError> {
+        crate::config::BatchRounds::new(self.batch_rounds)?;
+        crate::config::UnitFraction::new("overlap pass-1 cutoff", self.cutoff1)?;
+        crate::config::UnitFraction::new("overlap pass-2 cutoff", self.cutoff2)?;
+        crate::config::NonNegativeWeight::new("overlap intron weight", self.intron_weight)?;
+        Ok(())
     }
-    tx.extra_fields[idx] = value;
 }
 
 fn overlap_bp(a: &[Interval], b: &[Interval]) -> u32 {
@@ -304,21 +325,23 @@ fn should_use_sparse_pair_candidates(tracks_len: usize, cutoff: f64, intron_weig
 }
 
 fn merge_subreads(src: usize, dst: usize, tracks: &mut [Track]) {
-    if tracks[src].is_read() {
-        let name = tracks[src].tx.name.clone();
-        tracks[dst].subreads.insert(name);
-    }
-
-    let subs: Vec<String> = tracks[src].subreads.iter().cloned().collect();
+    let subs: Vec<ReadInstance> = tracks[src].subreads.iter().cloned().collect();
     tracks[dst].subreads.extend(subs);
 }
 
 fn merge_tracks_by_name(tracks: Vec<Track>) -> Vec<Track> {
     let mut merged: Vec<Track> = Vec::with_capacity(tracks.len());
-    let mut positions: HashMap<(TrackSource, String), usize> = HashMap::new();
+    let mut positions: HashMap<(TrackSource, String, String), usize> = HashMap::new();
 
     for track in tracks {
-        let key = (track.source, track.tx.name.clone());
+        // A read label identifies a molecule, not a unique alignment. Keep
+        // structurally distinct alignments separate during clustering; only
+        // exact structural copies of the same source/name are coalesced.
+        let key = (
+            track.source,
+            track.tx.name.clone(),
+            crate::identity::novel_isoform_id(&track.tx),
+        );
         if let Some(&idx) = positions.get(&key) {
             merged[idx].subreads.extend(track.subreads);
             continue;
@@ -346,27 +369,25 @@ fn split_reference_and_read_tracks(tracks: Vec<Track>) -> (Vec<Track>, Vec<Track
     (refs, reads)
 }
 
-fn readall(tracks: &[Track]) -> HashSet<String> {
-    let mut names: HashSet<String> = HashSet::new();
+fn readall(tracks: &[Track]) -> HashSet<usize> {
+    let mut instances = HashSet::new();
     for track in tracks {
-        names.insert(track.tx.name.clone());
         for sub in &track.subreads {
-            names.insert(sub.clone());
+            instances.insert(sub.index);
         }
     }
-    names
+    instances
 }
 
-fn readall_subset(tracks: &[Track], keep: &HashSet<usize>) -> HashSet<String> {
-    let mut names: HashSet<String> = HashSet::new();
+fn readall_subset(tracks: &[Track], keep: &HashSet<usize>) -> HashSet<usize> {
+    let mut instances = HashSet::new();
     for &idx in keep {
         let track = &tracks[idx];
-        names.insert(track.tx.name.clone());
         for sub in &track.subreads {
-            names.insert(sub.clone());
+            instances.insert(sub.index);
         }
     }
-    names
+    instances
 }
 
 fn should_drop_read(track: &Track, mode: DistanceMode, sw_score: i64) -> bool {
@@ -503,14 +524,16 @@ fn filter_pass(
         .collect::<Vec<_>>();
 
     if !missed.is_empty() {
-        let mut pos: HashMap<String, usize> = HashMap::new();
+        let mut pos: HashMap<usize, usize> = HashMap::new();
         for (idx, track) in tracks.iter().enumerate() {
             if track.is_read() {
-                pos.insert(track.tx.name.clone(), idx);
+                for instance in &track.subreads {
+                    pos.insert(instance.index, idx);
+                }
             }
         }
-        for name in missed {
-            if let Some(idx) = pos.get(&name).copied() {
+        for instance in missed {
+            if let Some(idx) = pos.get(&instance).copied() {
                 keep.insert(idx);
             }
         }
@@ -529,7 +552,7 @@ fn build_read_to_isoform(isoforms: &[Track]) -> Vec<(String, String)> {
     let mut pairs: Vec<(String, String)> = Vec::new();
     for track in isoforms {
         for subread in &track.subreads {
-            pairs.push((subread.clone(), track.tx.name.clone()));
+            pairs.push((subread.name.clone(), track.tx.name.clone()));
         }
     }
     pairs.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
@@ -539,38 +562,42 @@ fn build_read_to_isoform(isoforms: &[Track]) -> Vec<(String, String)> {
 fn update_name2(isoforms: &mut [Track], mode: Name2Mode) {
     if mode == Name2Mode::None {
         for track in isoforms.iter_mut() {
-            set_extra(&mut track.tx, NAME2_COL, "none".to_owned());
+            track.tx.metadata_mut().set_name2("none");
         }
         return;
     }
 
     let values: Vec<String> = {
-        let mut occurrence: HashMap<&str, u32> = HashMap::new();
+        let mut occurrence: HashMap<usize, u32> = HashMap::new();
         for track in isoforms.iter() {
-            for name in &track.subreads {
-                *occurrence.entry(name.as_str()).or_insert(0) += 1;
+            for subread in &track.subreads {
+                *occurrence.entry(subread.index).or_insert(0) += 1;
             }
         }
 
         isoforms
             .iter()
             .map(|track| {
+                let mut subreads: Vec<&ReadInstance> = track.subreads.iter().collect();
+                subreads.sort_unstable_by(|left, right| {
+                    left.name
+                        .cmp(&right.name)
+                        .then_with(|| left.index.cmp(&right.index))
+                });
                 let mut coverage = 0.0f64;
-                for name in &track.subreads {
-                    let denom = occurrence.get(name.as_str()).copied().unwrap_or(0);
+                for subread in &subreads {
+                    let denom = occurrence.get(&subread.index).copied().unwrap_or(0);
                     if denom > 0 {
                         coverage += 1.0f64 / denom as f64;
                     }
                 }
 
                 match mode {
-                    Name2Mode::Full => {
-                        let mut subreads: Vec<&str> =
-                            track.subreads.iter().map(|s| s.as_str()).collect();
-                        subreads.sort_unstable();
-                        let joined = subreads.join(",");
-                        format!("{joined},|{coverage}")
-                    }
+                    Name2Mode::Full => crate::identity::encode_name2(
+                        subreads.iter().map(|subread| subread.name.as_str()),
+                        coverage,
+                    )
+                    .expect("read IDs were validated before clustering"),
                     Name2Mode::Coverage => format!("|{coverage}"),
                     Name2Mode::None => unreachable!("handled above"),
                 }
@@ -579,14 +606,15 @@ fn update_name2(isoforms: &mut [Track], mode: Name2Mode) {
     };
 
     for (track, value) in isoforms.iter_mut().zip(values) {
-        set_extra(&mut track.tx, NAME2_COL, value);
+        track.tx.metadata_mut().set_name2(value);
     }
 }
 
 struct PartitionResult {
     isoforms: Vec<Transcript>,
     pairs: Vec<(String, String)>,
-    unused: Vec<Transcript>,
+    represented_read_indices: HashSet<usize>,
+    unused_read_indices: Vec<usize>,
 }
 
 struct WorkItem {
@@ -611,6 +639,9 @@ fn sort_tracks_by_coord(tracks: &mut [Track]) {
             .then_with(|| left.tx.tx_start.cmp(&right.tx.tx_start))
             .then_with(|| left.tx.tx_end.cmp(&right.tx.tx_end))
             .then_with(|| strand_rank(left.tx.strand).cmp(&strand_rank(right.tx.strand)))
+            .then_with(|| left.tx.exons.cmp(&right.tx.exons))
+            .then_with(|| left.source.cmp(&right.source))
+            .then_with(|| left.tx.name.cmp(&right.tx.name))
     });
 }
 
@@ -686,10 +717,10 @@ fn process_partition(
 ) -> PartitionResult {
     let mut records: Vec<Track> = Vec::with_capacity(ref_indices.len() + read_indices.len());
     for &idx in ref_indices {
-        records.push(Track::new(references[idx].clone(), TrackSource::Reference));
+        records.push(Track::reference(references[idx].clone()));
     }
     for &idx in read_indices {
-        records.push(Track::new(reads[idx].clone(), TrackSource::Read));
+        records.push(Track::read(reads[idx].clone(), idx));
     }
 
     sort_tracks_by_coord(&mut records);
@@ -699,7 +730,8 @@ fn process_partition(
 
     let mut isoforms: Vec<Transcript> = Vec::new();
     let mut pairs: Vec<(String, String)> = Vec::new();
-    let mut unused: Vec<Transcript> = Vec::new();
+    let mut represented_read_indices = HashSet::new();
+    let mut unused_read_indices = Vec::new();
 
     for locus in loci {
         let mut tracks: Vec<Track> = Vec::with_capacity(locus.members.len());
@@ -708,13 +740,30 @@ fn process_partition(
         }
 
         if !tracks.iter().any(Track::is_reference) {
-            unused.extend(tracks.into_iter().map(|track| track.tx));
+            unused_read_indices.extend(
+                tracks
+                    .iter()
+                    .flat_map(|track| track.subreads.iter().map(|subread| subread.index)),
+            );
             continue;
         }
 
         let mut tracks = batch_overlap_merge(tracks, options);
 
+        for track in &mut tracks {
+            if track.is_read() {
+                track.tx.name = crate::identity::novel_isoform_id(&track.tx);
+            }
+        }
+        let mut tracks = merge_tracks_by_name(tracks);
+        tracks.sort_by(|left, right| left.tx.name.cmp(&right.tx.name));
+
         update_name2(&mut tracks, options.name2_mode);
+        represented_read_indices.extend(
+            tracks
+                .iter()
+                .flat_map(|track| track.subreads.iter().map(|subread| subread.index)),
+        );
         pairs.extend(build_read_to_isoform(&tracks));
         isoforms.extend(tracks.into_iter().map(|track| track.tx));
     }
@@ -722,7 +771,8 @@ fn process_partition(
     PartitionResult {
         isoforms,
         pairs,
-        unused,
+        represented_read_indices,
+        unused_read_indices,
     }
 }
 
@@ -731,7 +781,17 @@ pub fn cluster(
     references: Option<&[Transcript]>,
     threads: usize,
 ) -> ClusterResult {
-    cluster_with_options(reads, references, threads, ClusterOptions::default())
+    try_cluster(reads, references, threads)
+        .unwrap_or_else(|error| panic!("invalid overlap-clustering options: {error}"))
+}
+
+/// Cluster with default options, returning invalid configuration errors.
+pub fn try_cluster(
+    reads: &[Transcript],
+    references: Option<&[Transcript]>,
+    threads: usize,
+) -> Result<ClusterResult, crate::config::ParameterError> {
+    try_cluster_with_options(reads, references, threads, ClusterOptions::default())
 }
 
 pub fn cluster_with_options(
@@ -740,18 +800,33 @@ pub fn cluster_with_options(
     threads: usize,
     options: ClusterOptions,
 ) -> ClusterResult {
+    try_cluster_with_options(reads, references, threads, options)
+        .unwrap_or_else(|error| panic!("invalid overlap-clustering options: {error}"))
+}
+
+/// Cluster with explicit options, returning invalid configuration errors.
+pub fn try_cluster_with_options(
+    reads: &[Transcript],
+    references: Option<&[Transcript]>,
+    threads: usize,
+    options: ClusterOptions,
+) -> Result<ClusterResult, crate::config::ParameterError> {
+    let threads = crate::config::WorkerThreads::new(threads)?.get();
+    options.validate()?;
+    crate::identity::validate_read_ids(reads)
+        .map_err(crate::config::ParameterError::invalid_identity)?;
     let references = match references {
         Some(references) => references,
         None => {
-            return ClusterResult {
+            return Ok(ClusterResult {
                 isoforms: Vec::new(),
                 read_to_isoform: Vec::new(),
                 unused: reads.to_vec(),
-            }
+            });
         }
     };
-
-    let threads = threads.max(1);
+    crate::identity::validate_reference_ids(references)
+        .map_err(crate::config::ParameterError::invalid_identity)?;
 
     let mut refs_by_key: HashMap<PartitionKey, Vec<usize>> = HashMap::new();
     for (idx, tx) in references.iter().enumerate() {
@@ -765,14 +840,14 @@ pub fn cluster_with_options(
     }
 
     let mut reads_by_key: HashMap<PartitionKey, Vec<usize>> = HashMap::new();
-    let mut unmatched_reads: Vec<Transcript> = Vec::new();
+    let mut unmatched_read_indices = Vec::new();
     for (idx, read) in reads.iter().enumerate() {
         let key = PartitionKey {
             chrom: read.chrom.clone(),
             strand: read.strand,
         };
         if !refs_by_key.contains_key(&key) {
-            unmatched_reads.push(read.clone());
+            unmatched_read_indices.push(idx);
             continue;
         }
         reads_by_key.entry(key).or_default().push(idx);
@@ -780,7 +855,8 @@ pub fn cluster_with_options(
 
     let mut all_isoforms: Vec<Transcript> = Vec::new();
     let mut all_pairs: Vec<(String, String)> = Vec::new();
-    let mut all_unused: Vec<Transcript> = unmatched_reads;
+    let mut represented_read_indices = HashSet::new();
+    let mut unused_read_indices = unmatched_read_indices;
 
     let mut keys: Vec<PartitionKey> = refs_by_key.keys().cloned().collect();
     keys.sort_by(|a, b| a.chrom.cmp(&b.chrom).then_with(|| a.strand.cmp(&b.strand)));
@@ -850,16 +926,49 @@ pub fn cluster_with_options(
     for part in parts.into_iter().flatten() {
         all_isoforms.extend(part.isoforms);
         all_pairs.extend(part.pairs);
-        all_unused.extend(part.unused);
+        represented_read_indices.extend(part.represented_read_indices);
+        unused_read_indices.extend(part.unused_read_indices);
     }
 
-    all_pairs.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    unused_read_indices.sort_unstable();
+    let unused_instance_set: HashSet<usize> = unused_read_indices.iter().copied().collect();
+    assert_eq!(
+        unused_instance_set.len(),
+        unused_read_indices.len(),
+        "overlap clustering classified a read instance as unused more than once"
+    );
+    assert!(
+        represented_read_indices.is_disjoint(&unused_instance_set),
+        "overlap clustering classified a read instance as both represented and unused"
+    );
+    assert!(
+        represented_read_indices
+            .iter()
+            .chain(unused_instance_set.iter())
+            .all(|index| *index < reads.len()),
+        "overlap clustering produced an out-of-range read instance"
+    );
+    assert_eq!(
+        represented_read_indices.len() + unused_instance_set.len(),
+        reads.len(),
+        "overlap clustering violated read-instance conservation"
+    );
 
-    ClusterResult {
+    all_pairs.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    all_isoforms.sort_by(|left, right| left.name.cmp(&right.name));
+    crate::identity::validate_isoform_ids(&all_isoforms)
+        .map_err(crate::config::ParameterError::invalid_identity)?;
+    let mut all_unused: Vec<Transcript> = unused_read_indices
+        .into_iter()
+        .map(|index| reads[index].clone())
+        .collect();
+    all_unused.sort_by(crate::identity::transcript_order);
+
+    Ok(ClusterResult {
         isoforms: all_isoforms,
         read_to_isoform: all_pairs,
         unused: all_unused,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -867,6 +976,43 @@ mod tests {
     use crate::model::{Bed12Attrs, Coord, Interval, Strand, Transcript};
 
     use super::*;
+
+    #[test]
+    fn name2_coverage_sum_is_independent_of_hash_iteration_order() {
+        let expected = (1..=12)
+            .map(|denominator| 1.0 / f64::from(denominator))
+            .sum::<f64>();
+        let expected_payload = format!("|{expected}");
+
+        for _ in 0..64 {
+            let mut tracks = (0..12)
+                .map(|index| {
+                    Track::reference(make_tx(
+                        &format!("isoform_{index:02}"),
+                        Strand::Plus,
+                        &[(100, 200)],
+                        "isoform_anno",
+                        100,
+                    ))
+                })
+                .collect::<Vec<_>>();
+            for read_index in 0..12 {
+                let read = ReadInstance {
+                    index: read_index,
+                    name: format!("read_{read_index:02}"),
+                };
+                for track in tracks.iter_mut().take(read_index + 1) {
+                    track.subreads.insert(read.clone());
+                }
+            }
+
+            update_name2(&mut tracks, Name2Mode::Coverage);
+            assert_eq!(
+                tracks[0].tx.metadata().name2_field(),
+                Some(expected_payload.as_str())
+            );
+        }
+    }
 
     fn make_tx(
         name: &str,
@@ -1113,6 +1259,51 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_read_ids_are_conserved_as_distinct_instances() {
+        let refs = vec![make_plain_bed12_tx(
+            "chr1",
+            "ref",
+            Strand::Plus,
+            &[(100, 110), (120, 130)],
+            100,
+        )];
+        let reads = vec![
+            make_plain_bed12_tx(
+                "chr1",
+                "duplicate_id",
+                Strand::Plus,
+                &[(100, 110), (120, 130)],
+                1,
+            ),
+            make_plain_bed12_tx(
+                "chr2",
+                "duplicate_id",
+                Strand::Plus,
+                &[(100, 110), (120, 130)],
+                1,
+            ),
+        ];
+
+        let result = cluster_with_options(
+            &reads,
+            Some(&refs),
+            1,
+            ClusterOptions {
+                name2_mode: Name2Mode::Coverage,
+                ..ClusterOptions::default()
+            },
+        );
+
+        assert_eq!(
+            result.read_to_isoform,
+            vec![("duplicate_id".to_owned(), "ref".to_owned())]
+        );
+        assert_eq!(result.unused.len(), 1);
+        assert_eq!(result.unused[0].chrom, "chr2");
+        assert_eq!(result.unused[0].name, "duplicate_id");
+    }
+
+    #[test]
     fn sw_score_minus_one_keeps_ratio_short_truncation_merge() {
         use std::collections::HashSet;
 
@@ -1229,7 +1420,9 @@ mod tests {
             .collect();
 
         assert_eq!(sl_targets.len(), 1);
-        assert!(sl_targets.contains("read_sl"));
+        assert!(sl_targets
+            .iter()
+            .all(|id| id.starts_with(crate::identity::NOVEL_ISOFORM_PREFIX)));
     }
 
     #[test]
@@ -1270,7 +1463,9 @@ mod tests {
             .collect();
 
         assert_eq!(sl_targets.len(), 1);
-        assert!(sl_targets.contains("read_sl"));
+        assert!(sl_targets
+            .iter()
+            .all(|id| id.starts_with(crate::identity::NOVEL_ISOFORM_PREFIX)));
     }
 
     #[test]
@@ -1309,7 +1504,9 @@ mod tests {
             .map(|(_, isoform_id)| isoform_id.as_str())
             .collect();
         assert_eq!(protected_targets.len(), 1);
-        assert!(protected_targets.contains("read_sl"));
+        assert!(protected_targets
+            .iter()
+            .all(|id| id.starts_with(crate::identity::NOVEL_ISOFORM_PREFIX)));
 
         for batch_size in [0, 1] {
             let no_signal = cluster_with_options(
@@ -1337,17 +1534,14 @@ mod tests {
     #[test]
     fn exon_candidate_generation_is_sparse_and_ordered() {
         let tracks = vec![
-            Track::new(
-                make_tx(
-                    "ref",
-                    Strand::Plus,
-                    &[(100, 110), (120, 130)],
-                    "isoform_anno",
-                    100,
-                ),
-                TrackSource::Reference,
-            ),
-            Track::new(
+            Track::reference(make_tx(
+                "ref",
+                Strand::Plus,
+                &[(100, 110), (120, 130)],
+                "isoform_anno",
+                100,
+            )),
+            Track::read(
                 make_tx(
                     "read_overlap",
                     Strand::Plus,
@@ -1355,9 +1549,9 @@ mod tests {
                     "nanopore_read",
                     0,
                 ),
-                TrackSource::Read,
+                0,
             ),
-            Track::new(
+            Track::read(
                 make_tx(
                     "read_disjoint",
                     Strand::Plus,
@@ -1365,7 +1559,7 @@ mod tests {
                     "nanopore_read",
                     0,
                 ),
-                TrackSource::Read,
+                1,
             ),
         ];
 
@@ -1458,6 +1652,73 @@ mod tests {
     }
 
     #[test]
+    fn stable_novel_ids_and_safe_name2_are_input_order_independent() {
+        let refs = vec![make_tx(
+            "ref",
+            Strand::Plus,
+            &[(100, 110), (120, 130), (140, 150)],
+            "isoform_anno",
+            100,
+        )];
+        let reads = vec![
+            make_tx(
+                "read,z|%",
+                Strand::Plus,
+                &[(120, 130), (140, 150)],
+                "nanopore_read",
+                DEFAULT_SW_SCORE as u32 + 1,
+            ),
+            make_tx(
+                "read,a",
+                Strand::Plus,
+                &[(120, 130), (140, 150)],
+                "nanopore_read",
+                DEFAULT_SW_SCORE as u32 + 1,
+            ),
+        ];
+
+        let forward = cluster_with_options(&reads, Some(&refs), 1, ClusterOptions::default());
+        let mut reversed_reads = reads.clone();
+        reversed_reads.reverse();
+        let reversed =
+            cluster_with_options(&reversed_reads, Some(&refs), 4, ClusterOptions::default());
+
+        assert_eq!(forward.isoforms, reversed.isoforms);
+        assert_eq!(forward.read_to_isoform, reversed.read_to_isoform);
+        let targets: HashSet<&str> = forward
+            .read_to_isoform
+            .iter()
+            .filter(|(read, _)| read == "read,z|%" || read == "read,a")
+            .map(|(_, isoform)| isoform.as_str())
+            .collect();
+        assert_eq!(targets.len(), 1);
+        let novel_id = *targets.iter().next().unwrap();
+        assert!(novel_id.starts_with(crate::identity::NOVEL_ISOFORM_PREFIX));
+        let novel = forward
+            .isoforms
+            .iter()
+            .find(|tx| tx.name == novel_id)
+            .unwrap();
+        assert_eq!(
+            crate::identity::decode_name2(&novel.extra_fields[0])
+                .unwrap()
+                .into_iter()
+                .collect::<HashSet<_>>(),
+            HashSet::from(["read,z|%".to_owned(), "read,a".to_owned()])
+        );
+    }
+
+    #[test]
+    fn overlap_clustering_rejects_duplicate_reference_ids() {
+        let refs = vec![
+            make_tx("same", Strand::Plus, &[(0, 10)], "isoform_anno", 100),
+            make_tx("same", Strand::Plus, &[(20, 30)], "isoform_anno", 100),
+        ];
+        let error = try_cluster(&[], Some(&refs), 1).unwrap_err();
+        assert!(error.to_string().contains("duplicate reference isoform id"));
+    }
+
+    #[test]
     fn overlap_batching_matches_unbatched_on_simple_locus() {
         let refs = vec![make_tx(
             "ref",
@@ -1528,5 +1789,31 @@ mod tests {
             .collect();
         assert_eq!(single_names, batch_names);
         assert_eq!(single_names, oversized_names);
+    }
+
+    #[test]
+    fn rejects_invalid_options_at_library_boundary() {
+        assert!(try_cluster_with_options(&[], None, 0, ClusterOptions::default()).is_err());
+
+        for options in [
+            ClusterOptions {
+                cutoff1: f64::NAN,
+                ..ClusterOptions::default()
+            },
+            ClusterOptions {
+                cutoff2: 1.1,
+                ..ClusterOptions::default()
+            },
+            ClusterOptions {
+                intron_weight: -0.1,
+                ..ClusterOptions::default()
+            },
+            ClusterOptions {
+                intron_weight: f64::INFINITY,
+                ..ClusterOptions::default()
+            },
+        ] {
+            assert!(try_cluster_with_options(&[], None, 1, options).is_err());
+        }
     }
 }

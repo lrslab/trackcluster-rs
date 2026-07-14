@@ -3,18 +3,32 @@ use thiserror::Error;
 use super::Coord;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// A half-open interval `[start, end)` validated by [`Interval::new`].
+///
+/// Fields remain public for compatibility, so callers that mutate them directly
+/// are responsible for preserving `start <= end`.
 pub struct Interval {
+    /// Inclusive start coordinate.
     pub start: Coord,
+    /// Exclusive end coordinate.
     pub end: Coord,
 }
 
 #[derive(Error, Debug)]
+/// Error returned when constructing an invalid interval.
 pub enum IntervalError {
+    /// The start coordinate is greater than the end coordinate.
     #[error("invalid interval: start {start} > end {end}")]
-    StartAfterEnd { start: Coord, end: Coord },
+    StartAfterEnd {
+        /// Supplied interval start.
+        start: Coord,
+        /// Supplied interval end.
+        end: Coord,
+    },
 }
 
 impl Interval {
+    /// Construct a half-open interval, allowing an empty interval.
     pub fn new(start: Coord, end: Coord) -> Result<Self, IntervalError> {
         if start > end {
             return Err(IntervalError::StartAfterEnd { start, end });
@@ -22,14 +36,17 @@ impl Interval {
         Ok(Self { start, end })
     }
 
+    /// Return the number of bases in the interval.
     pub fn len(self) -> u32 {
         self.end.get() - self.start.get()
     }
 
+    /// Return whether the interval contains no bases.
     pub fn is_empty(self) -> bool {
         self.start == self.end
     }
 
+    /// Return the number of bases shared with another half-open interval.
     pub fn overlap_len(self, other: Self) -> u32 {
         let start = std::cmp::max(self.start, other.start);
         let end = std::cmp::min(self.end, other.end);
@@ -40,6 +57,7 @@ impl Interval {
         }
     }
 
+    /// Return whether this interval shares at least one base with another.
     pub fn overlaps(self, other: Self) -> bool {
         self.overlap_len(other) > 0
     }

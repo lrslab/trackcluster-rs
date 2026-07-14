@@ -7,9 +7,13 @@ use anyhow::Context;
 use crate::sample::SAMPLE_DELIM;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// One validated row from a multi-sample reads manifest.
 pub struct SampleRow {
+    /// Unique sample identifier.
     pub sample: String,
+    /// Optional experimental group.
     pub group: Option<String>,
+    /// Reads BED path, resolved relative to the manifest.
     pub reads: PathBuf,
 }
 
@@ -34,6 +38,7 @@ fn resolve_reads_path(manifest_path: &Path, reads_field: &str) -> PathBuf {
         .join(reads_path)
 }
 
+/// Read a TSV manifest with required `sample` and `reads` columns.
 pub fn read_manifest_tsv(path: &Path) -> anyhow::Result<Vec<SampleRow>> {
     let file = std::fs::File::open(path).with_context(|| format!("open manifest {path:?}"))?;
     let reader = std::io::BufReader::new(file);

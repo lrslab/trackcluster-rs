@@ -1,33 +1,23 @@
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-fn fresh_temp_dir(prefix: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time went backwards")
-        .as_nanos();
-    let mut dir = std::env::temp_dir();
-    dir.push(format!(
-        "trackcluster_rs_{}_{}_{}",
-        prefix,
-        std::process::id(),
-        nanos
-    ));
-    fs::create_dir_all(&dir).expect("create temp dir");
-    dir
+use common::{assert_success, TestDir};
+
+fn fresh_temp_dir(prefix: &str) -> TestDir {
+    TestDir::new(prefix)
 }
 
 fn normalized_lines(path: &Path) -> Vec<String> {
     let content = fs::read_to_string(path).unwrap_or_default();
-    let mut lines: Vec<String> = content
+    let lines: Vec<String> = content
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(ToOwned::to_owned)
         .collect();
-    lines.sort();
     lines
 }
 
@@ -36,8 +26,10 @@ fn normalized_lines(path: &Path) -> Vec<String> {
 fn clusterj_matches_python_flow_outputs_on_shoudong_488_subset() {
     let exe = env!("CARGO_BIN_EXE_trackcluster");
 
-    let root = std::env::var("TRACKCLUSTER_SHOUDONG_488_ROOT")
-        .unwrap_or_else(|_| "/t1/shoudong_488/test".to_owned());
+    let Some(root) = std::env::var_os("TRACKCLUSTER_SHOUDONG_488_ROOT") else {
+        eprintln!("skipping: set TRACKCLUSTER_SHOUDONG_488_ROOT to the dataset root");
+        return;
+    };
     let root = PathBuf::from(root);
     let tracktest = root.join("tracktest");
     if !tracktest.exists() {
@@ -70,7 +62,7 @@ fn clusterj_matches_python_flow_outputs_on_shoudong_488_subset() {
         let out_bed = out_dir.join("isoform.bed");
 
         // Treat reads as having no SW-supported 5' signal while keeping ordinary merge behavior.
-        let status = Command::new(exe)
+        let output = Command::new(exe)
             .args([
                 "clusterj",
                 "-s",
@@ -82,9 +74,9 @@ fn clusterj_matches_python_flow_outputs_on_shoudong_488_subset() {
                 "--sw-score",
                 "-1",
             ])
-            .status()
+            .output()
             .expect("run clusterj");
-        assert!(status.success(), "clusterj failed for {gene}");
+        assert_success(&output, &format!("clusterj for {gene}"));
 
         let produced_unused = out_bed.with_extension("unused.bed");
 

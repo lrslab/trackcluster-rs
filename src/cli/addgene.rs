@@ -16,6 +16,13 @@ pub struct Args {
 }
 
 pub fn run(args: Args) -> anyhow::Result<()> {
+    super::ensure_distinct_inputs_and_outputs(
+        &[
+            ("reads input", args.reads.as_path()),
+            ("reference input", args.reference.as_path()),
+        ],
+        &[("annotated BED output", args.out.as_path())],
+    )?;
     let reads: Vec<crate::model::Transcript> = crate::io::bed::read_bed12(&args.reads)?
         .collect::<Result<Vec<_>, crate::io::bed::BedError>>()?;
     let refs: Vec<crate::model::Transcript> = crate::io::bed::read_bed12(&args.reference)?
@@ -26,6 +33,8 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         &refs,
         crate::annotate::addgene::AddGeneOpts::default(),
     );
-    crate::io::bed::write_bed12(&args.out, annotated.iter())?;
+    crate::flow::artifact_manifest::atomic_write_with(&args.out, |temporary| {
+        crate::io::bed::write_bed12_to_writer(temporary, annotated.iter()).map_err(Into::into)
+    })?;
     Ok(())
 }

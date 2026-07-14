@@ -1,0 +1,3 @@
+transcript_class	chrom	strand	exon_starts_0based	exon_ends_half_open	represented_read_ids
+known	chrLegacy	+	100,140,180	120,160,200	legacy_read_known_truncated
+novel	chrLegacy	+	100,150,190	120,170,200	legacy_read_novel_junctions
