@@ -59,9 +59,9 @@ jobs:
             --threads 1 \
             --force
           test -s "$smoke_root/smoke_isoform.bed"
-          grep -Eq '^git_commit\t[0-9a-f]{40}$' \
+          grep -Eq $'^git_commit\t[0-9a-f]{40}$' \
             "$smoke_root/clusterj_batch_summary.txt"
-          grep -Eq '^source_fingerprint\tsha256:[0-9a-f]{64}$' \
+          grep -Eq $'^source_fingerprint\tsha256:[0-9a-f]{64}$' \
             "$smoke_root/clusterj_batch_summary.txt"
           package_summary="$smoke_root/clusterj_batch_summary.txt"
           package_commit=$(awk -F '\t' '$1 == "git_commit" { print $2; exit }' \
@@ -86,8 +86,8 @@ jobs:
             --threads 1 \
             --force
           tampered_summary="$tampered_root/clusterj_batch_summary.txt"
-          grep -Eq '^git_commit\t[0-9a-f]{40}$' "$tampered_summary"
-          grep -Eq '^source_fingerprint\tsha256:[0-9a-f]{64}$' "$tampered_summary"
+          grep -Eq $'^git_commit\t[0-9a-f]{40}$' "$tampered_summary"
+          grep -Eq $'^source_fingerprint\tsha256:[0-9a-f]{64}$' "$tampered_summary"
           tampered_commit=$(awk -F '\t' '$1 == "git_commit" { print $2; exit }' \
             "$tampered_summary")
           tampered_fingerprint=$(awk -F '\t' '$1 == "source_fingerprint" { print $2; exit }' \

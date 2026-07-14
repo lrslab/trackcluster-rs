@@ -183,7 +183,7 @@ jobs:
             --threads 1 \
             --force
           test -s "$smoke_root/release-smoke_isoform.bed"
-          grep -Eq '^git_commit\t[0-9a-f]{40}$' \
+          grep -Eq $'^git_commit\t[0-9a-f]{40}$' \
             "$smoke_root/clusterj_batch_summary.txt"
           grep -Fx $'source_fingerprint\tclean' \
             "$smoke_root/clusterj_batch_summary.txt"
