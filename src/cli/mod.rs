@@ -8,6 +8,12 @@ pub mod desc;
 pub mod export;
 pub mod flow;
 pub mod gff2bigg;
+pub mod mod_aggregate;
+pub mod mod_contrast;
+pub mod mod_import_dorado;
+pub mod mod_import_m6anet;
+pub mod mod_site_summary;
+pub mod mod_subsample;
 pub mod preparedir;
 pub mod validate_bed;
 
@@ -210,6 +216,24 @@ pub enum Commands {
     /// Convert GFF3 or GTF transcript annotations to TrackCluster bigGenePred-compatible BED.
     #[command(name = "gff2bigg", visible_alias = "gff-to-bigg")]
     Gff2Bigg(gff2bigg::Args),
+    /// Aggregate normalized read-site modification observations by unique isoform assignment.
+    #[command(name = "mod-aggregate")]
+    ModAggregate(mod_aggregate::Args),
+    /// Summarize isoform/site audit rows into a deterministic per-site QC inventory.
+    #[command(name = "mod-site-summary")]
+    ModSiteSummary(mod_site_summary::Args),
+    /// Import m6Anet RNA002 read probabilities into normalized genomic observations.
+    #[command(name = "mod-import-m6anet")]
+    ModImportM6anet(mod_import_m6anet::Args),
+    /// Import genome-aligned Dorado/modBAM calls into normalized observations.
+    #[command(name = "mod-import-dorado")]
+    ModImportDorado(mod_import_dorado::Args),
+    /// Calculate explicit shared-site modification effect sizes without inferential p-values.
+    #[command(name = "mod-contrast")]
+    ModContrast(mod_contrast::Args),
+    /// Split one high-coverage sample into synchronized low-coverage pseudo-sample inputs.
+    #[command(name = "mod-subsample")]
+    ModSubsample(mod_subsample::Args),
 }
 
 pub fn run(cli: Cli) -> anyhow::Result<()> {
@@ -226,6 +250,12 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Export(args) => export::run(args),
         Commands::Bam2Bigg(args) => bam2bigg::run(args),
         Commands::Gff2Bigg(args) => gff2bigg::run(args),
+        Commands::ModAggregate(args) => mod_aggregate::run(args),
+        Commands::ModSiteSummary(args) => mod_site_summary::run(args),
+        Commands::ModImportM6anet(args) => mod_import_m6anet::run(args),
+        Commands::ModImportDorado(args) => mod_import_dorado::run(args),
+        Commands::ModContrast(args) => mod_contrast::run(args),
+        Commands::ModSubsample(args) => mod_subsample::run(args),
     }
 }
 

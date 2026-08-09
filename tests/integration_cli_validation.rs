@@ -76,6 +76,30 @@ fn flow_and_preparedir_reject_invalid_fractions() {
 }
 
 #[test]
+fn flow_modification_tuning_options_require_a_modification_manifest() {
+    let base = [
+        "flow",
+        "--reads",
+        "reads.bed",
+        "--reference",
+        "reference.bed",
+        "--output-root",
+        "out",
+        "--prefix",
+        "sample",
+    ];
+    for extra in [
+        vec!["--mod-min-callable", "2"],
+        vec!["--mod-min-read-join-rate", "0.8"],
+        vec!["--mod-allow-low-join"],
+    ] {
+        let mut args = base.to_vec();
+        args.extend(extra);
+        assert_trackcluster_rejects(&args, "--mod-manifest");
+    }
+}
+
+#[test]
 fn clusterj_rejects_zero_support_and_negative_offsets() {
     let base = [
         "clusterj",

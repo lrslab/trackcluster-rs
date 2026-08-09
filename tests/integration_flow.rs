@@ -114,6 +114,16 @@ fn flow_runs_end_to_end_and_matches_goldens() {
         "stale classification\n",
     )
     .expect("write retired classification artifact");
+    for suffix in [
+        ".mod_join_qc.tsv",
+        ".mod_site_join_qc.tsv",
+        ".isoform_mod_sites.tsv",
+        ".isoform_mod_design.tsv",
+        ".isoform_mod_contrasts.tsv",
+    ] {
+        fs::write(out_dir.join(format!("{prefix}{suffix}")), "stale\n")
+            .expect("write stale optional modification artifact");
+    }
 
     let output = Command::new(exe)
         .args([
@@ -186,6 +196,18 @@ fn flow_runs_end_to_end_and_matches_goldens() {
     assert!(!out_dir
         .join(format!("{prefix}_sqanti_structural_category.tsv"))
         .exists());
+    for suffix in [
+        ".mod_join_qc.tsv",
+        ".mod_site_join_qc.tsv",
+        ".isoform_mod_sites.tsv",
+        ".isoform_mod_design.tsv",
+        ".isoform_mod_contrasts.tsv",
+    ] {
+        assert!(
+            !out_dir.join(format!("{prefix}{suffix}")).exists(),
+            "stale optional modification artifact survived: {prefix}{suffix}"
+        );
+    }
     let desc = fs::read_to_string(out_dir.join(format!("{prefix}_desc.txt"))).unwrap();
     assert!(desc.starts_with("#schema\ttrackcluster-description-v2\tdesc\n"));
 
@@ -211,6 +233,127 @@ fn flow_runs_end_to_end_and_matches_goldens() {
     assert!(!out_dir
         .join(format!("{prefix}_unique_assignment.provenance.tsv"))
         .exists());
+}
+
+#[test]
+fn manifest_flow_runs_optional_modification_aggregation_after_unique_assignment() {
+    use trackcluster_rs::io::mod_calls::{
+        write_assay_metadata_to_writer, write_observations_tsv_to_writer,
+    };
+    use trackcluster_rs::model::Strand;
+    use trackcluster_rs::modification::{
+        AssayMetadata, ImplicitSkipPolicy, ModObservation, ModObservationKey, ModSiteKey,
+        ObservationState,
+    };
+
+    let fixture = fresh_temp_dir("flow_mod_fixture");
+    let out_dir = fresh_temp_dir("flow_mod_output");
+    fs::write(
+        out_dir.join("pooled.isoform_mod_contrasts.tsv"),
+        "stale contrast\n",
+    )
+    .unwrap();
+    let reads = repo_path("tests/fixtures/reads.bed");
+    let reference = repo_path("tests/fixtures/ref.bed");
+    let manifest = fixture.join("samples.tsv");
+    fs::write(
+        &manifest,
+        format!("sample\tgroup\treads\nS1\tcontrol\t{}\n", reads.display()),
+    )
+    .unwrap();
+
+    let observations_path = fixture.join("S1.observations.tsv");
+    write_observations_tsv_to_writer(
+        fs::File::create(&observations_path).unwrap(),
+        &[ModObservation {
+            key: ModObservationKey {
+                assay_id: "a1".to_owned(),
+                sample: "S1".to_owned(),
+                read_id: "S1::read_trunc".to_owned(),
+                site: ModSiteKey {
+                    chrom: "chr1".to_owned(),
+                    pos0: 125,
+                    strand: Strand::Plus,
+                    mod_code: "A+a".to_owned(),
+                },
+            },
+            probability: Some(0.9),
+            observation_state: ObservationState::ExplicitProbability,
+            context: None,
+            source_transcript_id: None,
+            source_pos0: None,
+        }],
+    )
+    .unwrap();
+    let assay_path = fixture.join("a1.assay.json");
+    write_assay_metadata_to_writer(
+        fs::File::create(&assay_path).unwrap(),
+        &AssayMetadata {
+            schema_version: 1,
+            assay_id: "a1".to_owned(),
+            caller: "test".to_owned(),
+            caller_version: "1".to_owned(),
+            model_id: "test".to_owned(),
+            chemistry: "RNA004".to_owned(),
+            candidate_rule: "all-context-A".to_owned(),
+            source_emission_threshold: None,
+            source_site_filter: "none".to_owned(),
+            candidate_observations_complete: true,
+            implicit_skip_policy: ImplicitSkipPolicy::NotApplicable,
+            coordinate_source: "synthetic_genomic".to_owned(),
+            read_id_mapping: "sample_prefixed".to_owned(),
+            source_files: Vec::new(),
+        },
+    )
+    .unwrap();
+    let mod_manifest = fixture.join("mod_samples.tsv");
+    fs::write(
+        &mod_manifest,
+        format!(
+            concat!(
+                "sample\tassay_id\tobservations\tassay_metadata\tcoverage_bam\n",
+                "S1\ta1\t{}\t{}\tNA\n"
+            ),
+            observations_path.display(),
+            assay_path.display()
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_trackcluster"))
+        .args(["flow", "--manifest"])
+        .arg(&manifest)
+        .arg("--reference")
+        .arg(&reference)
+        .arg("--output-root")
+        .arg(out_dir.path())
+        .args([
+            "--prefix",
+            "pooled",
+            "--threads",
+            "1",
+            "--max-reads-per-gene",
+            "0",
+            "--force",
+            "--mod-manifest",
+        ])
+        .arg(&mod_manifest)
+        .args(["--mod-analysis-threshold", "a1=0.5"])
+        .output()
+        .unwrap();
+    assert_success(&output, "flow with modification aggregation");
+
+    let join = fs::read_to_string(out_dir.join("pooled.mod_join_qc.tsv")).unwrap();
+    assert!(join.contains("\tS1\t1\t1\t1\t1\t1\t1\t1\t0\t"), "{join}");
+    let sites = fs::read_to_string(out_dir.join("pooled.isoform_mod_sites.tsv")).unwrap();
+    assert!(sites.contains("\tchr1\t125\t+\tA+a\t"), "{sites}");
+    assert!(
+        sites.contains("\t1\tNA\t1\t1\t1\t0\t0\t1\t0.9\t"),
+        "{sites}"
+    );
+    assert!(out_dir.join("pooled.isoform_mod_design.tsv").exists());
+    assert!(!out_dir.join("pooled.isoform_mod_contrasts.tsv").exists());
+    assert!(out_dir.join("pooled_read_to_isoform.unique.tsv").exists());
 }
 
 #[test]

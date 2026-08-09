@@ -3,19 +3,25 @@ Pure-Rust rewrite of TrackCluster (no Bedtools)
 Usage: trackcluster <COMMAND>
 
 Commands:
-  validate-bed  Validate BED12/bigGenePred structure, optionally reporting explicit legacy repairs
-  clusterj      Cluster long reads against a reference catalog by splice-junction structure
-  cluster       Cluster long reads against a reference catalog by transcript overlap
-  flow          Run preparation, per-gene clustering, merging, counting, and annotation
-  count         Count one sample against clustered isoforms
-  count-multi   Count multiple samples from a manifest against clustered isoforms
-  addgene       Assign gene annotations to reads by overlap with reference transcripts
-  preparedir    Build per-gene input directories from reads and a reference catalog
-  desc          Classify clustered isoforms relative to reference transcripts
-  export        Export a BED transcript catalog as GTF, GFF3, or SQANTI3 audit input
-  bam2bigg      Convert genome-aligned BAM records to TrackCluster bigGenePred-compatible BED [aliases: bam-to-bigg]
-  gff2bigg      Convert GFF3 or GTF transcript annotations to TrackCluster bigGenePred-compatible BED [aliases: gff-to-bigg]
-  help          Print this message or the help of the given subcommand(s)
+  validate-bed       Validate BED12/bigGenePred structure, optionally reporting explicit legacy repairs
+  clusterj           Cluster long reads against a reference catalog by splice-junction structure
+  cluster            Cluster long reads against a reference catalog by transcript overlap
+  flow               Run preparation, per-gene clustering, merging, counting, and annotation
+  count              Count one sample against clustered isoforms
+  count-multi        Count multiple samples from a manifest against clustered isoforms
+  addgene            Assign gene annotations to reads by overlap with reference transcripts
+  preparedir         Build per-gene input directories from reads and a reference catalog
+  desc               Classify clustered isoforms relative to reference transcripts
+  export             Export a BED transcript catalog as GTF, GFF3, or SQANTI3 audit input
+  bam2bigg           Convert genome-aligned BAM records to TrackCluster bigGenePred-compatible BED [aliases: bam-to-bigg]
+  gff2bigg           Convert GFF3 or GTF transcript annotations to TrackCluster bigGenePred-compatible BED [aliases: gff-to-bigg]
+  mod-aggregate      Aggregate normalized read-site modification observations by unique isoform assignment
+  mod-site-summary   Summarize isoform/site audit rows into a deterministic per-site QC inventory
+  mod-import-m6anet  Import m6Anet RNA002 read probabilities into normalized genomic observations
+  mod-import-dorado  Import genome-aligned Dorado/modBAM calls into normalized observations
+  mod-contrast       Calculate explicit shared-site modification effect sizes without inferential p-values
+  mod-subsample      Split one high-coverage sample into synchronized low-coverage pseudo-sample inputs
+  help               Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help     Print help

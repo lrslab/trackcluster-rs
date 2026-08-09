@@ -24,6 +24,12 @@ Implemented subcommands:
 - `bam2bigg`: convert genome-aligned BAM records to TrackCluster bigGenePred-compatible BED12+8
 - `gff2bigg`: convert GFF3 or GTF exon annotations to a TrackCluster reference catalog
 - `export`: write transcript catalogs as GTF, GFF3, or a SQANTI3 input-audit table
+- `mod-import-m6anet`: normalize m6Anet RNA002 per-read probabilities to genomic sites
+- `mod-import-dorado`: normalize one MM/ML modification code from a genome-aligned modBAM
+- `mod-subsample`: generate synchronized technical coverage partitions and ready-to-run manifests
+- `mod-aggregate`: join normalized read-site observations to unique isoform assignments
+- `mod-site-summary`: reduce complete isoform/site tables to a per-site QC inventory
+- `mod-contrast`: compute descriptive isoform, condition, and interaction effect sizes
 
 Extra binary:
 - `clusterj_batch`: run `clusterj` per gene folder in parallel (manual junction-mode batched runner; overlap-mode batching is exposed through `trackcluster flow --cluster-mode cluster`)
@@ -180,6 +186,49 @@ In unique assignment mode, `flow` also writes `<prefix>_read_to_isoform.unique.t
 
 The aggregate `out/pooled.isoform_count.csv` is derived from the per-sample matrix: each isoform count is the sum of that isoform's sample columns. In `flow --manifest`, the main `<prefix>_isoform_count.csv` is synchronized from the same aggregate count, so total and per-sample counts use the same assignment result.
 
+## Isoform-level RNA modifications
+
+Modification callers are normalized before they are joined to TrackCluster's
+final unique read-to-isoform assignments. This keeps caller/model/chemistry
+provenance separate and prevents missing observations from being interpreted as
+unmodified calls.
+
+```bash
+# Normalize caller output. See docs/CLI.md for all required provenance options.
+trackcluster mod-import-dorado --sample S1 --assay-id dorado_rna004_m6a \
+  --bam S1.aligned.bam --mod-code A+a --model-id rna004_m6a_model \
+  --candidate-rule all-target-canonical-bases \
+  --source-emission-threshold 0.05 --out S1.mod
+# For a motif-restricted model, use --candidate-rule DRACH; only matching
+# read-sequence candidates enter the denominator.
+
+# Aggregate against the exact mapping used for unique-mode expression counts.
+trackcluster mod-aggregate --manifest samples.tsv \
+  --isoforms out/pooled_isoform.bed \
+  --read-to-isoform out/pooled_read_to_isoform.unique.tsv \
+  --mod-manifest mod_samples.tsv \
+  --analysis-threshold dorado_rna004_m6a=0.5 --out out/pooled
+
+# Optional technical coverage test: split one parent sample by molecule.
+trackcluster mod-subsample --manifest samples.tsv \
+  --read-to-isoform out/pooled_read_to_isoform.unique.tsv \
+  --mod-manifest mod_samples.tsv --source-sample S1 \
+  --replicates 4 --reads-per-sample 5000 --mode disjoint \
+  --out-dir out/S1_low_inputs
+```
+
+`flow --manifest ... --mod-manifest ...` can run the aggregation as an optional
+post-processing step. V1 reports read-derived counts, fractions, Wilson
+intervals, and explicit effect-only contrasts; it does not treat reads as
+biological replicates, and contrast p/q values are `NA`. Exact schemas,
+denominator rules, and m6Anet examples are documented in
+[`docs/FORMATS.md`](docs/FORMATS.md) and [`docs/CLI.md`](docs/CLI.md).
+Pinned public-data and realistic-simulation checks are described in
+[`docs/MODIFICATION_VALIDATION.md`](docs/MODIFICATION_VALIDATION.md).
+`mod-subsample` pseudo-samples are technical coverage partitions only; their
+groups are intentionally blank and they must not be used as biological
+replicates.
+
 New catalogs use deterministic `tc_novel_v1:` structural IDs for novel
 isoforms and a percent-encoded `tc_name2_v1:` payload in `--name2-mode full`.
 Count CSVs have columns `gene,isoform_id,count` and use standard CSV escaping.
@@ -198,6 +247,7 @@ and algorithm errors are not downgraded by `--invalid-read-policy skip`.
 - [Pipeline tutorial](docs/PIPELINE.md)
 - [CLI reference](docs/CLI.md)
 - [File formats](docs/FORMATS.md)
+- [Modification validation](docs/MODIFICATION_VALIDATION.md)
 - [Interchange formats](docs/INTERCHANGE.md)
 - [Clustering behavior](docs/behavior/cluster.md)
 - [Description/classification behavior](docs/behavior/desc.md)

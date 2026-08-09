@@ -188,6 +188,8 @@ pub struct FullFlowResult {
     pub count_csv: PathBuf,
     pub desc_prefix: PathBuf,
     pub multi_sample: Option<MultiSampleOutputPaths>,
+    /// Final unique mapping, present only when unique assignment was selected.
+    pub unique_read_to_isoform_tsv: Option<PathBuf>,
 }
 
 fn remove_optional_output(path: &Path, kind: &str) -> anyhow::Result<()> {
@@ -1776,6 +1778,9 @@ pub fn run_full_flow(opts: FullFlowOptions) -> anyhow::Result<FullFlowResult> {
         count_csv,
         desc_prefix,
         multi_sample,
+        unique_read_to_isoform_tsv: (opts.counting.assignment_mode
+            == crate::count::AssignmentMode::Unique)
+            .then_some(unique_read_to_isoform_tsv),
     })
 }
 

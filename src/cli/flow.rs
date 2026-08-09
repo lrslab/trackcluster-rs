@@ -1,4 +1,7 @@
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+
+use anyhow::Context;
 
 #[derive(clap::Args, Debug)]
 pub struct Args {
@@ -117,6 +120,48 @@ pub struct Args {
     )]
     pub unique_assignment_junction_offset: u32,
 
+    /// Optional normalized modification manifest processed after unique assignment.
+    #[arg(long = "mod-manifest")]
+    pub mod_manifest: Option<PathBuf>,
+
+    /// Indexed genomic FASTA used to reject modification canonical-base mismatches.
+    #[arg(long = "mod-reference-fasta", requires = "mod_manifest")]
+    pub mod_reference_fasta: Option<PathBuf>,
+
+    /// Per-assay modification hard-call threshold as ASSAY_ID=PROBABILITY.
+    #[arg(
+        long = "mod-analysis-threshold",
+        requires = "mod_manifest",
+        value_parser = crate::cli::mod_aggregate::parse_analysis_threshold
+    )]
+    mod_analysis_thresholds: Vec<crate::cli::mod_aggregate::AnalysisThreshold>,
+
+    /// Minimum callable molecules for an eligible modification site row.
+    #[arg(
+        long = "mod-min-callable",
+        requires = "mod_manifest",
+        default_value_t = 1,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub mod_min_callable: u64,
+
+    /// Minimum modification read-ID join rate.
+    #[arg(
+        long = "mod-min-read-join-rate",
+        requires = "mod_manifest",
+        default_value = "0.9",
+        value_parser = crate::cli::mod_aggregate::parse_rate
+    )]
+    pub mod_min_read_join_rate: f64,
+
+    /// Emit low-join modification rows as ineligible instead of failing.
+    #[arg(long = "mod-allow-low-join", requires = "mod_manifest")]
+    pub mod_allow_low_join: bool,
+
+    /// Optional explicit contrast specification run after modification aggregation.
+    #[arg(long = "mod-contrasts", requires = "mod_manifest")]
+    pub mod_contrasts: Option<PathBuf>,
+
     /// Manifest mode: also write `<prefix>_pooled_reads.bed` for debugging/compatibility
     #[arg(long = "emit-pooled-reads")]
     pub emit_pooled_reads: bool,
@@ -164,6 +209,42 @@ pub struct Args {
     pub downsample_seed: u64,
 }
 
+fn append_suffix(prefix: &Path, suffix: &str) -> PathBuf {
+    let mut value: OsString = prefix.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+const MOD_AGGREGATE_OUTPUT_SUFFIXES: [&str; 4] = [
+    ".mod_join_qc.tsv",
+    ".mod_site_join_qc.tsv",
+    ".isoform_mod_sites.tsv",
+    ".isoform_mod_design.tsv",
+];
+const MOD_CONTRAST_OUTPUT_SUFFIX: &str = ".isoform_mod_contrasts.tsv";
+
+fn remove_stale_optional_output(prefix: &Path, suffix: &str) -> anyhow::Result<()> {
+    let path = append_suffix(prefix, suffix);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspect stale flow output {path:?}"));
+        }
+    };
+    if !metadata.file_type().is_file() {
+        anyhow::bail!("refusing to remove stale flow output {path:?}: expected a regular file");
+    }
+    std::fs::remove_file(&path).with_context(|| format!("remove stale flow output {path:?}"))
+}
+
+fn remove_stale_modification_outputs(prefix: &Path) -> anyhow::Result<()> {
+    for suffix in MOD_AGGREGATE_OUTPUT_SUFFIXES {
+        remove_stale_optional_output(prefix, suffix)?;
+    }
+    remove_stale_optional_output(prefix, MOD_CONTRAST_OUTPUT_SUFFIX)
+}
+
 impl Args {
     pub fn junction_config(&self) -> crate::flow::config::JunctionConfig {
         crate::flow::config::JunctionConfig::resolve(
@@ -200,7 +281,32 @@ pub fn run(args: Args) -> anyhow::Result<()> {
             "flow: --force rebuilds per-gene results and cannot be used with --count-only"
         );
     }
+    if args.mod_manifest.is_some() {
+        if args.manifest.is_none() {
+            anyhow::bail!("flow: --mod-manifest requires multi-sample --manifest input");
+        }
+        if args.assignment_mode != crate::count::AssignmentMode::Unique {
+            anyhow::bail!("flow: modification aggregation requires --assignment-mode unique");
+        }
+        if args.mod_analysis_thresholds.is_empty() {
+            anyhow::bail!("flow: --mod-manifest requires one --mod-analysis-threshold per assay");
+        }
+    } else if !args.mod_analysis_thresholds.is_empty()
+        || args.mod_contrasts.is_some()
+        || args.mod_reference_fasta.is_some()
+        || args.mod_min_callable != 1
+        || args.mod_min_read_join_rate != 0.9
+        || args.mod_allow_low_join
+    {
+        anyhow::bail!("flow: modification analysis options require --mod-manifest");
+    }
     let junction = args.junction_config();
+    let flow_manifest = args.manifest.clone();
+    let mod_manifest = args.mod_manifest.clone();
+    let mod_contrasts = args.mod_contrasts.clone();
+    let mod_thresholds =
+        crate::cli::mod_aggregate::collect_thresholds(args.mod_analysis_thresholds.clone())?;
+    let mod_output_prefix = args.output_root.join(&args.prefix);
 
     let result = crate::flow::full::run_full_flow(crate::flow::full::FullFlowOptions {
         cluster_mode: args.cluster_mode,
@@ -252,6 +358,48 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         emit_pooled_reads: args.emit_pooled_reads,
         count_only: args.count_only,
     })?;
+
+    if let Some(mod_manifest) = mod_manifest.as_deref() {
+        let sample_manifest = flow_manifest
+            .as_deref()
+            .expect("validated modification flow manifest");
+        let read_to_isoform = result
+            .unique_read_to_isoform_tsv
+            .as_deref()
+            .expect("validated unique assignment mode");
+        let mod_result = crate::cli::mod_aggregate::run_with_paths(
+            sample_manifest,
+            &result.isoform_bed,
+            read_to_isoform,
+            mod_manifest,
+            args.mod_reference_fasta.as_deref(),
+            mod_thresholds,
+            args.mod_min_callable,
+            args.mod_min_read_join_rate,
+            args.mod_allow_low_join,
+            &mod_output_prefix,
+        )?;
+        eprintln!(
+            "flow: modification join_qc_rows={} site_rows={} design_rows={}",
+            mod_result.join_qc.len(),
+            mod_result.sites.len(),
+            mod_result.design.len()
+        );
+        match mod_contrasts {
+            Some(contrasts) => {
+                crate::cli::mod_contrast::run(crate::cli::mod_contrast::Args {
+                    design: append_suffix(&mod_output_prefix, ".isoform_mod_design.tsv"),
+                    contrasts,
+                    out: mod_output_prefix.clone(),
+                })?;
+            }
+            None => {
+                remove_stale_optional_output(&mod_output_prefix, MOD_CONTRAST_OUTPUT_SUFFIX)?;
+            }
+        }
+    } else {
+        remove_stale_modification_outputs(&mod_output_prefix)?;
+    }
 
     eprintln!(
         "flow: isoform={:?} unused={:?} count={:?} desc_prefix={:?}",

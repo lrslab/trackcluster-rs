@@ -212,6 +212,7 @@ Run the full pipeline as a single command:
 3) merge per-gene outputs into `<prefix>_isoform.bed` and `<prefix>_unused.bed`
 4) `count` and `desc` on the merged isoforms
 5) when `--manifest` is used: run per-sample `count-multi` outputs from the pooled isoforms
+6) optionally aggregate normalized modification observations using the final unique mapping
 
 Key flags:
 - `--cluster-mode`: `clusterj` (default) or `cluster` (overlap/intersection mode)
@@ -241,6 +242,15 @@ Key flags:
 - `--prepare-fraction-read`, `--prepare-fraction-ref`: overlap thresholds for gene assignment
 - `--assignment-mode`: final counting mode, `unique` (default) or `fractional`; unique mode expands candidates against the isoform catalog before choosing the closest compatible isoform, including retained 3' early-stop isoforms.
 - `--unique-assignment-junction-offset` (default: `15`): maximum per-boundary difference for the ordered one-to-one intron matcher used by unique assignment.
+- `--mod-manifest`: optional normalized modification manifest. It requires
+  manifest mode and `--assignment-mode unique`; modification aggregation runs
+  only after clustering/count artifacts have been published.
+- `--mod-analysis-threshold ASSAY=VALUE`: required once per assay when
+  `--mod-manifest` is set. `--mod-min-callable`,
+  `--mod-min-read-join-rate`, and `--mod-allow-low-join` mirror
+  `mod-aggregate`.
+- `--mod-contrasts`: optional explicit contrast specification processed after
+  the modification design table is written.
 - `--emit-pooled-reads`: when using `--manifest`, also write `<prefix>_pooled_reads.bed`
 - `--max-reads-per-gene` (default: `50000`; set `0` to disable),
   `--downsample-gene <BIOLOGICAL_GENE_ID>` (repeatable),
@@ -280,6 +290,10 @@ Outputs (under `--output-root`):
 - `<prefix>.isoform_usage.long.tsv` (manifest mode only)
 - `<prefix>.isoform_counts.matrix.tsv` (manifest mode only)
 - `<prefix>.isoform_usage.group.tsv` (manifest mode only; when at least one sample has a non-empty `group`)
+- `<prefix>.mod_join_qc.tsv`, `<prefix>.mod_site_join_qc.tsv`,
+  `<prefix>.isoform_mod_sites.tsv`, and `<prefix>.isoform_mod_design.tsv`
+  (manifest mode + `--mod-manifest`)
+- `<prefix>.isoform_mod_contrasts.tsv` (`--mod-contrasts`)
 
 #### Platform presets and SL/no-SL data
 
@@ -341,6 +355,20 @@ trackcluster flow \
   --prefix pooled
 ```
 
+Manifest mode with normalized modification observations:
+```bash
+trackcluster flow \
+  --manifest samples.tsv \
+  --reference ref.bed \
+  --output-root out \
+  --prefix pooled \
+  --mod-manifest mod_samples.tsv \
+  --mod-analysis-threshold dorado_rna004_m6a=0.5
+```
+
+If modification aggregation or contrast calculation fails, `flow` returns an
+error but leaves the already completed clustering and count artifacts intact.
+
 Count-only rerun example:
 ```bash
 trackcluster flow \
@@ -351,6 +379,203 @@ trackcluster flow \
 ```
 
 `--count-only` expects completed per-gene output folders under `--output-root`. It uses the prefix-scoped `<prefix>_gene.txt` and `<prefix>_gene_paths.tsv` metadata when present. For a standalone `clusterj_batch` tree that has no prefix-scoped metadata, it uses the versioned `clusterj_batch_gene_paths.tsv` (or `cluster_batch_gene_paths.tsv` for overlap mode); it never infers the active gene set from stale directories. Per-gene directories and filenames use encoded path keys, while reports retain the biological gene ID. Gene IDs are limited to 4096 UTF-8 bytes and reject path separators, absolute paths, `.`/`..`, and control characters. Before publishing any merged output, count-only verifies every selected gene's `run.json`, prepared-input hashes, cluster mode and tool identity, and all output hashes, sizes, and record counts. Missing, legacy, modified, or incomplete per-gene results fail the command; rerun the producing flow or batch command to rebuild them. In unique assignment mode, it selects reads directly from each verified gene folder using the key-based nano BED, per-gene isoform BED, and read-to-isoform TSV. Add `--manifest samples.tsv` to a count-only rerun when you need manifest-mode `*.isoform_usage.*` outputs regenerated.
+
+### `trackcluster mod-import-m6anet`
+Normalize m6Anet RNA002 read probabilities and project exact transcript
+coordinates through a matching GTF/GFF annotation:
+
+```bash
+trackcluster mod-import-m6anet \
+  --sample S1 \
+  --assay-id m6anet_hct116_rna002 \
+  --model-id HCT116_RNA002 \
+  --indiv data.indiv_proba.csv.gz \
+  --data-info data.info \
+  --site-proba data.site_proba.csv.gz \
+  --read-map read_index_to_read_id.tsv \
+  --reference matching_annotation.gtf \
+  --min-reads 20 \
+  --out S1.mod
+```
+
+`--read-map` has the exact header `read_index<TAB>read_id`. `read_index` is an
+opaque source token rather than an integer; this preserves m6Anet multi-input
+identifiers such as `966210_0`. Raw read IDs are prefixed as
+`<sample>::<read_id>`; already prefixed IDs must match `--sample`.
+Transcript IDs, including versions, must match the annotation exactly.
+`data.site_proba` is optional QC only and never supplies read observations.
+`--candidate-rule` is a 3–31 base odd-length IUPAC motif (default `DRACH`), is
+case-normalized, and must contain `A` at its center. When `data.site_proba` is
+present, each reported concrete k-mer must match this motif.
+Before parsing a genome-wide GTF/GFF, the importer scans the m6Anet tables for
+the required transcript IDs and materializes only those transcripts (plus
+same-stable-ID versions needed for a precise mismatch diagnostic).
+`projection_transcripts_loaded` records the resulting catalog size in import
+QC.
+Known read-threshold presets are `0.033379376` for `HCT116_RNA002` and
+`0.0032978046219796` for `arabidopsis_RNA002`; override the source cross-check
+with `--read-probability-threshold`. The final hard-call threshold is still an
+explicit `mod-aggregate --analysis-threshold` setting.
+
+### `trackcluster mod-import-dorado`
+Decode one modification code from a primary genome-aligned Dorado/modBAM:
+
+```bash
+trackcluster mod-import-dorado \
+  --sample S1 \
+  --assay-id dorado_rna004_m6a \
+  --bam calls.aligned.bam \
+  --mod-code A+a \
+  --model-id rna004_m6a_model \
+  --chemistry RNA004 \
+  --caller-version 2.0.0 \
+  --candidate-rule all-target-canonical-bases \
+  --source-emission-threshold 0.05 \
+  --out S1.mod
+```
+
+The importer validates `MM`/`ML`/`MN`, consumes every ML value before target
+filtering, projects `M/=/X/I/D/N/S/H/P`, and excludes secondary,
+supplementary, and unmapped records. The candidate rule may be
+`all-target-canonical-bases` or an odd-length centered IUPAC DNA motif of 3–31
+bases, such as `DRACH`; the motif center must be the target canonical base.
+Motifs are matched on the as-sequenced read orientation (including reverse BAM
+records), ambiguity in a read base does not create a candidate, and an explicit
+target call outside the declared motif is rejected. Motif observations carry
+the normalized motif in `context`.
+
+`.` or omitted skip flags become `implicit_below_emission_threshold`; `?`
+becomes `unknown`. An emission threshold is required before low-probability
+implicit rows can be represented by valid assay metadata.
+
+The safe default `--question-mark-policy unknown` follows the SAM
+specification. For a known threshold-sparse Dorado source that uses `?` for
+threshold omissions, the user may explicitly pass:
+
+```bash
+--candidate-rule all-target-canonical-bases \
+--source-emission-threshold 0.05 \
+--question-mark-policy below-emission-threshold
+```
+
+That override requires a positive source threshold. With a motif rule, only
+read bases matching that motif are expanded as omitted candidates; other
+canonical bases are outside the declared universe. `--invalid-record-policy
+skip` records malformed primary records (including candidate-rule mismatches)
+and marks the candidate universe incomplete; fail is default.
+
+Both importers atomically write `<out>.observations.tsv`, `<out>.assay.json`,
+and `<out>.import_qc.tsv`. The current modBAM importer materializes and sorts
+observations in memory; use a representative aligned subset for initial
+genome-wide validation rather than a multi-million-read BAM.
+See [MODIFICATION_VALIDATION.md](MODIFICATION_VALIDATION.md) for pinned m6Anet
+and ONT public-data checks.
+
+### `trackcluster mod-subsample`
+Create synchronized low-coverage pseudo-sample inputs from one high-coverage
+sample after final unique assignment:
+
+```bash
+trackcluster mod-subsample \
+  --manifest samples.tsv \
+  --read-to-isoform out/pooled_read_to_isoform.unique.tsv \
+  --mod-manifest mod_samples.tsv \
+  --source-sample UHRR \
+  --sample-prefix UHRR_low \
+  --replicates 4 \
+  --reads-per-sample 5000 \
+  --mode disjoint \
+  --seed 17 \
+  --out-dir UHRR_low_inputs
+```
+
+The sampling unit is a source read molecule from the source sample's reads BED,
+not an observation row or an already assigned/read-observation intersection.
+Selected reads are synchronously materialized in reads BED, unique assignment,
+normalized observations, and coverage BAM outputs. Selected observations
+without an assignment are retained, so pseudo-sample join QC is not
+artificially raised to 1. BAM records preserve their original order and
+auxiliary tags, including `MM`/`ML`/`MN`.
+
+`disjoint` is the default and assigns a source molecule to at most one
+pseudo-sample. `independent` draws each pseudo-sample without replacement but
+allows overlap between pseudo-samples. Both use versioned SHA-256 ranking and
+are independent of BED and assignment input order. Normalized observations
+must be in the canonical order emitted by the importers so they can be split
+in one streaming pass.
+
+The command publishes a complete new directory atomically. Its `samples.tsv`,
+`mod_samples.tsv`, and `read_to_isoform.unique.tsv` can be passed directly to
+`mod-aggregate`. Generated sample groups are intentionally empty; the original
+group is retained only in `sample_provenance.tsv` and
+`subsample_provenance.json`. These samples measure technical coverage
+stability. They are not biological replicates, must not be used to increase
+condition/interaction sample size, and modification counts are never
+multiplied by a downsampling scale factor.
+
+### `trackcluster mod-aggregate`
+Join normalized observations to a final unique mapping:
+
+```bash
+trackcluster mod-aggregate \
+  --manifest samples.tsv \
+  --isoforms out/pooled_isoform.bed \
+  --read-to-isoform out/pooled_read_to_isoform.unique.tsv \
+  --mod-manifest mod_samples.tsv \
+  --reference-fasta GRCh38.fa \
+  --analysis-threshold dorado_rna004_m6a=0.5 \
+  --out out/pooled
+```
+
+The command emits sample-level and genomic-site-level join QC, a complete
+sample/isoform/site audit table, and a comparison-ready integer-count design
+table. It rejects fractional or conflicting assignments, incompatible assay
+metadata, low read-ID join rates, and analysis thresholds below a source
+emission threshold. `--reference-fasta` requires an adjacent samtools-compatible
+`.fai`; strand-oriented canonical-base mismatches remain in audit output as
+`reference_base_mismatch` but are not callable. When a modification
+manifest row supplies `coverage_bam`, mapped primary alignments are joined by
+sample-tagged query name and CIGAR `M`/`=`/`X` blocks provide exact genomic-base
+coverage. Every uniquely assigned molecule for that sample must be present;
+duplicate primary names or mismatched chromosome/strand assignments fail.
+Without a coverage BAM, `n_covering=NA` and `coverage_basis=unavailable`.
+The global and site-local join gates use the same
+`--min-read-join-rate`. `--allow-low-join` retains failures as ineligible rows;
+it never turns them into eligible evidence.
+
+### `trackcluster mod-site-summary`
+Reduce one or more complete site tables to a deterministic genomic-site
+inventory:
+
+```bash
+trackcluster mod-site-summary \
+  --sites GAPDH.isoform_mod_sites.tsv \
+  --sites ACTB.isoform_mod_sites.tsv \
+  --out out/all_genes
+```
+
+The command streams each strict 27-column input and writes
+`<out>.mod_site_summary.tsv`. It reports how many catalog isoforms are present,
+eligible, absent, context dependent, reference-base mismatched, or ineligible
+for other reasons at each `(assay, sample, gene, site, mod_code)`. A
+`shared_eligible` state requires at least two eligible isoforms. Input row keys
+must be unique across all supplied files.
+
+### `trackcluster mod-contrast`
+Calculate effect-only shared-site contrasts from an explicit nine-column
+contrast specification:
+
+```bash
+trackcluster mod-contrast \
+  --design out/pooled.isoform_mod_design.tsv \
+  --contrasts contrasts.tsv \
+  --out out/pooled
+```
+
+Supported types are `isoform_effect`, `condition_effect`, and
+`isoform_condition_interaction`. V1 does not claim replicate-level inference:
+`p_value` and `q_value` are always `NA`. Exact schemas and denominator rules
+are in [FORMATS.md](FORMATS.md#isoform-level-modification-formats).
 
 ### `trackcluster preparedir`
 Split one reads BED + one reference BED into per-gene folders.

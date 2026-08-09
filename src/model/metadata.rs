@@ -237,6 +237,88 @@ pub struct TranscriptGeometry<'a> {
     pub exons: &'a [Interval],
 }
 
+impl<'a> TranscriptGeometry<'a> {
+    /// Return the total number of exonic bases in spliced transcript space.
+    pub fn spliced_len(self) -> u64 {
+        self.exons.iter().map(|exon| u64::from(exon.len())).sum()
+    }
+
+    /// Return whether a zero-based genomic base lies inside any exon.
+    pub fn contains_genomic_base(self, pos0: Coord) -> bool {
+        self.exons
+            .iter()
+            .any(|exon| exon.start <= pos0 && pos0 < exon.end)
+    }
+
+    /// Convert a zero-based genomic base to a 5'-to-3' spliced offset.
+    ///
+    /// Unknown-strand transcripts have no transcript-oriented coordinate
+    /// system and return `None`.
+    pub fn genomic_to_spliced_offset(self, pos0: Coord) -> Option<u64> {
+        match self.strand {
+            Strand::Plus => {
+                let mut offset = 0u64;
+                for exon in self.exons {
+                    if exon.start <= pos0 && pos0 < exon.end {
+                        return Some(offset + u64::from(pos0.get() - exon.start.get()));
+                    }
+                    offset += u64::from(exon.len());
+                }
+                None
+            }
+            Strand::Minus => {
+                let mut offset = 0u64;
+                for exon in self.exons.iter().rev() {
+                    if exon.start <= pos0 && pos0 < exon.end {
+                        return Some(offset + u64::from(exon.end.get() - 1 - pos0.get()));
+                    }
+                    offset += u64::from(exon.len());
+                }
+                None
+            }
+            Strand::Unknown => None,
+        }
+    }
+
+    /// Convert a 5'-to-3' spliced offset to a zero-based genomic base.
+    ///
+    /// Unknown-strand transcripts have no transcript-oriented coordinate
+    /// system and return `None`.
+    pub fn spliced_offset_to_genomic(self, offset0: u64) -> Option<Coord> {
+        match self.strand {
+            Strand::Plus => {
+                let mut remaining = offset0;
+                for exon in self.exons {
+                    let len = u64::from(exon.len());
+                    if remaining < len {
+                        let pos0 = exon
+                            .start
+                            .get()
+                            .checked_add(u32::try_from(remaining).ok()?)?;
+                        return Some(Coord::new(pos0));
+                    }
+                    remaining -= len;
+                }
+                None
+            }
+            Strand::Minus => {
+                let mut remaining = offset0;
+                for exon in self.exons.iter().rev() {
+                    let len = u64::from(exon.len());
+                    if remaining < len {
+                        let delta = u32::try_from(remaining).ok()?;
+                        let pos0 = exon.end.get().checked_sub(1 + delta)?;
+                        return Some(Coord::new(pos0));
+                    }
+                    remaining -= len;
+                }
+                None
+            }
+            Strand::Unknown => None,
+        }
+    }
+}
+
 impl<'a> From<&'a Transcript> for TranscriptGeometry<'a> {
     fn from(transcript: &'a Transcript) -> Self {
         Self {
@@ -251,7 +333,23 @@ impl<'a> From<&'a Transcript> for TranscriptGeometry<'a> {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+
+    fn interval(start: u32, end: u32) -> Interval {
+        Interval::new(Coord::new(start), Coord::new(end)).unwrap()
+    }
+
+    fn geometry(strand: Strand, exons: &[Interval]) -> TranscriptGeometry<'_> {
+        TranscriptGeometry {
+            chrom: "chr1",
+            strand,
+            tx_start: exons[0].start,
+            tx_end: exons[exons.len() - 1].end,
+            exons,
+        }
+    }
 
     #[test]
     fn codec_round_trips_missing_and_trailing_fields() {
@@ -309,5 +407,138 @@ mod tests {
         TrackMetadataMut::new(&mut fields).set_gene_id("GENE1");
         assert_eq!(fields.len(), GENE_ID + 1);
         assert_eq!(TrackMetadataRef::new(&fields).gene_id(), Some("GENE1"));
+    }
+
+    #[test]
+    fn geometry_projects_plus_single_exon_boundaries() {
+        let exons = [interval(100, 105)];
+        let tx = geometry(Strand::Plus, &exons);
+
+        assert_eq!(tx.spliced_len(), 5);
+        assert!(!tx.contains_genomic_base(Coord::new(99)));
+        assert!(tx.contains_genomic_base(Coord::new(100)));
+        assert!(tx.contains_genomic_base(Coord::new(104)));
+        assert!(!tx.contains_genomic_base(Coord::new(105)));
+        assert_eq!(tx.genomic_to_spliced_offset(Coord::new(100)), Some(0));
+        assert_eq!(tx.genomic_to_spliced_offset(Coord::new(104)), Some(4));
+        assert_eq!(tx.genomic_to_spliced_offset(Coord::new(105)), None);
+        assert_eq!(tx.spliced_offset_to_genomic(0), Some(Coord::new(100)));
+        assert_eq!(tx.spliced_offset_to_genomic(4), Some(Coord::new(104)));
+        assert_eq!(tx.spliced_offset_to_genomic(5), None);
+    }
+
+    #[test]
+    fn geometry_projects_plus_multi_exon_boundaries() {
+        let exons = [interval(100, 103), interval(110, 114)];
+        let tx = geometry(Strand::Plus, &exons);
+
+        assert_eq!(tx.spliced_len(), 7);
+        assert_eq!(tx.genomic_to_spliced_offset(Coord::new(100)), Some(0));
+        assert_eq!(tx.genomic_to_spliced_offset(Coord::new(102)), Some(2));
+        assert_eq!(tx.genomic_to_spliced_offset(Coord::new(103)), None);
+        assert_eq!(tx.genomic_to_spliced_offset(Coord::new(109)), None);
+        assert_eq!(tx.genomic_to_spliced_offset(Coord::new(110)), Some(3));
+        assert_eq!(tx.genomic_to_spliced_offset(Coord::new(113)), Some(6));
+        assert_eq!(tx.spliced_offset_to_genomic(0), Some(Coord::new(100)));
+        assert_eq!(tx.spliced_offset_to_genomic(2), Some(Coord::new(102)));
+        assert_eq!(tx.spliced_offset_to_genomic(3), Some(Coord::new(110)));
+        assert_eq!(tx.spliced_offset_to_genomic(6), Some(Coord::new(113)));
+        assert_eq!(tx.spliced_offset_to_genomic(7), None);
+    }
+
+    #[test]
+    fn geometry_projects_minus_single_exon_boundaries() {
+        let exons = [interval(100, 105)];
+        let tx = geometry(Strand::Minus, &exons);
+
+        assert_eq!(tx.spliced_len(), 5);
+        assert!(!tx.contains_genomic_base(Coord::new(99)));
+        assert!(tx.contains_genomic_base(Coord::new(100)));
+        assert!(tx.contains_genomic_base(Coord::new(104)));
+        assert!(!tx.contains_genomic_base(Coord::new(105)));
+        assert_eq!(tx.genomic_to_spliced_offset(Coord::new(104)), Some(0));
+        assert_eq!(tx.genomic_to_spliced_offset(Coord::new(100)), Some(4));
+        assert_eq!(tx.genomic_to_spliced_offset(Coord::new(105)), None);
+        assert_eq!(tx.spliced_offset_to_genomic(0), Some(Coord::new(104)));
+        assert_eq!(tx.spliced_offset_to_genomic(4), Some(Coord::new(100)));
+        assert_eq!(tx.spliced_offset_to_genomic(5), None);
+    }
+
+    #[test]
+    fn geometry_projects_minus_multi_exon_boundaries() {
+        let exons = [interval(100, 103), interval(110, 114)];
+        let tx = geometry(Strand::Minus, &exons);
+
+        assert_eq!(tx.spliced_len(), 7);
+        assert_eq!(tx.genomic_to_spliced_offset(Coord::new(113)), Some(0));
+        assert_eq!(tx.genomic_to_spliced_offset(Coord::new(110)), Some(3));
+        assert_eq!(tx.genomic_to_spliced_offset(Coord::new(109)), None);
+        assert_eq!(tx.genomic_to_spliced_offset(Coord::new(103)), None);
+        assert_eq!(tx.genomic_to_spliced_offset(Coord::new(102)), Some(4));
+        assert_eq!(tx.genomic_to_spliced_offset(Coord::new(100)), Some(6));
+        assert_eq!(tx.spliced_offset_to_genomic(0), Some(Coord::new(113)));
+        assert_eq!(tx.spliced_offset_to_genomic(3), Some(Coord::new(110)));
+        assert_eq!(tx.spliced_offset_to_genomic(4), Some(Coord::new(102)));
+        assert_eq!(tx.spliced_offset_to_genomic(6), Some(Coord::new(100)));
+        assert_eq!(tx.spliced_offset_to_genomic(7), None);
+    }
+
+    #[test]
+    fn geometry_unknown_strand_keeps_length_and_contains_but_not_projection() {
+        let exons = [interval(100, 103), interval(110, 114)];
+        let tx = geometry(Strand::Unknown, &exons);
+
+        assert_eq!(tx.spliced_len(), 7);
+        assert!(tx.contains_genomic_base(Coord::new(100)));
+        assert!(tx.contains_genomic_base(Coord::new(113)));
+        assert!(!tx.contains_genomic_base(Coord::new(109)));
+        assert_eq!(tx.genomic_to_spliced_offset(Coord::new(100)), None);
+        assert_eq!(tx.spliced_offset_to_genomic(0), None);
+    }
+
+    fn exon_layout_strategy() -> impl Strategy<Value = Vec<Interval>> {
+        (0u32..100, prop::collection::vec((1u32..20, 0u32..10), 1..8)).prop_map(
+            |(mut cursor, parts)| {
+                let mut exons = Vec::with_capacity(parts.len());
+                for (len, gap) in parts {
+                    let start = cursor;
+                    let end = start + len;
+                    exons.push(interval(start, end));
+                    cursor = end + gap;
+                }
+                exons
+            },
+        )
+    }
+
+    proptest! {
+        #[test]
+        fn geometry_round_trips_plus_and_minus_offsets(exons in exon_layout_strategy()) {
+            for strand in [Strand::Plus, Strand::Minus] {
+                let tx = geometry(strand, &exons);
+                let len = tx.spliced_len();
+                prop_assert!(len > 0);
+                prop_assert_eq!(tx.spliced_offset_to_genomic(len), None);
+
+                for offset in 0..len {
+                    let pos = tx
+                        .spliced_offset_to_genomic(offset)
+                        .expect("valid offset maps to genomic base");
+                    prop_assert!(tx.contains_genomic_base(pos));
+                    prop_assert_eq!(tx.genomic_to_spliced_offset(pos), Some(offset));
+                }
+
+                for exon in &exons {
+                    for pos in exon.start.get()..exon.end.get() {
+                        let pos = Coord::new(pos);
+                        let offset = tx
+                            .genomic_to_spliced_offset(pos)
+                            .expect("exonic genomic base maps to offset");
+                        prop_assert!(offset < len);
+                        prop_assert_eq!(tx.spliced_offset_to_genomic(offset), Some(pos));
+                    }
+                }
+            }
+        }
     }
 }

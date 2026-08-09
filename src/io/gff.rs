@@ -6,8 +6,36 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use anyhow::Context;
+use flate2::read::MultiGzDecoder;
 
 use crate::model::{Bed12Attrs, Coord, Interval, Strand, Transcript};
+
+const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
+
+/// Open a plain-text or gzip-compressed input as a buffered reader.
+///
+/// Compression is detected from the gzip magic bytes so compressed inputs do
+/// not need a `.gz` suffix. A `.gz` suffix without gzip content is rejected.
+pub(crate) fn open_maybe_gzip(path: &Path) -> anyhow::Result<Box<dyn BufRead>> {
+    let file = File::open(path).with_context(|| format!("open text input {path:?}"))?;
+    let mut reader = BufReader::new(file);
+    let is_gzip = reader
+        .fill_buf()
+        .with_context(|| format!("inspect text input {path:?}"))?
+        .starts_with(&GZIP_MAGIC);
+    let has_gzip_suffix = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("gz"));
+    if has_gzip_suffix && !is_gzip {
+        anyhow::bail!("input {path:?} has a .gz suffix but is not gzip-compressed");
+    }
+    if is_gzip {
+        Ok(Box::new(BufReader::new(MultiGzDecoder::new(reader))))
+    } else {
+        Ok(Box::new(reader))
+    }
+}
 
 /// Annotation attribute syntax accepted by [`read_annotation_transcripts`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -679,8 +707,32 @@ pub fn read_annotation_transcripts(
     path: &Path,
     options: &GffToBiggOptions,
 ) -> anyhow::Result<Vec<Transcript>> {
-    let file = File::open(path).with_context(|| format!("open annotation input {path:?}"))?;
-    let reader = BufReader::new(file);
+    let transcripts = read_annotation_transcripts_where(path, options, true, |_| true)?;
+    if transcripts.is_empty() {
+        anyhow::bail!("annotation contains no exon features with transcript identities");
+    }
+    Ok(transcripts)
+}
+
+/// Read only annotation rows needed to assemble transcripts accepted by
+/// `keep_transcript`.
+///
+/// `retain_gene_features` preserves configured GFF3 gene labels for general
+/// conversion. Coordinate-only callers can disable it: transcript and exon
+/// gene IDs remain available, while unrelated genome-wide gene rows are not
+/// materialized. Irrelevant feature kinds are validated but released
+/// immediately instead of being retained for the whole annotation.
+pub(crate) fn read_annotation_transcripts_where<F>(
+    path: &Path,
+    options: &GffToBiggOptions,
+    retain_gene_features: bool,
+    keep_transcript: F,
+) -> anyhow::Result<Vec<Transcript>>
+where
+    F: Fn(&str) -> bool,
+{
+    let reader =
+        open_maybe_gzip(path).with_context(|| format!("open annotation input {path:?}"))?;
     let mut rows = Vec::new();
     for (line_index, result) in reader.lines().enumerate() {
         let line_number = line_index + 1;
@@ -692,17 +744,66 @@ pub fn read_annotation_transcripts(
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        rows.push(
-            parse_feature_row(line, line_number, options.format)
-                .with_context(|| format!("parse annotation {path:?}:{line_number}"))?,
-        );
+        let mut row = parse_feature_row(line, line_number, options.format)
+            .with_context(|| format!("parse annotation {path:?}:{line_number}"))?;
+        let retain = if is_gene_feature(&row.feature_type) {
+            retain_gene_features
+        } else if is_transcript_feature(&row.feature_type) {
+            transcript_id(&row).is_some_and(&keep_transcript)
+        } else if row.feature_type.eq_ignore_ascii_case("exon") {
+            match row.format {
+                AnnotationFormat::Gff3 => {
+                    row.parents.retain(|parent| keep_transcript(parent));
+                    !row.parents.is_empty()
+                }
+                AnnotationFormat::Gtf => row
+                    .attributes
+                    .get("transcript_id")
+                    .is_some_and(|id| keep_transcript(id)),
+                AnnotationFormat::Auto => {
+                    unreachable!("feature rows always have a resolved format")
+                }
+            }
+        } else {
+            false
+        };
+        if retain {
+            rows.push(row);
+        }
+    }
+    if !rows
+        .iter()
+        .any(|row| row.feature_type.eq_ignore_ascii_case("exon"))
+    {
+        return Ok(Vec::new());
     }
     build_transcripts(&rows, options).with_context(|| format!("convert annotation {path:?}"))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+
     use super::*;
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "trackcluster-gff-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&path).unwrap();
+        path
+    }
 
     fn parse_rows(text: &str, format: AnnotationFormat) -> Vec<FeatureRow> {
         text.lines()
@@ -796,5 +897,74 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("control character"));
+    }
+
+    #[test]
+    fn annotation_reader_accepts_plain_and_gzip_without_changing_api() {
+        let root = temp_dir("plain-gzip");
+        let plain = root.join("annotation.gtf");
+        let gzip = root.join("annotation.gtf.gz");
+        let annotation = concat!(
+            "chr1\ttest\texon\t101\t103\t.\t+\t.\tgene_id \"G1\"; transcript_id \"TX1.1\";\n",
+            "chr1\ttest\texon\t201\t203\t.\t+\t.\tgene_id \"G1\"; transcript_id \"TX1.1\";\n",
+        );
+        fs::write(&plain, annotation).unwrap();
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(annotation.as_bytes()).unwrap();
+        fs::write(&gzip, encoder.finish().unwrap()).unwrap();
+
+        let plain_transcripts =
+            read_annotation_transcripts(&plain, &GffToBiggOptions::default()).unwrap();
+        let gzip_transcripts =
+            read_annotation_transcripts(&gzip, &GffToBiggOptions::default()).unwrap();
+        assert_eq!(plain_transcripts, gzip_transcripts);
+        assert_eq!(plain_transcripts[0].name, "TX1.1");
+        assert_eq!(plain_transcripts[0].exons.len(), 2);
+
+        let fake_gzip = root.join("not-gzip.gtf.gz");
+        fs::write(&fake_gzip, annotation).unwrap();
+        let error =
+            read_annotation_transcripts(&fake_gzip, &GffToBiggOptions::default()).unwrap_err();
+        assert!(format!("{error:#}").contains("not gzip-compressed"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn filtered_reader_keeps_only_selected_gff3_transcript_parents() {
+        let root = temp_dir("filtered");
+        let path = root.join("annotation.gff3");
+        fs::write(
+            &path,
+            concat!(
+                "chr1\ttest\tgene\t1\t100\t.\t+\t.\tID=gene1\n",
+                "chr1\ttest\tmRNA\t1\t100\t.\t+\t.\tID=tx1;Parent=gene1\n",
+                "chr1\ttest\tmRNA\t1\t100\t.\t+\t.\tID=tx2;Parent=gene1\n",
+                "chr1\ttest\texon\t1\t10\t.\t+\t.\tParent=tx1,tx2\n",
+                "chr1\ttest\tCDS\t2\t9\t.\t+\t0\tParent=tx1,tx2\n",
+            ),
+        )
+        .unwrap();
+
+        let transcripts = read_annotation_transcripts_where(
+            &path,
+            &GffToBiggOptions {
+                format: AnnotationFormat::Gff3,
+                gene_key: "ID".to_owned(),
+            },
+            true,
+            |id| id == "tx2",
+        )
+        .unwrap();
+        assert_eq!(transcripts.len(), 1);
+        assert_eq!(transcripts[0].name, "tx2");
+        assert_eq!(transcripts[0].metadata().gene_id(), Some("gene1"));
+
+        let empty =
+            read_annotation_transcripts_where(&path, &GffToBiggOptions::default(), false, |_| {
+                false
+            })
+            .unwrap();
+        assert!(empty.is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 }

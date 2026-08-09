@@ -61,6 +61,8 @@ pub mod io;
 mod matching;
 /// Validated genomic coordinates, intervals, strands, and transcripts.
 pub mod model;
+/// Isoform-level RNA modification observations, aggregation, and contrasts.
+pub mod modification;
 #[allow(missing_docs)]
 mod sample;
 

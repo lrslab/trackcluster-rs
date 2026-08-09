@@ -66,6 +66,7 @@ jobs:
             docs/CLI.md \
             docs/FORMATS.md \
             docs/INTERCHANGE.md \
+            docs/MODIFICATION_VALIDATION.md \
             docs/PIPELINE.md \
             "$stage/docs/"
           cp docs/behavior/cluster.md docs/behavior/desc.md "$stage/docs/behavior/"
@@ -111,6 +112,7 @@ jobs:
             docs/CLI.md
             docs/FORMATS.md
             docs/INTERCHANGE.md
+            docs/MODIFICATION_VALIDATION.md
             docs/PIPELINE.md
             docs/behavior/cluster.md
             docs/behavior/desc.md

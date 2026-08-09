@@ -190,6 +190,64 @@ all valid.
 The direct single-gene `clusterj` and `cluster` commands use the same policy. With
 `--out isoform.bed`, their diagnostic is `isoform.rejected_reads.tsv`.
 
+### Optional isoform-level modification post-processing
+
+Modification import is intentionally separate from isoform discovery. First
+normalize each caller output. For a primary genome-aligned Dorado/modBAM, for
+example:
+
+```bash
+trackcluster mod-import-dorado \
+  --sample S1 \
+  --assay-id dorado_rna004_m6a \
+  --bam S1.aligned.bam \
+  --mod-code A+a \
+  --model-id rna004_m6a_model \
+  --candidate-rule all-target-canonical-bases \
+  --source-emission-threshold 0.05 \
+  --out S1.mod
+```
+
+This writes `S1.mod.observations.tsv`, `S1.mod.assay.json`, and
+`S1.mod.import_qc.tsv`. Build one modification manifest row per sample and
+compatible assay; `coverage_bam` can be `NA` when exact base-level coverage is
+not required:
+
+```tsv
+sample	assay_id	observations	assay_metadata	coverage_bam
+S1	dorado_rna004_m6a	S1.mod.observations.tsv	S1.mod.assay.json	S1.aligned.bam
+S2	dorado_rna004_m6a	S2.mod.observations.tsv	S2.mod.assay.json	S2.aligned.bam
+```
+
+Then attach modification aggregation to the manifest-mode flow. It runs only
+after the final unique read-to-isoform assignment has been published:
+
+```bash
+trackcluster flow \
+  --manifest samples.tsv \
+  --reference ref.bed \
+  --output-root out \
+  --prefix pooled \
+  --assignment-mode unique \
+  --mod-manifest mod_samples.tsv \
+  --mod-reference-fasta genome.fa \
+  --mod-analysis-threshold dorado_rna004_m6a=0.5
+```
+
+The optional stage writes `<prefix>.mod_join_qc.tsv`,
+`<prefix>.mod_site_join_qc.tsv`, `<prefix>.isoform_mod_sites.tsv`, and
+`<prefix>.isoform_mod_design.tsv`. Pass `--mod-contrasts contrasts.tsv` to also
+write `<prefix>.isoform_mod_contrasts.tsv`. The same aggregation can be run
+standalone with `trackcluster mod-aggregate` when clustering/counting is already
+complete.
+
+V1 requires exact unique assignment and keeps caller/model/chemistry strata
+separate. Missing or unknown observations are not silently classified as
+unmodified, and effect-only contrasts report `p_value` and `q_value` as `NA`.
+See the [CLI reference](CLI.md#trackcluster-mod-import-dorado), the exact
+[modification formats and denominator rules](FORMATS.md#isoform-level-modification-formats),
+and the [validation strategy and scientific limitations](MODIFICATION_VALIDATION.md).
+
 ### Safe resume and per-gene manifests
 
 Every successfully clustered gene directory contains `run.json`. This versioned completion

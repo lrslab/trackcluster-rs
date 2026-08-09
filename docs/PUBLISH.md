@@ -17,6 +17,7 @@ will be tagged.
   - `docs/CLI.md`
   - `docs/PIPELINE.md`
   - `docs/FORMATS.md`
+  - `docs/MODIFICATION_VALIDATION.md`
   - `docs/INTERCHANGE.md`
   - `docs/behavior/`
 - Run every README quickstart backed by the checked-in `examples/` inputs, and
