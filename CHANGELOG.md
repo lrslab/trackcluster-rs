@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.0
+
 - Add the isoform-level RNA-modification V1 commands: `mod-import-dorado` for strict MM/ML/MN decoding from primary genome-aligned modBAM, `mod-import-m6anet` for RNA002 read-probability projection, `mod-aggregate` for unique read-to-isoform aggregation, `mod-site-summary` for deterministic site QC inventories, `mod-contrast` for explicit effect-only comparisons, and `mod-subsample` for synchronized technical coverage partitions. `flow --mod-manifest` can run aggregation, and optional contrasts, after final unique assignment.
 - Standardize caller-import sidecars as `<prefix>.observations.tsv`, `<prefix>.assay.json`, and `<prefix>.import_qc.tsv`. Aggregation publishes `<prefix>.mod_join_qc.tsv`, `<prefix>.mod_site_join_qc.tsv`, `<prefix>.isoform_mod_sites.tsv`, and `<prefix>.isoform_mod_design.tsv`; site summaries and contrasts publish `<prefix>.mod_site_summary.tsv` and `<prefix>.isoform_mod_contrasts.tsv`. Subsampling emits ready-to-run sample/modification manifests, synchronized reads, assignments, observations, optional coverage BAMs, QC, checksums, and provenance in one output directory.
 - Keep V1 modification fractions fail-closed: missing or unknown calls are not treated as unmodified, source and analysis thresholds remain distinct, incomplete candidate universes and low global/site join rates make rows ineligible, and optional exact BAM coverage plus strand-oriented FASTA checks audit denominators and canonical bases.
