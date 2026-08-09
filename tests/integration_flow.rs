@@ -184,7 +184,7 @@ fn flow_runs_end_to_end_and_matches_goldens() {
     let summary =
         fs::read_to_string(out_dir.join("clusterj_batch_summary.txt")).expect("read batch summary");
     assert!(summary.contains("invocation_json\t["));
-    assert!(summary.contains("executable_version\t0.2.0\n"));
+    assert!(summary.contains("executable_version\t0.3.0\n"));
     assert!(summary.contains("effective_threads\t1\n"));
     assert!(summary.contains("input_sha256\tGENEA\treads\tsha256:"));
     assert!(summary.contains("input_sha256\tGENEA\treference\tsha256:"));
