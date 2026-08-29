@@ -184,7 +184,7 @@ fn flow_runs_end_to_end_and_matches_goldens() {
     let summary =
         fs::read_to_string(out_dir.join("clusterj_batch_summary.txt")).expect("read batch summary");
     assert!(summary.contains("invocation_json\t["));
-    assert!(summary.contains("executable_version\t0.3.0\n"));
+    assert!(summary.contains("executable_version\t0.3.1\n"));
     assert!(summary.contains("effective_threads\t1\n"));
     assert!(summary.contains("input_sha256\tGENEA\treads\tsha256:"));
     assert!(summary.contains("input_sha256\tGENEA\treference\tsha256:"));
@@ -299,6 +299,7 @@ fn manifest_flow_runs_optional_modification_aggregation_after_unique_assignment(
             source_emission_threshold: None,
             source_site_filter: "none".to_owned(),
             candidate_observations_complete: true,
+            provenance_status: trackcluster_rs::modification::ProvenanceStatus::UserDeclared,
             implicit_skip_policy: ImplicitSkipPolicy::NotApplicable,
             coordinate_source: "synthetic_genomic".to_owned(),
             read_id_mapping: "sample_prefixed".to_owned(),
@@ -344,16 +345,89 @@ fn manifest_flow_runs_optional_modification_aggregation_after_unique_assignment(
     assert_success(&output, "flow with modification aggregation");
 
     let join = fs::read_to_string(out_dir.join("pooled.mod_join_qc.tsv")).unwrap();
-    assert!(join.contains("\tS1\t1\t1\t1\t1\t1\t1\t1\t0\t"), "{join}");
+    assert!(join.contains("\tS1\t1\t1\t1\t1\t1\t1\t1\t1\t0\t"), "{join}");
     let sites = fs::read_to_string(out_dir.join("pooled.isoform_mod_sites.tsv")).unwrap();
     assert!(sites.contains("\tchr1\t125\t+\tA+a\t"), "{sites}");
     assert!(
-        sites.contains("\t1\tNA\t1\t1\t1\t0\t0\t1\t0.9\t"),
+        sites.contains("\texploratory\t1\tNA\tNA\t1\tNA\t1\tNA\t1\t0\t0\t1\t0.9\t"),
         "{sites}"
     );
     assert!(out_dir.join("pooled.isoform_mod_design.tsv").exists());
     assert!(!out_dir.join("pooled.isoform_mod_contrasts.tsv").exists());
     assert!(out_dir.join("pooled_read_to_isoform.unique.tsv").exists());
+    let pointer: serde_json::Value = serde_json::from_slice(
+        &fs::read(out_dir.join("pooled.mod.current.json")).expect("read current generation"),
+    )
+    .expect("parse current generation");
+    assert_eq!(pointer["complete"], true);
+    let run_id = pointer["run_id"].as_str().expect("generation run id");
+    let generation = out_dir.join("pooled.mod.generations").join(run_id);
+    assert!(generation.join("manifest.json").exists());
+    assert!(generation.join("isoform_mod_sites.tsv").exists());
+    assert!(generation.join("isoform_mod_design.tsv").exists());
+    let current_summary = Command::new(env!("CARGO_BIN_EXE_trackcluster"))
+        .args(["mod-site-summary", "--sites"])
+        .arg(out_dir.join("pooled.isoform_mod_sites.tsv"))
+        .arg("--out")
+        .arg(out_dir.join("current-summary"))
+        .output()
+        .unwrap();
+    assert_success(
+        &current_summary,
+        "summary from current modification generation",
+    );
+
+    let previous_flat_sites = fs::read(out_dir.join("pooled.isoform_mod_sites.tsv")).unwrap();
+    let mut incompatible: serde_json::Value =
+        serde_json::from_slice(&fs::read(&assay_path).unwrap()).unwrap();
+    incompatible["source_emission_threshold"] = serde_json::json!(0.8);
+    fs::write(
+        &assay_path,
+        format!("{}\n", serde_json::to_string_pretty(&incompatible).unwrap()),
+    )
+    .unwrap();
+    let failed = Command::new(env!("CARGO_BIN_EXE_trackcluster"))
+        .args(["flow", "--manifest"])
+        .arg(&manifest)
+        .arg("--reference")
+        .arg(&reference)
+        .arg("--output-root")
+        .arg(out_dir.path())
+        .args([
+            "--prefix",
+            "pooled",
+            "--threads",
+            "1",
+            "--max-reads-per-gene",
+            "0",
+            "--force",
+            "--mod-manifest",
+        ])
+        .arg(&mod_manifest)
+        .args(["--mod-analysis-threshold", "a1=0.5"])
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        stderr.contains("no current pointer was published"),
+        "{stderr}"
+    );
+    assert!(!out_dir.join("pooled.mod.current.json").exists());
+    assert_eq!(
+        fs::read(out_dir.join("pooled.isoform_mod_sites.tsv")).unwrap(),
+        previous_flat_sites,
+        "failed generation may leave compatibility files, but must not publish them as current"
+    );
+    let stale_summary = Command::new(env!("CARGO_BIN_EXE_trackcluster"))
+        .args(["mod-site-summary", "--sites"])
+        .arg(out_dir.join("pooled.isoform_mod_sites.tsv"))
+        .arg("--out")
+        .arg(out_dir.join("stale-summary"))
+        .output()
+        .unwrap();
+    assert!(!stale_summary.status.success());
+    assert!(String::from_utf8_lossy(&stale_summary.stderr).contains("it is stale"));
 }
 
 #[test]

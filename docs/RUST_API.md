@@ -3,8 +3,9 @@
 TrackCluster-rs is primarily a command-line application. The supported,
 semver-stable library surface consists of the core model types and their
 validating constructors, strict BED/manifest I/O, and interval algorithms
-documented by the crate. Public clustering, counting, annotation, and flow modules are packaged
-for compatibility with the binaries, but may evolve between minor releases.
+documented by the crate. Public clustering, counting, annotation, and flow
+modules are packaged for compatibility with the binaries, but may evolve
+between minor releases.
 
 `Interval::new`, `Transcript::new`, and the strict BED readers enforce their
 documented invariants at construction time. Model fields remain public and
@@ -18,6 +19,15 @@ artifact plumbing are internal. Packaged binaries enter through the narrow
 `trackcluster_rs::run_cli_from_env` wrapper, so CLI implementation details do not
 need to remain public.
 
+For junction clustering, the existing
+`try_clusterj_with_options_and_summary` entry point keeps its pre-v0.3.1
+signature and uses `ClusterjRuntimeOptions::default()`. Library defaults do not
+apply a per-locus read cap or emit heartbeats. Callers that explicitly want
+those runtime bounds can use
+`try_clusterj_with_runtime_options_and_summary`; the standalone `clusterj` CLI
+uses that entry point with its documented 5,000-read locus cap and heartbeat
+defaults.
+
 The crate enables `warn(missing_docs)`. The core model/I/O/interval surface is
 fully documented and includes a compiling BED-loading example. Callers that
 choose to use the compatibility pipeline modules should compose validated
@@ -26,10 +36,11 @@ choose to use the compatibility pipeline modules should compose validated
 long positional option lists, while treating those types as a minor-version
 compatibility surface rather than the stable core API.
 
-`RuntimeConfig::gene_error_policy` defaults to `GeneErrorPolicy::Continue`: an isolated gene
-failure is reported and excluded while verified genes remain available for downstream work.
-Library callers that require all-or-nothing batches can select `GeneErrorPolicy::Strict`. Global
-configuration, preparation, infrastructure, integrity, and output-publication errors remain fatal.
+`RuntimeConfig::gene_error_policy` defaults to `GeneErrorPolicy::Continue`: an
+isolated gene failure is reported and excluded while verified genes remain
+available for downstream work. Library callers that require all-or-nothing
+batches can select `GeneErrorPolicy::Strict`. Global configuration, preparation,
+infrastructure, integrity, and output-publication errors remain fatal.
 
 BED extension columns remain round-trippable, but supported code should use
 `Transcript::metadata()`, `Transcript::metadata_mut()`, or `BigGenePredAttrs`

@@ -135,6 +135,7 @@ fn aggregate_and_effect_only_contrast_run_end_to_end() {
         source_emission_threshold: None,
         source_site_filter: "none".to_owned(),
         candidate_observations_complete: true,
+        provenance_status: trackcluster_rs::modification::ProvenanceStatus::UserDeclared,
         implicit_skip_policy: ImplicitSkipPolicy::NotApplicable,
         coordinate_source: "synthetic_genomic".to_owned(),
         read_id_mapping: "explicit".to_owned(),
@@ -217,7 +218,7 @@ fn aggregate_and_effect_only_contrast_run_end_to_end() {
         let fields = line.split('\t').collect::<Vec<_>>();
         assert_eq!(
             &fields[3..],
-            &["2", "2", "2", "2", "2", "1", "1", "0", "0", "0", "0", "0", "0", "0", "true"],
+            &["2", "2", "2", "2", "2", "2", "1", "1", "0", "0", "0", "0", "0", "0", "0", "true"],
             "{line}"
         );
     }
@@ -229,7 +230,7 @@ fn aggregate_and_effect_only_contrast_run_end_to_end() {
         .all(|line| line.ends_with("\ttrue")));
     let sites = fs::read_to_string(root.join("result.isoform_mod_sites.tsv")).unwrap();
     assert_eq!(sites.lines().count(), 5);
-    assert!(sites.contains("\tbam_exact\t1\t1\t1\t1\t1\t0\t0\t1\t0.9"));
+    assert!(sites.contains("\tbam_exact\texploratory\t1\t1\t0\t1\t1\t1\t1\t1\t0\t0\t1\t0.9"));
     let summary_output = Command::new(env!("CARGO_BIN_EXE_trackcluster"))
         .args(["mod-site-summary", "--sites"])
         .arg(root.join("result.isoform_mod_sites.tsv"))

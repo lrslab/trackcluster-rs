@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -6,10 +7,10 @@ use anyhow::Context;
 use clap::{Args as ClapArgs, ValueEnum};
 
 use crate::io::modbam::{
-    read_modbam, InvalidRecordPolicy, MmQuestionMarkPolicy, ModBamImportResult, ModBamOptions,
-    ModBamQc,
+    read_dorado_pg_details, read_modbam, DoradoPgProvenance, DoradoPgRecordProvenance,
+    InvalidRecordPolicy, MmQuestionMarkPolicy, ModBamImportResult, ModBamOptions, ModBamQc,
 };
-use crate::modification::{AssayMetadata, MODIFICATION_SCHEMA_VERSION};
+use crate::modification::{AssayMetadata, ProvenanceStatus, MODIFICATION_SCHEMA_VERSION};
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum InvalidRecordPolicyArg {
@@ -104,7 +105,153 @@ fn append_suffix(prefix: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
-fn write_qc<W: Write>(mut writer: W, result: &ModBamImportResult) -> anyhow::Result<()> {
+#[derive(Clone, Debug)]
+struct ResolvedProvenance {
+    caller_version: String,
+    source_emission_threshold: Option<f64>,
+    status: ProvenanceStatus,
+}
+
+fn model_matches(declared: &str, recovered: &str) -> bool {
+    fn basename(value: &str) -> &str {
+        Path::new(value)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(value)
+    }
+    declared == recovered || basename(declared) == basename(recovered)
+}
+
+fn resolve_provenance(
+    args: &Args,
+    provenance: &DoradoPgProvenance,
+    records: &[DoradoPgRecordProvenance],
+) -> anyhow::Result<ResolvedProvenance> {
+    let records_with_models = records
+        .iter()
+        .filter(|record| !record.model_ids.is_empty())
+        .collect::<Vec<_>>();
+    let model_matching_records = records_with_models
+        .iter()
+        .copied()
+        .filter(|record| {
+            record
+                .model_ids
+                .iter()
+                .any(|recovered| model_matches(&args.model_id, recovered))
+        })
+        .collect::<Vec<_>>();
+    if !records_with_models.is_empty() && model_matching_records.is_empty() {
+        anyhow::bail!(
+            "declared Dorado model {:?} conflicts with @PG modified-base model argument(s) {:?}",
+            args.model_id,
+            provenance.model_ids
+        );
+    }
+    let model_verified = !model_matching_records.is_empty();
+
+    let complete_matching_records = model_matching_records
+        .iter()
+        .copied()
+        .filter(|record| {
+            record.caller_version.is_some() && record.source_emission_thresholds.len() == 1
+        })
+        .collect::<Vec<_>>();
+    let relevant_records = if !complete_matching_records.is_empty() {
+        complete_matching_records
+    } else if !records_with_models.is_empty() {
+        model_matching_records
+    } else {
+        records.iter().collect::<Vec<_>>()
+    };
+
+    let recovered_versions = relevant_records
+        .iter()
+        .filter_map(|record| record.caller_version.as_deref())
+        .collect::<BTreeSet<_>>();
+    if recovered_versions.len() > 1 {
+        anyhow::bail!(
+            "model-matching Dorado @PG records contain conflicting versions: {:?}",
+            recovered_versions
+        );
+    }
+    let mut recovered_thresholds = relevant_records
+        .iter()
+        .flat_map(|record| record.source_emission_thresholds.iter().copied())
+        .collect::<Vec<_>>();
+    recovered_thresholds.sort_by(f64::total_cmp);
+    recovered_thresholds.dedup_by(|left, right| left.total_cmp(right).is_eq());
+    if recovered_thresholds.len() > 1 {
+        anyhow::bail!(
+            "model-matching Dorado @PG records contain conflicting --modified-bases-threshold values: {:?}",
+            recovered_thresholds
+        );
+    }
+
+    let recovered_version = recovered_versions.first().copied();
+    if let Some(recovered) = recovered_version {
+        if args.caller_version != "unknown" && args.caller_version != recovered {
+            anyhow::bail!(
+                "declared Dorado caller version {:?} conflicts with @PG VN {:?}",
+                args.caller_version,
+                recovered
+            );
+        }
+    }
+    let recovered_threshold = recovered_thresholds.first().copied();
+    if let (Some(declared), Some(recovered)) = (args.source_emission_threshold, recovered_threshold)
+    {
+        if declared.total_cmp(&recovered).is_ne() {
+            anyhow::bail!(
+                "declared Dorado source emission threshold {declared} conflicts with @PG --modified-bases-threshold {recovered}"
+            );
+        }
+    }
+    let caller_version = recovered_version
+        .map(str::to_owned)
+        .unwrap_or_else(|| args.caller_version.clone());
+    let source_emission_threshold = recovered_threshold.or(args.source_emission_threshold);
+    let fully_verified = relevant_records.iter().any(|record| {
+        record.caller_version.is_some() && record.source_emission_thresholds.len() == 1
+    }) && recovered_version.is_some()
+        && model_verified
+        && recovered_threshold.is_some();
+    let has_user_declaration =
+        args.caller_version != "unknown" || args.source_emission_threshold.is_some();
+    let fully_declared =
+        has_user_declaration && caller_version != "unknown" && source_emission_threshold.is_some();
+    let status = if fully_verified {
+        ProvenanceStatus::VerifiedFromPg
+    } else if fully_declared {
+        ProvenanceStatus::UserDeclared
+    } else {
+        ProvenanceStatus::Unavailable
+    };
+    Ok(ResolvedProvenance {
+        caller_version,
+        source_emission_threshold,
+        status,
+    })
+}
+
+fn optional_values<T: ToString>(values: &[T]) -> String {
+    if values.is_empty() {
+        "NA".to_owned()
+    } else {
+        values
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+}
+
+fn write_qc<W: Write>(
+    mut writer: W,
+    result: &ModBamImportResult,
+    provenance: &DoradoPgProvenance,
+    resolved: &ResolvedProvenance,
+) -> anyhow::Result<()> {
     let qc: &ModBamQc = &result.qc;
     writeln!(writer, "metric\tvalue")?;
     for (metric, value) in [
@@ -199,16 +346,46 @@ fn write_qc<W: Write>(mut writer: W, result: &ModBamImportResult) -> anyhow::Res
         "ml_probability_semantics\t{}",
         result.semantics.ml_probability_semantics.as_str()
     )?;
+    writeln!(writer, "provenance_status\t{}", resolved.status)?;
+    writeln!(
+        writer,
+        "dorado_pg_records\t{}",
+        provenance.dorado_program_records
+    )?;
+    writeln!(
+        writer,
+        "dorado_pg_caller_versions\t{}",
+        optional_values(&provenance.caller_versions)
+    )?;
+    writeln!(
+        writer,
+        "dorado_pg_model_ids\t{}",
+        optional_values(&provenance.model_ids)
+    )?;
+    writeln!(
+        writer,
+        "dorado_pg_source_emission_thresholds\t{}",
+        optional_values(&provenance.source_emission_thresholds)
+    )?;
+    writeln!(
+        writer,
+        "dorado_pg_command_lines\t{}",
+        optional_values(&provenance.command_lines)
+    )?;
     writer.flush().context("flush Dorado/modBAM import QC")?;
     Ok(())
 }
 
-fn assay_metadata(args: &Args, result: &ModBamImportResult) -> AssayMetadata {
+fn assay_metadata(
+    args: &Args,
+    result: &ModBamImportResult,
+    resolved: &ResolvedProvenance,
+) -> AssayMetadata {
     AssayMetadata {
         schema_version: MODIFICATION_SCHEMA_VERSION,
         assay_id: args.assay_id.clone(),
         caller: "dorado".to_owned(),
-        caller_version: args.caller_version.clone(),
+        caller_version: resolved.caller_version.clone(),
         model_id: args.model_id.clone(),
         chemistry: args.chemistry.clone(),
         candidate_rule: result.semantics.candidate_rule.clone(),
@@ -220,6 +397,7 @@ fn assay_metadata(args: &Args, result: &ModBamImportResult) -> AssayMetadata {
             result.semantics.mm_question_mark_policy.as_str()
         ),
         candidate_observations_complete: result.semantics.candidate_observations_complete,
+        provenance_status: resolved.status,
         implicit_skip_policy: result.semantics.implicit_skip_policy,
         coordinate_source: format!(
             "genome_aligned_bam_cigar_{}",
@@ -246,14 +424,16 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         ],
     )?;
 
+    let (provenance, provenance_records) = read_dorado_pg_details(&args.bam)?;
+    let resolved = resolve_provenance(&args, &provenance, &provenance_records)?;
     let mut options = ModBamOptions::new(&args.assay_id, &args.sample, &args.mod_code);
     options.candidate_rule.clone_from(&args.candidate_rule);
     options.min_mapq = args.min_mapq;
     options.invalid_record_policy = args.invalid_record_policy.into();
-    options.source_emission_threshold = args.source_emission_threshold;
+    options.source_emission_threshold = resolved.source_emission_threshold;
     options.mm_question_mark_policy = args.question_mark_policy.into();
     let result = read_modbam(&args.bam, &options)?;
-    let metadata = assay_metadata(&args, &result);
+    let metadata = assay_metadata(&args, &result, &resolved);
     metadata.validate().map_err(anyhow::Error::msg)?;
 
     crate::flow::artifact_manifest::atomic_write_with(&observations_path, |writer| {
@@ -263,7 +443,7 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         crate::io::mod_calls::write_assay_metadata_to_writer(writer, &metadata)
     })?;
     crate::flow::artifact_manifest::atomic_write_with(&qc_path, |writer| {
-        write_qc(writer, &result)
+        write_qc(writer, &result, &provenance, &resolved)
     })?;
 
     eprintln!(
@@ -282,11 +462,82 @@ pub fn run(args: Args) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    fn args() -> Args {
+        Args {
+            sample: "S1".to_owned(),
+            assay_id: "a1".to_owned(),
+            bam: PathBuf::from("calls.bam"),
+            mod_code: "A+a".to_owned(),
+            model_id: "rna004-test-m6a".to_owned(),
+            chemistry: "RNA004".to_owned(),
+            caller_version: "unknown".to_owned(),
+            candidate_rule: "all-target-canonical-bases".to_owned(),
+            source_emission_threshold: None,
+            question_mark_policy: MmQuestionMarkPolicyArg::Unknown,
+            min_mapq: 0,
+            invalid_record_policy: InvalidRecordPolicyArg::Fail,
+            out: PathBuf::from("out"),
+        }
+    }
+
+    fn record(
+        caller_version: Option<&str>,
+        model_ids: &[&str],
+        thresholds: &[f64],
+    ) -> DoradoPgRecordProvenance {
+        DoradoPgRecordProvenance {
+            caller_version: caller_version.map(str::to_owned),
+            model_ids: model_ids.iter().map(|value| (*value).to_owned()).collect(),
+            source_emission_thresholds: thresholds.to_vec(),
+            command_line: None,
+        }
+    }
+
     #[test]
     fn probability_parser_is_strict() {
         assert_eq!(parse_probability("0").unwrap(), 0.0);
         assert_eq!(parse_probability("1").unwrap(), 1.0);
         assert!(parse_probability("NaN").is_err());
         assert!(parse_probability("1.1").is_err());
+    }
+
+    #[test]
+    fn provenance_is_not_verified_by_combining_different_pg_records() {
+        let records = vec![
+            record(Some("0.9.1"), &[], &[]),
+            record(None, &["rna004-test-m6a"], &[0.05]),
+        ];
+        let provenance = DoradoPgProvenance {
+            dorado_program_records: 2,
+            caller_versions: vec!["0.9.1".to_owned()],
+            model_ids: vec!["rna004-test-m6a".to_owned()],
+            source_emission_thresholds: vec![0.05],
+            command_lines: Vec::new(),
+        };
+
+        let resolved = resolve_provenance(&args(), &provenance, &records).unwrap();
+        assert_eq!(resolved.caller_version, "unknown");
+        assert_eq!(resolved.source_emission_threshold, Some(0.05));
+        assert_eq!(resolved.status, ProvenanceStatus::Unavailable);
+    }
+
+    #[test]
+    fn complete_model_record_is_not_conflicted_by_unrelated_dorado_stage() {
+        let records = vec![
+            record(Some("0.9.1"), &["rna004-test-m6a"], &[0.05]),
+            record(Some("1.2.0"), &[], &[]),
+        ];
+        let provenance = DoradoPgProvenance {
+            dorado_program_records: 2,
+            caller_versions: vec!["0.9.1".to_owned(), "1.2.0".to_owned()],
+            model_ids: vec!["rna004-test-m6a".to_owned()],
+            source_emission_thresholds: vec![0.05],
+            command_lines: Vec::new(),
+        };
+
+        let resolved = resolve_provenance(&args(), &provenance, &records).unwrap();
+        assert_eq!(resolved.caller_version, "0.9.1");
+        assert_eq!(resolved.source_emission_threshold, Some(0.05));
+        assert_eq!(resolved.status, ProvenanceStatus::VerifiedFromPg);
     }
 }

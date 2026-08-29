@@ -9,8 +9,43 @@ use anyhow::Context;
 use csv::{Reader, ReaderBuilder, StringRecord, WriterBuilder};
 
 use crate::model::Strand;
+use crate::modification::EligibilityProfile;
 
-const SITE_COLUMNS: [&str; 27] = [
+const SITE_COLUMNS: [&str; 31] = [
+    "assay_id",
+    "analysis_threshold",
+    "sample",
+    "group",
+    "gene",
+    "isoform_id",
+    "site_id",
+    "chrom",
+    "pos0",
+    "strand",
+    "mod_code",
+    "context",
+    "site_state",
+    "coverage_basis",
+    "eligibility_profile",
+    "n_assigned",
+    "n_covering",
+    "n_not_candidate",
+    "n_candidate",
+    "candidate_rate",
+    "n_callable",
+    "callable_rate",
+    "n_modified",
+    "n_unmodified",
+    "n_unknown",
+    "mod_fraction",
+    "mean_probability",
+    "ci_low",
+    "ci_high",
+    "eligibility",
+    "eligibility_reason",
+];
+
+const V0_3_0_SITE_COLUMNS: [&str; 27] = [
     "assay_id",
     "analysis_threshold",
     "sample",
@@ -40,7 +75,22 @@ const SITE_COLUMNS: [&str; 27] = [
     "eligibility_reason",
 ];
 
-pub(crate) const SITE_SUMMARY_COLUMNS: [&str; 27] = [
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SiteTableSchema {
+    V0_3_0,
+    Current,
+}
+
+impl SiteTableSchema {
+    const fn column_count(self) -> usize {
+        match self {
+            Self::V0_3_0 => V0_3_0_SITE_COLUMNS.len(),
+            Self::Current => SITE_COLUMNS.len(),
+        }
+    }
+}
+
+pub(crate) const SITE_SUMMARY_COLUMNS: [&str; 36] = [
     "assay_id",
     "analysis_threshold",
     "sample",
@@ -53,6 +103,7 @@ pub(crate) const SITE_SUMMARY_COLUMNS: [&str; 27] = [
     "mod_code",
     "context",
     "coverage_basis",
+    "eligibility_profile",
     "n_isoforms_total",
     "n_isoforms_assigned",
     "n_isoforms_present",
@@ -63,7 +114,15 @@ pub(crate) const SITE_SUMMARY_COLUMNS: [&str; 27] = [
     "n_isoforms_unprojectable",
     "n_isoforms_incomplete_candidate_universe",
     "n_isoforms_join_rate_low",
+    "n_isoforms_site_join_rate_low",
+    "n_isoforms_unknown_denominator",
+    "n_isoforms_coverage_unavailable",
+    "n_isoforms_reference_unvalidated",
+    "n_isoforms_low_covering",
     "n_isoforms_low_callable",
+    "n_isoforms_low_candidate_rate",
+    "n_isoforms_low_callable_rate",
+    "n_isoforms_provenance_unverified",
     "n_isoforms_other_ineligible",
     "min_eligible_n_covering",
     "min_eligible_n_callable",
@@ -219,11 +278,31 @@ struct ParsedSiteRow {
     context: Option<String>,
     site_state: ParsedSiteState,
     coverage_basis: ParsedCoverageBasis,
+    eligibility_profile: EligibilityProfile,
     n_assigned: u64,
     n_covering: Option<u64>,
     n_callable: u64,
     eligibility_reason: ParsedEligibilityReason,
     line: u64,
+}
+
+struct ParsedSiteValues {
+    eligibility_profile: EligibilityProfile,
+    n_assigned: u64,
+    n_covering: Option<u64>,
+    n_not_candidate: Option<u64>,
+    n_candidate: u64,
+    candidate_rate: Option<f64>,
+    n_callable: u64,
+    callable_rate: Option<f64>,
+    n_modified: u64,
+    n_unmodified: u64,
+    n_unknown: u64,
+    mod_fraction: Option<f64>,
+    ci_low: Option<f64>,
+    ci_high: Option<f64>,
+    eligibility: String,
+    eligibility_reason: ParsedEligibilityReason,
 }
 
 fn required<'a>(record: &'a StringRecord, index: usize, field: &str) -> anyhow::Result<&'a str> {
@@ -309,12 +388,76 @@ fn validate_mod_code(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn parse_site_row(record: &StringRecord, line: u64) -> anyhow::Result<ParsedSiteRow> {
-    if record.len() != SITE_COLUMNS.len() {
+fn parse_site_values(
+    record: &StringRecord,
+    schema: SiteTableSchema,
+) -> anyhow::Result<ParsedSiteValues> {
+    match schema {
+        SiteTableSchema::V0_3_0 => {
+            let _mean_probability = parse_optional_unit_interval(record, 22, "mean_probability")?;
+            Ok(ParsedSiteValues {
+                eligibility_profile: EligibilityProfile::Exploratory,
+                n_assigned: parse_u64(record, 14, "n_assigned")?,
+                n_covering: parse_optional_u64(record, 15, "n_covering")?,
+                n_not_candidate: None,
+                n_candidate: parse_u64(record, 16, "n_candidate")?,
+                candidate_rate: None,
+                n_callable: parse_u64(record, 17, "n_callable")?,
+                callable_rate: None,
+                n_modified: parse_u64(record, 18, "n_modified")?,
+                n_unmodified: parse_u64(record, 19, "n_unmodified")?,
+                n_unknown: parse_u64(record, 20, "n_unknown")?,
+                mod_fraction: parse_optional_unit_interval(record, 21, "mod_fraction")?,
+                ci_low: parse_optional_unit_interval(record, 23, "ci_low")?,
+                ci_high: parse_optional_unit_interval(record, 24, "ci_high")?,
+                eligibility: required(record, 25, "eligibility")?.to_owned(),
+                eligibility_reason: ParsedEligibilityReason::parse(required(
+                    record,
+                    26,
+                    "eligibility_reason",
+                )?)?,
+            })
+        }
+        SiteTableSchema::Current => {
+            let _mean_probability = parse_optional_unit_interval(record, 26, "mean_probability")?;
+            Ok(ParsedSiteValues {
+                eligibility_profile: required(record, 14, "eligibility_profile")?
+                    .parse::<EligibilityProfile>()
+                    .map_err(anyhow::Error::msg)?,
+                n_assigned: parse_u64(record, 15, "n_assigned")?,
+                n_covering: parse_optional_u64(record, 16, "n_covering")?,
+                n_not_candidate: parse_optional_u64(record, 17, "n_not_candidate")?,
+                n_candidate: parse_u64(record, 18, "n_candidate")?,
+                candidate_rate: parse_optional_unit_interval(record, 19, "candidate_rate")?,
+                n_callable: parse_u64(record, 20, "n_callable")?,
+                callable_rate: parse_optional_unit_interval(record, 21, "callable_rate")?,
+                n_modified: parse_u64(record, 22, "n_modified")?,
+                n_unmodified: parse_u64(record, 23, "n_unmodified")?,
+                n_unknown: parse_u64(record, 24, "n_unknown")?,
+                mod_fraction: parse_optional_unit_interval(record, 25, "mod_fraction")?,
+                ci_low: parse_optional_unit_interval(record, 27, "ci_low")?,
+                ci_high: parse_optional_unit_interval(record, 28, "ci_high")?,
+                eligibility: required(record, 29, "eligibility")?.to_owned(),
+                eligibility_reason: ParsedEligibilityReason::parse(required(
+                    record,
+                    30,
+                    "eligibility_reason",
+                )?)?,
+            })
+        }
+    }
+}
+
+fn parse_site_row(
+    record: &StringRecord,
+    line: u64,
+    schema: SiteTableSchema,
+) -> anyhow::Result<ParsedSiteRow> {
+    if record.len() != schema.column_count() {
         anyhow::bail!(
             "site row has {} columns; expected {}",
             record.len(),
-            SITE_COLUMNS.len()
+            schema.column_count()
         );
     }
 
@@ -345,63 +488,97 @@ fn parse_site_row(record: &StringRecord, line: u64) -> anyhow::Result<ParsedSite
     let context = optional_token(record, 11, "context")?;
     let site_state = ParsedSiteState::parse(required(record, 12, "site_state")?)?;
     let coverage_basis = ParsedCoverageBasis::parse(required(record, 13, "coverage_basis")?)?;
-    let n_assigned = parse_u64(record, 14, "n_assigned")?;
-    let n_covering = parse_optional_u64(record, 15, "n_covering")?;
-    let n_candidate = parse_u64(record, 16, "n_candidate")?;
-    let n_callable = parse_u64(record, 17, "n_callable")?;
-    let n_modified = parse_u64(record, 18, "n_modified")?;
-    let n_unmodified = parse_u64(record, 19, "n_unmodified")?;
-    let n_unknown = parse_u64(record, 20, "n_unknown")?;
-    let mod_fraction = parse_optional_unit_interval(record, 21, "mod_fraction")?;
-    let _mean_probability = parse_optional_unit_interval(record, 22, "mean_probability")?;
-    let ci_low = parse_optional_unit_interval(record, 23, "ci_low")?;
-    let ci_high = parse_optional_unit_interval(record, 24, "ci_high")?;
-    let eligibility = required(record, 25, "eligibility")?;
-    let eligibility_reason =
-        ParsedEligibilityReason::parse(required(record, 26, "eligibility_reason")?)?;
+    let values = parse_site_values(record, schema)?;
 
-    if n_modified
-        .checked_add(n_unmodified)
+    if values
+        .n_modified
+        .checked_add(values.n_unmodified)
         .context("n_modified + n_unmodified overflows u64")?
-        != n_callable
+        != values.n_callable
     {
         anyhow::bail!("n_callable must equal n_modified + n_unmodified");
     }
-    if n_callable
-        .checked_add(n_unknown)
+    if values
+        .n_callable
+        .checked_add(values.n_unknown)
         .context("n_callable + n_unknown overflows u64")?
-        != n_candidate
+        != values.n_candidate
     {
         anyhow::bail!("n_candidate must equal n_callable + n_unknown");
     }
-    if n_candidate > n_assigned {
+    if values.n_candidate > values.n_assigned {
         anyhow::bail!("n_candidate must not exceed n_assigned");
     }
-    match (coverage_basis, n_covering) {
-        (ParsedCoverageBasis::Unavailable, None) => {}
-        (ParsedCoverageBasis::Unavailable, Some(_)) => {
-            anyhow::bail!("coverage_basis=unavailable requires n_covering=NA")
-        }
-        (_, None) => anyhow::bail!("numeric coverage basis requires numeric n_covering"),
-        (_, Some(covering)) if covering > n_assigned => {
-            anyhow::bail!("n_covering must not exceed n_assigned")
-        }
-        (_, Some(covering)) if n_candidate > covering => {
-            anyhow::bail!("n_candidate must not exceed n_covering")
-        }
-        _ => {}
+    match schema {
+        SiteTableSchema::V0_3_0 => match (coverage_basis, values.n_covering) {
+            (ParsedCoverageBasis::Unavailable, None) => {}
+            (ParsedCoverageBasis::Unavailable, Some(_)) => {
+                anyhow::bail!("coverage_basis=unavailable requires n_covering=NA")
+            }
+            (_, None) => anyhow::bail!("numeric coverage basis requires numeric n_covering"),
+            (_, Some(covering)) if covering > values.n_assigned => {
+                anyhow::bail!("n_covering must not exceed n_assigned")
+            }
+            (_, Some(covering)) if values.n_candidate > covering => {
+                anyhow::bail!("n_candidate must not exceed n_covering")
+            }
+            _ => {}
+        },
+        SiteTableSchema::Current => match (
+            coverage_basis,
+            values.n_covering,
+            values.n_not_candidate,
+            values.candidate_rate,
+            values.callable_rate,
+        ) {
+            (ParsedCoverageBasis::Unavailable, None, None, None, None) => {}
+            (ParsedCoverageBasis::Unavailable, _, _, _, _) => {
+                anyhow::bail!("coverage_basis=unavailable requires all coverage-derived fields=NA")
+            }
+            (_, None, _, _, _) => {
+                anyhow::bail!("numeric coverage basis requires numeric n_covering")
+            }
+            (_, Some(0), Some(not_candidate), None, None) => {
+                if not_candidate != 0 || values.n_candidate != 0 || values.n_callable != 0 {
+                    anyhow::bail!("zero coverage requires zero coverage-derived counts");
+                }
+            }
+            (_, Some(covering), Some(not_candidate), Some(candidate), Some(callable)) => {
+                if covering > values.n_assigned {
+                    anyhow::bail!("n_covering must not exceed n_assigned");
+                }
+                if values.n_candidate > covering {
+                    anyhow::bail!("n_candidate must not exceed n_covering");
+                }
+                if not_candidate != covering - values.n_candidate {
+                    anyhow::bail!("n_not_candidate must equal n_covering - n_candidate");
+                }
+                let expected_candidate = values.n_candidate as f64 / covering as f64;
+                let expected_callable = values.n_callable as f64 / covering as f64;
+                if (candidate - expected_candidate).abs() > 1e-12 {
+                    anyhow::bail!("candidate_rate is inconsistent with integer counts");
+                }
+                if (callable - expected_callable).abs() > 1e-12 {
+                    anyhow::bail!("callable_rate is inconsistent with integer counts");
+                }
+            }
+            (_, Some(covering), _, _, _) if covering > values.n_assigned => {
+                anyhow::bail!("n_covering must not exceed n_assigned")
+            }
+            _ => anyhow::bail!("coverage-derived fields are incomplete or inconsistent"),
+        },
     }
 
-    if let Some(fraction) = mod_fraction {
-        if n_callable == 0 {
+    if let Some(fraction) = values.mod_fraction {
+        if values.n_callable == 0 {
             anyhow::bail!("numeric mod_fraction requires n_callable > 0");
         }
-        let expected = n_modified as f64 / n_callable as f64;
+        let expected = values.n_modified as f64 / values.n_callable as f64;
         if (fraction - expected).abs() > 1e-12 {
             anyhow::bail!("mod_fraction is inconsistent with integer counts");
         }
     }
-    match (mod_fraction, ci_low, ci_high) {
+    match (values.mod_fraction, values.ci_low, values.ci_high) {
         (Some(fraction), Some(low), Some(high))
             if low <= fraction && fraction <= high && low <= high => {}
         (Some(_), _, _) => {
@@ -418,29 +595,33 @@ fn parse_site_row(record: &StringRecord, line: u64) -> anyhow::Result<ParsedSite
         ParsedSiteState::Unprojectable => Some("unprojectable"),
         ParsedSiteState::Present => None,
     };
-    if expected_reason.is_some_and(|expected| eligibility_reason.as_str() != expected) {
+    if expected_reason.is_some_and(|expected| values.eligibility_reason.as_str() != expected) {
         anyhow::bail!("site_state and eligibility_reason are inconsistent");
     }
     if site_state == ParsedSiteState::Present
         && matches!(
-            eligibility_reason.as_str(),
+            values.eligibility_reason.as_str(),
             "site_absent" | "context_dependent" | "reference_base_mismatch" | "unprojectable"
         )
     {
         anyhow::bail!("present site has incompatible eligibility_reason");
     }
-    match eligibility {
-        "eligible" if eligibility_reason.is_eligible() => {}
-        "ineligible" if !eligibility_reason.is_eligible() => {}
+    match values.eligibility.as_str() {
+        "eligible" if values.eligibility_reason.is_eligible() => {}
+        "ineligible" if !values.eligibility_reason.is_eligible() => {}
         "eligible" | "ineligible" => {
             anyhow::bail!("eligibility and eligibility_reason are inconsistent")
         }
         _ => anyhow::bail!("eligibility must be eligible or ineligible"),
     }
-    if eligibility_reason.as_str() == "ok" && (n_callable == 0 || mod_fraction.is_none()) {
+    if values.eligibility_reason.as_str() == "ok"
+        && (values.n_callable == 0 || values.mod_fraction.is_none())
+    {
         anyhow::bail!("eligible row requires a callable denominator and mod_fraction");
     }
-    if eligibility_reason.as_str() == "incomplete_candidate_universe" && mod_fraction.is_some() {
+    if values.eligibility_reason.as_str() == "incomplete_candidate_universe"
+        && values.mod_fraction.is_some()
+    {
         anyhow::bail!("incomplete candidate universe requires mod_fraction=NA");
     }
 
@@ -460,10 +641,11 @@ fn parse_site_row(record: &StringRecord, line: u64) -> anyhow::Result<ParsedSite
         context,
         site_state,
         coverage_basis,
-        n_assigned,
-        n_covering,
-        n_callable,
-        eligibility_reason,
+        eligibility_profile: values.eligibility_profile,
+        n_assigned: values.n_assigned,
+        n_covering: values.n_covering,
+        n_callable: values.n_callable,
+        eligibility_reason: values.eligibility_reason,
         line,
     })
 }
@@ -473,6 +655,7 @@ type SiteCsvReader = Reader<BufReader<File>>;
 struct SiteStream {
     path: PathBuf,
     reader: SiteCsvReader,
+    schema: SiteTableSchema,
     current: Option<ParsedSiteRow>,
     previous_key: Option<FullRowKey>,
 }
@@ -485,19 +668,26 @@ impl SiteStream {
             .has_headers(true)
             .flexible(false)
             .from_reader(BufReader::new(file));
-        let expected = StringRecord::from(SITE_COLUMNS.to_vec());
         let actual = reader
             .headers()
             .with_context(|| format!("read site table header {path:?}"))?;
-        if actual != &expected {
+        let current = StringRecord::from(SITE_COLUMNS.to_vec());
+        let legacy = StringRecord::from(V0_3_0_SITE_COLUMNS.to_vec());
+        let schema = if actual == &current {
+            SiteTableSchema::Current
+        } else if actual == &legacy {
+            SiteTableSchema::V0_3_0
+        } else {
             anyhow::bail!(
-                "site table {path:?} header mismatch; expected {:?}",
-                SITE_COLUMNS
+                "site table {path:?} header mismatch; expected current {:?} or v0.3.0 {:?}",
+                SITE_COLUMNS,
+                V0_3_0_SITE_COLUMNS
             );
-        }
+        };
         let mut stream = Self {
             path: path.to_path_buf(),
             reader,
+            schema,
             current: None,
             previous_key: None,
         };
@@ -516,7 +706,7 @@ impl SiteStream {
             return Ok(());
         }
         let line = record.position().map_or(0, |position| position.line());
-        let row = parse_site_row(&record, line)
+        let row = parse_site_row(&record, line, self.schema)
             .with_context(|| format!("parse site table {:?}:{line}", self.path))?;
         if let Some(previous) = &self.previous_key {
             match row.key.cmp(previous) {
@@ -540,6 +730,7 @@ impl SiteStream {
 #[derive(Default)]
 struct GlobalAudit {
     assay_thresholds: BTreeMap<String, f64>,
+    assay_profiles: BTreeMap<String, EligibilityProfile>,
     sample_groups: BTreeMap<(String, String), Option<String>>,
     gene_coverage_basis: BTreeMap<(String, String, String), ParsedCoverageBasis>,
     assigned_counts: BTreeMap<(String, String, String, String), u64>,
@@ -553,6 +744,16 @@ impl GlobalAudit {
         {
             Some(existing) if existing != row.analysis_threshold => anyhow::bail!(
                 "assay {:?} has inconsistent analysis thresholds",
+                row.key.assay_id
+            ),
+            _ => {}
+        }
+        match self
+            .assay_profiles
+            .insert(row.key.assay_id.clone(), row.eligibility_profile)
+        {
+            Some(existing) if existing != row.eligibility_profile => anyhow::bail!(
+                "assay {:?} has inconsistent eligibility profiles",
                 row.key.assay_id
             ),
             _ => {}
@@ -606,6 +807,7 @@ struct SummaryAccumulator {
     group: Option<String>,
     context: Option<String>,
     coverage_basis: ParsedCoverageBasis,
+    eligibility_profile: EligibilityProfile,
     n_isoforms_total: u64,
     n_isoforms_assigned: u64,
     n_isoforms_present: u64,
@@ -616,7 +818,15 @@ struct SummaryAccumulator {
     n_isoforms_unprojectable: u64,
     n_isoforms_incomplete_candidate_universe: u64,
     n_isoforms_join_rate_low: u64,
+    n_isoforms_site_join_rate_low: u64,
+    n_isoforms_unknown_denominator: u64,
+    n_isoforms_coverage_unavailable: u64,
+    n_isoforms_reference_unvalidated: u64,
+    n_isoforms_low_covering: u64,
     n_isoforms_low_callable: u64,
+    n_isoforms_low_candidate_rate: u64,
+    n_isoforms_low_callable_rate: u64,
+    n_isoforms_provenance_unverified: u64,
     n_isoforms_other_ineligible: u64,
     min_eligible_n_covering: Option<u64>,
     min_eligible_n_callable: Option<u64>,
@@ -640,6 +850,7 @@ impl SummaryAccumulator {
             group: row.group.clone(),
             context: row.context.clone(),
             coverage_basis: row.coverage_basis,
+            eligibility_profile: row.eligibility_profile,
             n_isoforms_total: 0,
             n_isoforms_assigned: 0,
             n_isoforms_present: 0,
@@ -650,7 +861,15 @@ impl SummaryAccumulator {
             n_isoforms_unprojectable: 0,
             n_isoforms_incomplete_candidate_universe: 0,
             n_isoforms_join_rate_low: 0,
+            n_isoforms_site_join_rate_low: 0,
+            n_isoforms_unknown_denominator: 0,
+            n_isoforms_coverage_unavailable: 0,
+            n_isoforms_reference_unvalidated: 0,
+            n_isoforms_low_covering: 0,
             n_isoforms_low_callable: 0,
+            n_isoforms_low_candidate_rate: 0,
+            n_isoforms_low_callable_rate: 0,
+            n_isoforms_provenance_unverified: 0,
             n_isoforms_other_ineligible: 0,
             min_eligible_n_covering: None,
             min_eligible_n_callable: None,
@@ -669,6 +888,9 @@ impl SummaryAccumulator {
         }
         if self.coverage_basis != row.coverage_basis {
             anyhow::bail!("summary site has inconsistent coverage_basis");
+        }
+        if self.eligibility_profile != row.eligibility_profile {
+            anyhow::bail!("summary site has inconsistent eligibility_profile");
         }
 
         increment(&mut self.n_isoforms_total, "n_isoforms_total")?;
@@ -711,9 +933,40 @@ impl SummaryAccumulator {
                 &mut self.n_isoforms_join_rate_low,
                 "n_isoforms_join_rate_low",
             )?,
+            "site_join_rate_low" => increment(
+                &mut self.n_isoforms_site_join_rate_low,
+                "n_isoforms_site_join_rate_low",
+            )?,
+            "unknown_denominator" => increment(
+                &mut self.n_isoforms_unknown_denominator,
+                "n_isoforms_unknown_denominator",
+            )?,
+            "coverage_unavailable" => increment(
+                &mut self.n_isoforms_coverage_unavailable,
+                "n_isoforms_coverage_unavailable",
+            )?,
+            "reference_unvalidated" => increment(
+                &mut self.n_isoforms_reference_unvalidated,
+                "n_isoforms_reference_unvalidated",
+            )?,
+            "low_covering" => {
+                increment(&mut self.n_isoforms_low_covering, "n_isoforms_low_covering")?
+            }
             "low_callable" => {
                 increment(&mut self.n_isoforms_low_callable, "n_isoforms_low_callable")?
             }
+            "low_candidate_rate" => increment(
+                &mut self.n_isoforms_low_candidate_rate,
+                "n_isoforms_low_candidate_rate",
+            )?,
+            "low_callable_rate" => increment(
+                &mut self.n_isoforms_low_callable_rate,
+                "n_isoforms_low_callable_rate",
+            )?,
+            "provenance_unverified" => increment(
+                &mut self.n_isoforms_provenance_unverified,
+                "n_isoforms_provenance_unverified",
+            )?,
             "site_absent" | "context_dependent" | "reference_base_mismatch" | "unprojectable" => {}
             _ => increment(
                 &mut self.n_isoforms_other_ineligible,
@@ -738,7 +991,15 @@ impl SummaryAccumulator {
             .n_isoforms_eligible
             .checked_add(self.n_isoforms_incomplete_candidate_universe)
             .and_then(|value| value.checked_add(self.n_isoforms_join_rate_low))
+            .and_then(|value| value.checked_add(self.n_isoforms_site_join_rate_low))
+            .and_then(|value| value.checked_add(self.n_isoforms_unknown_denominator))
+            .and_then(|value| value.checked_add(self.n_isoforms_coverage_unavailable))
+            .and_then(|value| value.checked_add(self.n_isoforms_reference_unvalidated))
+            .and_then(|value| value.checked_add(self.n_isoforms_low_covering))
             .and_then(|value| value.checked_add(self.n_isoforms_low_callable))
+            .and_then(|value| value.checked_add(self.n_isoforms_low_candidate_rate))
+            .and_then(|value| value.checked_add(self.n_isoforms_low_callable_rate))
+            .and_then(|value| value.checked_add(self.n_isoforms_provenance_unverified))
             .and_then(|value| value.checked_add(self.n_isoforms_other_ineligible))
             .context("present-site eligibility counts overflow u64")?;
         if present_total != self.n_isoforms_present {
@@ -902,6 +1163,7 @@ pub(crate) fn write_site_summary_tsv<W: Write>(
             key.mod_code.clone(),
             optional(summary.context.clone()),
             summary.coverage_basis.as_str().to_owned(),
+            summary.eligibility_profile.to_string(),
             summary.n_isoforms_total.to_string(),
             summary.n_isoforms_assigned.to_string(),
             summary.n_isoforms_present.to_string(),
@@ -912,7 +1174,15 @@ pub(crate) fn write_site_summary_tsv<W: Write>(
             summary.n_isoforms_unprojectable.to_string(),
             summary.n_isoforms_incomplete_candidate_universe.to_string(),
             summary.n_isoforms_join_rate_low.to_string(),
+            summary.n_isoforms_site_join_rate_low.to_string(),
+            summary.n_isoforms_unknown_denominator.to_string(),
+            summary.n_isoforms_coverage_unavailable.to_string(),
+            summary.n_isoforms_reference_unvalidated.to_string(),
+            summary.n_isoforms_low_covering.to_string(),
             summary.n_isoforms_low_callable.to_string(),
+            summary.n_isoforms_low_candidate_rate.to_string(),
+            summary.n_isoforms_low_callable_rate.to_string(),
+            summary.n_isoforms_provenance_unverified.to_string(),
             summary.n_isoforms_other_ineligible.to_string(),
             optional(summary.min_eligible_n_covering),
             optional(summary.min_eligible_n_callable),

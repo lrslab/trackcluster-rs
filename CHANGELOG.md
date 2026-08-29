@@ -2,6 +2,78 @@
 
 ## Unreleased
 
+## 0.3.1
+
+_Release date: 2026-08-30._
+
+- Make `bam2bigg` resilient by default to decoded, record-local alignment
+  defects. Invalid records are skipped with stable reason counts and bounded
+  diagnostics; `--invalid-record-policy fail` restores strict behavior, while
+  BAM header/framing/decompression errors and all-invalid inputs remain fatal.
+- Add safe model-level recovery to `gff2bigg`. Identifiable invalid transcript
+  models are quarantined as a unit and written to `<out>.rejected.tsv` by
+  default; unowned malformed rows, stream errors, and all-invalid catalogs
+  remain fatal, and `--invalid-record-policy fail` retains strict conversion.
+- Lower the default `flow`/`clusterj_batch` per-gene reservoir cap from 50,000
+  to 5,000 reads so extreme-expression loci such as mitochondrial `cox1`
+  remain tractable; centralize the default, emit explicit per-gene sampling
+  diagnostics, and remove modulo bias from deterministic reservoir draws.
+- Speed up high-abundance `clusterj` merge: index single-exon containment,
+  same-5′, and terminal-exon candidates; replace equal-length fuzzy
+  same-junction DP with a first-junction window plus zip; and finish batched
+  merge with one true `merge_one_batch` of the remaining tracks.
+- Give standalone `clusterj` the same 5,000-read default cap, now applied per
+  overlapping locus, plus `--downsample-seed`, `--heartbeat-seconds`, and
+  `--heartbeat-top`. Dropped reads go to `unused.bed` without count scaling.
+  `--max-reads-per-locus 0` warns that large loci can take a long time.
+  `flow`/`clusterj_batch` still downsample per gene and leave the library
+  locus cap disabled.
+- Compute modification `read_join_rate` over unique-mapping `assigned_reads`
+  rather than caller observation reads, so downsampled-out molecules stay in
+  `unknown_read` and no longer trip `--min-read-join-rate`. Join QC gains an
+  `assigned_reads` column. Observation and site-local rates remain raw
+  assignment audits over validated caller rows; the site-local rate is no
+  longer an eligibility gate because caller files can retain intentionally
+  downsampled reads.
+- Restrict Dorado provenance discovery to exact Dorado program identities and
+  require version, model, and source threshold to come from one coherent
+  model-matching `@PG` record before reporting `verified_from_pg`. Downstream
+  commands such as `samtools sort dorado.bam` no longer create false Dorado
+  version conflicts.
+- Prevent standalone `mod-contrast` from replacing a flow-managed flat output
+  without publishing a new generation. Preserve the original public
+  `try_clusterj_with_options_and_summary` signature while exposing explicit
+  runtime bounds through `try_clusterj_with_runtime_options_and_summary`.
+- Keep `mod-site-summary` compatible with exact v0.3.0 27-column site tables,
+  treating them as `exploratory`, while retaining strict validation for the
+  current 31-column schema.
+- Add explicit `exploratory` and `strict` modification eligibility profiles.
+  Strict mode requires exact BAM coverage, FASTA validation, configurable
+  covering/callable minima, and configurable candidate/covering and
+  callable/covering representation rates. Site rows now expose
+  `eligibility_profile`, `n_not_candidate`, `candidate_rate`, and
+  `callable_rate` with dedicated fail-closed reasons.
+- Fix explicit-only sites being incorrectly assigned `unknown_denominator`
+  solely because sample metadata used `implicit_skip_policy=unknown`, and make
+  the skip policy part of assay compatibility.
+- Make flow-integrated modification outputs generation-transactional. Each
+  successful run writes a hash-verified
+  `<prefix>.mod.generations/<run_id>/manifest.json`, synchronizes compatibility
+  files, and publishes `<prefix>.mod.current.json` last; failed reruns
+  invalidate the pointer before core outputs change. Site summaries and
+  contrasts reject stale flow-managed flat files.
+- Keep descriptive fractions in the complete audit table while forcing
+  `mod_fraction=NA` for every ineligible design row. Expand site summaries with
+  dedicated columns for site-local join, unknown denominator, missing
+  coverage/reference validation, low covering/representation rates, and
+  unverified provenance.
+- Audit Dorado `@PG` program name, version, command line, explicit modified-base
+  model, and source threshold. Recovered values replace `unknown` declarations,
+  conflicts fail before outputs are written, and metadata records
+  `verified_from_pg`, `user_declared`, or `unavailable` provenance.
+- Add strict-denominator, explicit-only-policy, stale-generation, Dorado
+  provenance-conflict, and packaged-binary modification-flow regressions.
+
 ## 0.3.0
 
 - Add the isoform-level RNA-modification V1 commands: `mod-import-dorado` for strict MM/ML/MN decoding from primary genome-aligned modBAM, `mod-import-m6anet` for RNA002 read-probability projection, `mod-aggregate` for unique read-to-isoform aggregation, `mod-site-summary` for deterministic site QC inventories, `mod-contrast` for explicit effect-only comparisons, and `mod-subsample` for synchronized technical coverage partitions. `flow --mod-manifest` can run aggregation, and optional contrasts, after final unique assignment.

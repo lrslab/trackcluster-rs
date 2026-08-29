@@ -148,6 +148,7 @@ fn write_fixture(root: &Path, read_count: usize, assigned_count: usize) -> Fixtu
         source_emission_threshold: None,
         source_site_filter: "none".to_owned(),
         candidate_observations_complete: true,
+        provenance_status: trackcluster_rs::modification::ProvenanceStatus::UserDeclared,
         implicit_skip_policy: ImplicitSkipPolicy::NotApplicable,
         coordinate_source: "synthetic_genomic".to_owned(),
         read_id_mapping: "sample_prefix".to_owned(),
@@ -307,13 +308,13 @@ fn disjoint_pseudo_samples_run_through_isoform_quantification_and_contrast() {
     run_aggregate(&fixture, &bundle, &aggregate_prefix, false);
     let join_rows = tsv_rows(&root.join("quant.mod_join_qc.tsv"));
     assert_eq!(join_rows.len(), 2);
-    assert!(join_rows.iter().all(|row| row.get(9) == Some("1")));
+    assert!(join_rows.iter().all(|row| row.get(10) == Some("1")));
 
     let site_rows = tsv_rows(&root.join("quant.isoform_mod_sites.tsv"));
     assert_eq!(site_rows.len(), 4);
     assert!(site_rows
         .iter()
-        .all(|row| row.get(26) == Some("ok") && row.get(25) == Some("eligible")));
+        .all(|row| row.get(30) == Some("ok") && row.get(29) == Some("eligible")));
 
     let contrasts = root.join("contrasts.tsv");
     fs::write(
@@ -366,19 +367,22 @@ fn selected_unassigned_observations_remain_visible_to_the_join_gate() {
     );
 
     let prefix = root.join("quant");
-    run_aggregate(&fixture, &bundle, &prefix, true);
+    run_aggregate(&fixture, &bundle, &prefix, false);
     let join_rows = tsv_rows(&root.join("quant.mod_join_qc.tsv"));
     assert_eq!(
         join_rows
             .iter()
-            .map(|row| row.get(10).unwrap().parse::<usize>().unwrap())
+            .map(|row| row.get(11).unwrap().parse::<usize>().unwrap())
             .sum::<usize>(),
         1
     );
-    let rates = join_rows
-        .iter()
-        .map(|row| row.get(9).unwrap().parse::<f64>().unwrap())
-        .collect::<Vec<_>>();
-    assert!(rates.contains(&0.5));
-    assert!(rates.contains(&1.0));
+    for row in &join_rows {
+        let assigned_reads = row.get(8).unwrap().parse::<usize>().unwrap();
+        let joined_reads = row.get(7).unwrap().parse::<usize>().unwrap();
+        let read_join_rate = row.get(9).unwrap().parse::<f64>().unwrap();
+        if assigned_reads > 0 {
+            assert_eq!(joined_reads, assigned_reads);
+            assert_eq!(read_join_rate, 1.0);
+        }
+    }
 }

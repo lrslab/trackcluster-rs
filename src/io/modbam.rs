@@ -428,6 +428,31 @@ pub struct ModBamImportResult {
     pub semantics: ModBamImportSemantics,
 }
 
+/// Dorado provenance fields recovered from matching SAM `@PG` records.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DoradoPgProvenance {
+    /// Number of program records identified as Dorado-related.
+    pub dorado_program_records: usize,
+    /// Distinct Dorado versions recovered from `VN` fields.
+    pub caller_versions: Vec<String>,
+    /// Distinct explicit modified-base model arguments recovered from `CL` fields.
+    pub model_ids: Vec<String>,
+    /// Distinct `--modified-bases-threshold` values recovered from `CL` fields.
+    pub source_emission_thresholds: Vec<f64>,
+    /// Matching command lines retained verbatim for audit output.
+    pub command_lines: Vec<String>,
+}
+
+/// Per-record Dorado provenance retained internally so fields are never
+/// synthesized across unrelated `@PG` records.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DoradoPgRecordProvenance {
+    pub(crate) caller_version: Option<String>,
+    pub(crate) model_ids: Vec<String>,
+    pub(crate) source_emission_thresholds: Vec<f64>,
+    pub(crate) command_line: Option<String>,
+}
+
 /// Fatal modBAM import error.
 #[derive(Debug, Error)]
 pub enum ModBamError {
@@ -464,6 +489,215 @@ pub enum ModBamError {
         /// Record-specific diagnostic detail.
         detail: String,
     },
+}
+
+fn header_text(value: &[u8]) -> Option<String> {
+    std::str::from_utf8(value)
+        .ok()
+        .filter(|value| !value.chars().any(char::is_control))
+        .map(str::to_owned)
+}
+
+fn command_tokens(command: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    for character in command.chars() {
+        if escaped {
+            token.push(character);
+            escaped = false;
+            continue;
+        }
+        if character == '\\' && quote != Some('\'') {
+            escaped = true;
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            if quote == Some(character) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(character);
+            } else {
+                token.push(character);
+            }
+            continue;
+        }
+        if character.is_whitespace() && quote.is_none() {
+            if !token.is_empty() {
+                tokens.push(std::mem::take(&mut token));
+            }
+        } else {
+            token.push(character);
+        }
+    }
+    if escaped {
+        token.push('\\');
+    }
+    if !token.is_empty() {
+        tokens.push(token);
+    }
+    tokens
+}
+
+fn option_values(tokens: &[String], names: &[&str]) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        let token = &tokens[index];
+        if let Some((name, value)) = token.split_once('=') {
+            if names.contains(&name) && !value.is_empty() {
+                values.push(value.to_owned());
+            }
+        } else if names.contains(&token.as_str()) {
+            if let Some(value) = tokens.get(index + 1) {
+                values.push(value.clone());
+                index += 1;
+            }
+        }
+        index += 1;
+    }
+    values
+}
+
+fn is_dorado_program_identity(value: &str) -> bool {
+    let basename = value
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(value)
+        .to_ascii_lowercase();
+    let Some(suffix) = basename.strip_prefix("dorado") else {
+        return false;
+    };
+    suffix.is_empty()
+        || suffix
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| !byte.is_ascii_alphanumeric())
+}
+
+fn dorado_pg_records(header: &sam::Header) -> Vec<DoradoPgRecordProvenance> {
+    use sam::header::record::value::map::program::tag;
+
+    let mut records = Vec::new();
+
+    for (id, program) in header.programs().as_ref() {
+        let name = program
+            .other_fields()
+            .get(&tag::NAME)
+            .and_then(|value| header_text(value.as_ref()));
+        let command = program
+            .other_fields()
+            .get(&tag::COMMAND_LINE)
+            .and_then(|value| header_text(value.as_ref()));
+        let id = header_text(id.as_ref()).unwrap_or_default();
+        let command_executable = command
+            .as_deref()
+            .map(command_tokens)
+            .and_then(|tokens| tokens.into_iter().next());
+        let is_dorado = is_dorado_program_identity(&id)
+            || name.as_deref().is_some_and(is_dorado_program_identity)
+            || command_executable
+                .as_deref()
+                .is_some_and(is_dorado_program_identity);
+        if !is_dorado {
+            continue;
+        }
+        let caller_version = program
+            .other_fields()
+            .get(&tag::VERSION)
+            .and_then(|value| header_text(value.as_ref()));
+        let mut models = std::collections::BTreeSet::new();
+        let mut thresholds = Vec::new();
+        if let Some(command) = command.as_deref() {
+            let tokens = command_tokens(command);
+            for value in option_values(
+                &tokens,
+                &["--modified-bases-models", "--modified-bases-model"],
+            ) {
+                for model in value.split(',').filter(|value| !value.is_empty()) {
+                    models.insert(model.to_owned());
+                }
+            }
+            for value in option_values(&tokens, &["--modified-bases-threshold"]) {
+                if let Ok(threshold) = value.parse::<f64>() {
+                    if threshold.is_finite() && (0.0..=1.0).contains(&threshold) {
+                        thresholds.push(threshold);
+                    }
+                }
+            }
+        }
+        thresholds.sort_by(f64::total_cmp);
+        thresholds.dedup_by(|left, right| left.total_cmp(right).is_eq());
+        records.push(DoradoPgRecordProvenance {
+            caller_version,
+            model_ids: models.into_iter().collect(),
+            source_emission_thresholds: thresholds,
+            command_line: command,
+        });
+    }
+    records
+}
+
+fn summarize_dorado_pg_records(records: &[DoradoPgRecordProvenance]) -> DoradoPgProvenance {
+    let mut versions = std::collections::BTreeSet::new();
+    let mut models = std::collections::BTreeSet::new();
+    let mut thresholds = Vec::new();
+    let mut command_lines = std::collections::BTreeSet::new();
+    for record in records {
+        if let Some(version) = &record.caller_version {
+            versions.insert(version.clone());
+        }
+        models.extend(record.model_ids.iter().cloned());
+        thresholds.extend(record.source_emission_thresholds.iter().copied());
+        if let Some(command) = &record.command_line {
+            command_lines.insert(command.clone());
+        }
+    }
+    thresholds.sort_by(f64::total_cmp);
+    thresholds.dedup_by(|left, right| left.total_cmp(right).is_eq());
+
+    DoradoPgProvenance {
+        dorado_program_records: records.len(),
+        caller_versions: versions.into_iter().collect(),
+        model_ids: models.into_iter().collect(),
+        source_emission_thresholds: thresholds,
+        command_lines: command_lines.into_iter().collect(),
+    }
+}
+
+fn dorado_pg_provenance(
+    header: &sam::Header,
+) -> (DoradoPgProvenance, Vec<DoradoPgRecordProvenance>) {
+    let records = dorado_pg_records(header);
+    let summary = summarize_dorado_pg_records(&records);
+    (summary, records)
+}
+
+fn read_modbam_header(path: &Path) -> Result<sam::Header, ModBamError> {
+    let file = File::open(path).map_err(|source| ModBamError::Open {
+        path: path.to_owned(),
+        source,
+    })?;
+    let mut reader = bam::io::Reader::new(file);
+    reader
+        .read_header()
+        .map_err(|source| ModBamError::ReadHeader {
+            path: path.to_owned(),
+            source,
+        })
+}
+
+pub(crate) fn read_dorado_pg_details(
+    path: &Path,
+) -> Result<(DoradoPgProvenance, Vec<DoradoPgRecordProvenance>), ModBamError> {
+    let header = read_modbam_header(path)?;
+    Ok(dorado_pg_provenance(&header))
+}
+
+/// Read only a modBAM header and recover Dorado program provenance.
+pub fn read_dorado_pg_provenance(path: &Path) -> Result<DoradoPgProvenance, ModBamError> {
+    read_dorado_pg_details(path).map(|(summary, _)| summary)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

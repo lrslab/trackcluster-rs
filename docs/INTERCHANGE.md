@@ -25,9 +25,13 @@ forward/reverse records receive item RGB values `250,128,114`/`64,224,208`.
 is used. The remaining TrackCluster metadata identifies the row as
 `nanopore_read`, leaves gene and `name2` unassigned, and records no CDS or exon
 frame. One output row is retained per accepted BAM alignment instance, even
-when query names repeat. The completion summary reports each filtering class.
-Records are converted as a stream, and a failed conversion leaves any previous
-destination untouched.
+when query names repeat. `--invalid-record-policy skip` is the default: an
+independently decoded record with an invalid name, reference/start, CIGAR, span,
+or transcript geometry is excluded and counted by a stable reason, while later
+records continue. `fail` restores strict record conversion. Header,
+BGZF/framing, record-decode, truncation, and write errors remain fatal, as does
+an all-invalid candidate set. Records are converted as a stream, and a failed
+conversion leaves any previous destination untouched.
 
 ## GFF3/GTF annotation import
 
@@ -49,11 +53,16 @@ joined deterministically with `||`, and absent gene annotation becomes `none`.
 Annotation coordinates are one-based closed and become zero-based half-open
 BED exon intervals. Duplicate exon intervals are collapsed and exons are
 sorted, so input order does not affect output. A transcript's outer exon bounds
-define its BED span. Cross-contig exons, conflicting known strands, overlapping
-blocks, duplicate graph IDs, unresolved or gene-typed exon parents, unsafe
-BED fields, invalid reference transcript IDs, and malformed rows fail the
-conversion. Declared transcript contig, strand, and containment span are also
-validated. A failed conversion leaves any previous destination untouched.
+define its BED span. By default, `--invalid-record-policy skip` quarantines an
+entire identifiable transcript for cross-contig exons, conflicting known
+strands, overlapping blocks, duplicate graph IDs, unresolved or gene-typed
+parents, unsafe BED fields, invalid reference IDs, and attributable malformed
+rows. This whole-model boundary prevents one ignored exon from silently
+truncating a transcript. Unowned malformed model rows, stream errors, no-exon
+inputs, and all-quarantined catalogs remain fatal; `fail` restores strict
+all-or-nothing behavior. Rejections are written to `<out>.rejected.tsv`, or to
+`--rejected-records PATH`. The report and BED are atomic per file rather than
+as one transaction, and the BED is published last as the commit point.
 
 The current adapter is deliberately exon-structure oriented: CDS, UTR, phase,
 annotation scores, and declared transcript spans are not transferred. Output

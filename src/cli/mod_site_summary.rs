@@ -33,6 +33,13 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         &inputs,
         &[("site summary output", output.as_path())],
     )?;
+    for path in &args.sites {
+        crate::modification::generation::validate_current_flat(
+            path,
+            ".isoform_mod_sites.tsv",
+            "isoform_mod_sites",
+        )?;
+    }
 
     let result = crate::modification::site_summary::summarize_site_files(&args.sites)?;
     crate::flow::artifact_manifest::atomic_write_with(&output, |writer| {

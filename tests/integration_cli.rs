@@ -41,3 +41,50 @@ fn clusterj_batch_help_has_versioned_command_metadata() {
     assert!(stdout.contains("Usage: clusterj_batch"));
     assert!(stdout.contains("-V, --version"));
 }
+
+#[test]
+fn high_expression_gene_cap_defaults_are_consistent() {
+    let expected_default = format!(
+        "[default: {}]",
+        trackcluster_rs::flow::config::DEFAULT_MAX_READS_PER_GENE
+    );
+    let flow = Command::new(env!("CARGO_BIN_EXE_trackcluster"))
+        .args(["flow", "--help"])
+        .output()
+        .unwrap();
+    assert!(flow.status.success());
+    let flow_help = String::from_utf8(flow.stdout).unwrap();
+    assert!(
+        flow_help.contains("--max-reads-per-gene <MAX_READS_PER_GENE>"),
+        "{flow_help}"
+    );
+    assert!(flow_help.contains(&expected_default), "{flow_help}");
+
+    let batch = Command::new(env!("CARGO_BIN_EXE_clusterj_batch"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(batch.status.success());
+    let batch_help = String::from_utf8(batch.stdout).unwrap();
+    assert!(
+        batch_help.contains("--max-reads-per-gene <MAX_READS_PER_GENE>"),
+        "{batch_help}"
+    );
+    assert!(batch_help.contains(&expected_default), "{batch_help}");
+
+    let clusterj = Command::new(env!("CARGO_BIN_EXE_trackcluster"))
+        .args(["clusterj", "--help"])
+        .output()
+        .unwrap();
+    assert!(clusterj.status.success());
+    let clusterj_help = String::from_utf8(clusterj.stdout).unwrap();
+    assert!(
+        clusterj_help.contains("--max-reads-per-locus <MAX_READS_PER_LOCUS>"),
+        "{clusterj_help}"
+    );
+    assert!(clusterj_help.contains(&expected_default), "{clusterj_help}");
+    assert!(
+        clusterj_help.contains("--heartbeat-seconds"),
+        "{clusterj_help}"
+    );
+}

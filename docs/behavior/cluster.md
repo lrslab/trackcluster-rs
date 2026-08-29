@@ -86,3 +86,7 @@ and therefore appears as a **higher** `tx_start` (a higher genomic terminal
 boundary) than the full-length isoform.
 
 Unique counting remains catalog-aware after these isoforms are retained: reads are assigned to the closest compatible isoform by junction compatibility and terminal distance, so retained 3' early-stop reads count to the shorter terminal isoform instead of being reassigned to a longer same-junction reference.
+
+## Standalone `clusterj` locus cap
+
+`trackcluster clusterj` (the single-file command) reservoir-samples each overlapping locus to `--max-reads-per-locus` (default `5000`). The seed is `--downsample-seed` mixed with chrom, strand, locus span, and locus size. Dropped reads are unused; unlike `flow`/`clusterj_batch` per-gene sampling, standalone clustering does not emit a downsample TSV or scale later counts. Library callers such as `flow` pass a zero locus cap because they already downsample per gene. Setting `--max-reads-per-locus 0` is a time warning: high-diversity loci can still be expensive after the candidate-index and final-merge fixes.

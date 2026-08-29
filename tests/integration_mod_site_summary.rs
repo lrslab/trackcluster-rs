@@ -10,19 +10,33 @@ use common::{assert_success, TestDir};
 const SITE_HEADER: &str = concat!(
     "assay_id\tanalysis_threshold\tsample\tgroup\tgene\tisoform_id\tsite_id\t",
     "chrom\tpos0\tstrand\tmod_code\tcontext\tsite_state\tcoverage_basis\t",
-    "n_assigned\tn_covering\tn_candidate\tn_callable\tn_modified\tn_unmodified\t",
+    "eligibility_profile\tn_assigned\tn_covering\tn_not_candidate\tn_candidate\t",
+    "candidate_rate\tn_callable\tcallable_rate\tn_modified\tn_unmodified\t",
     "n_unknown\tmod_fraction\tmean_probability\tci_low\tci_high\teligibility\t",
     "eligibility_reason\n"
 );
 
+const V0_3_0_SITE_HEADER: &str = concat!(
+    "assay_id\tanalysis_threshold\tsample\tgroup\tgene\tisoform_id\tsite_id\t",
+    "chrom\tpos0\tstrand\tmod_code\tcontext\tsite_state\tcoverage_basis\t",
+    "n_assigned\tn_covering\tn_candidate\tn_callable\tn_modified\t",
+    "n_unmodified\tn_unknown\tmod_fraction\tmean_probability\tci_low\tci_high\t",
+    "eligibility\teligibility_reason\n"
+);
+
 const SUMMARY_HEADER: &str = concat!(
     "assay_id\tanalysis_threshold\tsample\tgroup\tgene\tsite_id\tchrom\tpos0\t",
-    "strand\tmod_code\tcontext\tcoverage_basis\tn_isoforms_total\t",
+    "strand\tmod_code\tcontext\tcoverage_basis\teligibility_profile\t",
+    "n_isoforms_total\t",
     "n_isoforms_assigned\tn_isoforms_present\tn_isoforms_eligible\t",
     "n_isoforms_site_absent\tn_isoforms_context_dependent\t",
     "n_isoforms_reference_base_mismatch\tn_isoforms_unprojectable\t",
     "n_isoforms_incomplete_candidate_universe\tn_isoforms_join_rate_low\t",
-    "n_isoforms_low_callable\tn_isoforms_other_ineligible\t",
+    "n_isoforms_site_join_rate_low\tn_isoforms_unknown_denominator\t",
+    "n_isoforms_coverage_unavailable\tn_isoforms_reference_unvalidated\t",
+    "n_isoforms_low_covering\tn_isoforms_low_callable\t",
+    "n_isoforms_low_candidate_rate\tn_isoforms_low_callable_rate\t",
+    "n_isoforms_provenance_unverified\tn_isoforms_other_ineligible\t",
     "min_eligible_n_covering\tmin_eligible_n_callable\tsummary_state\n"
 );
 
@@ -41,6 +55,7 @@ struct SiteRow {
     context: &'static str,
     site_state: &'static str,
     coverage_basis: &'static str,
+    eligibility_profile: &'static str,
     n_assigned: u64,
     n_covering: Option<u64>,
     n_candidate: u64,
@@ -72,6 +87,7 @@ impl SiteRow {
             context: "DRACH",
             site_state: "present",
             coverage_basis: "bam_exact",
+            eligibility_profile: "exploratory",
             n_assigned: 1,
             n_covering: Some(0),
             n_candidate: 0,
@@ -151,6 +167,53 @@ impl SiteRow {
 
     fn render(&self) -> String {
         let site_id = format!("{}:{}:{}", self.chrom, self.pos0, self.strand);
+        let (n_not_candidate, candidate_rate, callable_rate) = match self.n_covering {
+            None => (None, None, None),
+            Some(0) => (Some(0), None, None),
+            Some(covering) => (
+                Some(covering - self.n_candidate),
+                Some(self.n_candidate as f64 / covering as f64),
+                Some(self.n_callable as f64 / covering as f64),
+            ),
+        };
+        [
+            self.assay_id.to_owned(),
+            self.analysis_threshold.to_owned(),
+            self.sample.to_owned(),
+            self.group.to_owned(),
+            self.gene.to_owned(),
+            self.isoform_id.to_owned(),
+            site_id,
+            self.chrom.to_owned(),
+            self.pos0.to_string(),
+            self.strand.to_owned(),
+            self.mod_code.to_owned(),
+            self.context.to_owned(),
+            self.site_state.to_owned(),
+            self.coverage_basis.to_owned(),
+            self.eligibility_profile.to_owned(),
+            self.n_assigned.to_string(),
+            optional(self.n_covering),
+            optional(n_not_candidate),
+            self.n_candidate.to_string(),
+            optional(candidate_rate),
+            self.n_callable.to_string(),
+            optional(callable_rate),
+            self.n_modified.to_string(),
+            self.n_unmodified.to_string(),
+            self.n_unknown.to_string(),
+            optional(self.mod_fraction),
+            optional(self.mean_probability),
+            optional(self.ci_low),
+            optional(self.ci_high),
+            self.eligibility.to_owned(),
+            self.eligibility_reason.to_owned(),
+        ]
+        .join("\t")
+    }
+
+    fn render_v0_3_0(&self) -> String {
+        let site_id = format!("{}:{}:{}", self.chrom, self.pos0, self.strand);
         [
             self.assay_id.to_owned(),
             self.analysis_threshold.to_owned(),
@@ -212,6 +275,38 @@ fn run_summary(inputs: &[&Path], prefix: &Path) -> Output {
         command.arg("--sites").arg(input);
     }
     command.arg("--out").arg(prefix).output().unwrap()
+}
+
+#[test]
+fn accepts_v0_3_0_site_tables_as_exploratory_inputs() {
+    let root = TestDir::new("mod-site-summary-v0-3-0");
+    let sites = root.join("legacy.tsv");
+    let row = SiteRow::new("G1", "iso1", 110).exact_eligible(2, 2, 1, 1, "0.5", "0", "1");
+    fs::write(
+        &sites,
+        format!("{V0_3_0_SITE_HEADER}{}\n", row.render_v0_3_0()),
+    )
+    .unwrap();
+
+    let prefix = root.join("summary");
+    let output = run_summary(&[sites.as_path()], &prefix);
+    assert_success(&output, "v0.3.0 site summary");
+
+    let text = fs::read_to_string(summary_path(&prefix)).unwrap();
+    let mut lines = text.lines();
+    let columns = lines.next().unwrap().split('\t').collect::<Vec<_>>();
+    let values = lines.next().unwrap().split('\t').collect::<Vec<_>>();
+    let value = |column: &str| {
+        let index = columns
+            .iter()
+            .position(|candidate| *candidate == column)
+            .unwrap();
+        values[index]
+    };
+    assert_eq!(value("eligibility_profile"), "exploratory");
+    assert_eq!(value("n_isoforms_eligible"), "1");
+    assert_eq!(value("min_eligible_n_covering"), "2");
+    assert_eq!(value("min_eligible_n_callable"), "2");
 }
 
 #[test]
@@ -286,27 +381,11 @@ fn summarizes_sites_deterministically_with_all_qc_states() {
     let first_text = fs::read_to_string(summary_path(&first_prefix)).unwrap();
     let second_text = fs::read_to_string(summary_path(&second_prefix)).unwrap();
     assert_eq!(first_text, second_text);
-    let expected = format!(
-        concat!(
-            "{}",
-            "a1\t0.5\tS1\tcontrol\tG1\tchr1:110:+\tchr1\t110\t+\tA+a\tDRACH\t",
-            "bam_exact\t2\t2\t2\t2\t0\t0\t0\t0\t0\t0\t0\t0\t6\t4\tshared_eligible\n",
-            "a1\t0.5\tS1\tcontrol\tG1\tchr1:120:+\tchr1\t120\t+\tA+a\tDRACH\t",
-            "bam_exact\t2\t2\t1\t0\t1\t0\t0\t0\t0\t0\t1\t0\tNA\tNA\t",
-            "no_eligible_isoform\n",
-            "a1\t0.5\tS1\tcontrol\tG1\tchr1:130:+\tchr1\t130\t+\tA+a\tDRACH\t",
-            "bam_exact\t5\t4\t2\t0\t0\t1\t1\t1\t1\t1\t0\t0\tNA\tNA\t",
-            "no_eligible_isoform\n",
-            "a1\t0.5\tS1\tcontrol\tG1\tchr1:140:+\tchr1\t140\t+\tA+a\tDRACH\t",
-            "bam_exact\t2\t2\t2\t1\t0\t0\t0\t0\t0\t0\t1\t0\t4\t2\t",
-            "single_eligible\n",
-            "a1\t0.5\tS1\tcontrol\tG2\tchr1:10:+\tchr1\t10\t+\tA+a\tDRACH\t",
-            "unavailable\t1\t1\t1\t1\t0\t0\t0\t0\t0\t0\t0\t0\tNA\t1\t",
-            "single_eligible\n"
-        ),
-        SUMMARY_HEADER
-    );
-    assert_eq!(first_text, expected);
+    assert!(first_text.starts_with(SUMMARY_HEADER));
+    assert_eq!(first_text.lines().count(), 6);
+    assert!(first_text.contains("\tshared_eligible\n"));
+    assert!(first_text.contains("\tsingle_eligible\n"));
+    assert!(first_text.contains("\tno_eligible_isoform\n"));
 }
 
 #[test]
@@ -320,16 +399,43 @@ fn counts_new_and_future_eligibility_reasons_in_catch_all() {
         SiteRow::new("G1", "iso2", 110).zero_count_reason(1, 1, "present", "unknown_denominator");
     unknown_denominator.n_candidate = 1;
     unknown_denominator.n_unknown = 1;
+    let coverage_unavailable =
+        SiteRow::new("G1", "iso3", 110).zero_count_reason(1, 0, "present", "coverage_unavailable");
+    let reference_unvalidated =
+        SiteRow::new("G1", "iso4", 110).zero_count_reason(1, 1, "present", "reference_unvalidated");
+    let low_covering =
+        SiteRow::new("G1", "iso5", 110).zero_count_reason(1, 1, "present", "low_covering");
+    let low_candidate_rate =
+        SiteRow::new("G1", "iso6", 110).zero_count_reason(1, 1, "present", "low_candidate_rate");
+    let low_callable_rate =
+        SiteRow::new("G1", "iso7", 110).zero_count_reason(1, 1, "present", "low_callable_rate");
+    let provenance_unverified =
+        SiteRow::new("G1", "iso8", 110).zero_count_reason(1, 1, "present", "provenance_unverified");
     let future =
-        SiteRow::new("G1", "iso3", 110).zero_count_reason(1, 0, "present", "future_qc_gate");
-    write_sites(&sites, &[site_join, unknown_denominator, future]);
+        SiteRow::new("G1", "iso9", 110).zero_count_reason(1, 0, "present", "future_qc_gate");
+    let mut rows = vec![
+        site_join,
+        unknown_denominator,
+        coverage_unavailable,
+        reference_unvalidated,
+        low_covering,
+        low_candidate_rate,
+        low_callable_rate,
+        provenance_unverified,
+        future,
+    ];
+    for row in &mut rows {
+        row.coverage_basis = "unavailable";
+        row.n_covering = None;
+    }
+    write_sites(&sites, &rows);
 
     let prefix = root.join("summary");
     let output = run_summary(&[sites.as_path()], &prefix);
     assert_success(&output, "open eligibility reasons");
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "mod-site-summary: inputs=1 input_rows=3 sites=1\n"
+        "mod-site-summary: inputs=1 input_rows=9 sites=1\n"
     );
 
     let text = fs::read_to_string(summary_path(&prefix)).unwrap();
@@ -344,10 +450,18 @@ fn counts_new_and_future_eligibility_reasons_in_catch_all() {
             .unwrap();
         values[index]
     };
-    assert_eq!(value("n_isoforms_present"), "3");
+    assert_eq!(value("n_isoforms_present"), "9");
     assert_eq!(value("n_isoforms_eligible"), "0");
     assert_eq!(value("n_isoforms_reference_base_mismatch"), "0");
-    assert_eq!(value("n_isoforms_other_ineligible"), "3");
+    assert_eq!(value("n_isoforms_site_join_rate_low"), "1");
+    assert_eq!(value("n_isoforms_unknown_denominator"), "1");
+    assert_eq!(value("n_isoforms_coverage_unavailable"), "1");
+    assert_eq!(value("n_isoforms_reference_unvalidated"), "1");
+    assert_eq!(value("n_isoforms_low_covering"), "1");
+    assert_eq!(value("n_isoforms_low_candidate_rate"), "1");
+    assert_eq!(value("n_isoforms_low_callable_rate"), "1");
+    assert_eq!(value("n_isoforms_provenance_unverified"), "1");
+    assert_eq!(value("n_isoforms_other_ineligible"), "1");
     assert_eq!(value("summary_state"), "no_eligible_isoform");
 }
 

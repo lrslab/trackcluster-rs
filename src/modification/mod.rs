@@ -4,6 +4,8 @@
 pub mod aggregate;
 /// Explicit shared-site effect-only contrasts.
 pub mod contrast;
+/// Transactional output generations for flow-integrated modification analysis.
+pub(crate) mod generation;
 /// Streaming per-site summaries of isoform modification audit tables.
 pub mod site_summary;
 /// Deterministic molecule-level pseudo-sample bundle generation.
@@ -12,6 +14,7 @@ pub mod subsample;
 pub mod types;
 
 pub use types::{
-    AssayMetadata, CoverageBasis, EligibilityReason, ImplicitSkipPolicy, ModObservation,
-    ModObservationKey, ModSiteKey, ObservationState, SiteState, MODIFICATION_SCHEMA_VERSION,
+    AssayMetadata, CoverageBasis, EligibilityProfile, EligibilityReason, ImplicitSkipPolicy,
+    ModObservation, ModObservationKey, ModSiteKey, ObservationState, ProvenanceStatus, SiteState,
+    MODIFICATION_SCHEMA_VERSION,
 };

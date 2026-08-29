@@ -6,6 +6,8 @@
 /bom.json
 /SHA256SUMS
 /RELEASE_NOTES.md
+/docs/CODE_REVIEW.md
+/docs/HANDOFF.md
 
 # IDEs
 .idea/

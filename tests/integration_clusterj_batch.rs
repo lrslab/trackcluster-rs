@@ -593,6 +593,12 @@ fn clusterj_batch_downsampling_ignores_rejected_tracks_in_count_and_rng() {
             "downsample batch failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr
+                .contains("clusterj-batch: subsample gene=GENEA original_reads=4 sampled_reads=2"),
+            "{stderr}"
+        );
     }
 
     for suffix in [
@@ -614,6 +620,44 @@ fn clusterj_batch_downsampling_ignores_rejected_tracks_in_count_and_rng() {
             .lines()
             .count(),
         3
+    );
+}
+
+#[test]
+fn clusterj_batch_default_subsamples_a_cox1_sized_locus_before_clustering() {
+    let root = fresh_temp_dir("clusterj_batch_default_cox1_cap");
+    let template = fs::read_to_string(repo_path("tests/fixtures/reads.bed")).expect("read reads");
+    let reference =
+        fs::read_to_string(repo_path("tests/fixtures/ref.bed")).expect("read reference");
+    let cap = trackcluster_rs::flow::config::DEFAULT_MAX_READS_PER_GENE;
+    let original_reads = cap + 1;
+    let mut reads = String::with_capacity(template.len() * original_reads);
+    for index in 0..original_reads {
+        reads.push_str(&template.replace("read_trunc", &format!("cox1_read_{index}")));
+    }
+    write_gene_inputs(&root, "cox1", &reads, &reference);
+
+    let output = run_batch(&root, &["--force"]);
+    assert!(
+        output.status.success(),
+        "default high-expression cap failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let expected_log = format!(
+        "clusterj-batch: subsample gene=cox1 original_reads={original_reads} sampled_reads={cap}"
+    );
+    assert!(stderr.contains(&expected_log), "{stderr}");
+
+    let downsample = fs::read_to_string(root.join("cox1/downsample.tsv")).unwrap();
+    let scale = original_reads as f64 / cap as f64;
+    let expected_record = format!("cox1\t{original_reads}\t{cap}\t{scale}\t");
+    assert!(downsample.contains(&expected_record), "{downsample}");
+    let summary = fs::read_to_string(root.join("clusterj_batch_summary.txt")).unwrap();
+    let expected_summary = format!("max_reads_per_gene\t{cap}");
+    assert!(
+        summary.lines().any(|line| line == expected_summary),
+        "{summary}"
     );
 }
 

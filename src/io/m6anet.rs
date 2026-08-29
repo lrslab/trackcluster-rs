@@ -949,6 +949,7 @@ pub fn import_m6anet_with_site_probability(
         source_emission_threshold: None,
         source_site_filter,
         candidate_observations_complete: data_info.is_some(),
+        provenance_status: crate::modification::ProvenanceStatus::UserDeclared,
         implicit_skip_policy: ImplicitSkipPolicy::NotApplicable,
         coordinate_source:
             "m6anet_transcript_position_0_based_target_base_projected_via_annotation".to_owned(),

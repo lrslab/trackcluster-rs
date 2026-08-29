@@ -24,6 +24,17 @@ The integration contrast is deliberately descriptive. V1 emits no inferential
 `p_value` or `q_value`; pseudo-samples created by `mod-subsample` are technical
 coverage partitions and are not biological replicates.
 
+For analysis-facing validation, run aggregation with
+`--eligibility-profile strict`. A row then needs an indexed reference FASTA,
+exact primary-alignment coverage, configured covering/callable minima,
+candidate/covering and callable/covering rate gates, complete/known
+denominators, and passing global assigned-read join QC. Site-local observation
+assignment rates remain audit-only. Dorado rows additionally require version,
+explicit model, and source-threshold provenance recovered consistently from one
+BAM `@PG` record. The shipped defaults (20 covering, 10 callable, and 0.8 for both
+rates) are conservative engineering guardrails that must be calibrated against
+the selected caller/model/chemistry controls.
+
 ## Reproduce the public-data checks
 
 The opt-in script caches downloads and writes reports under `target/`, which is
@@ -81,8 +92,10 @@ unmodified control, at least 0.80 for m6A, and a m6A-minus-control modified
 fraction of at least 0.70. These are regression gates for this importer, not a
 claim about model performance. The public BAM header does not record an
 explicit modified-base emission threshold, so the script records Dorado's
-0.05 default. For publication-grade benchmarking, regenerate BAMs with the
-release recipe's explicit `--modified-bases-threshold 0`.
+0.05 default. This validates decoding but does not satisfy strict
+`verified_from_pg` provenance. For publication-grade benchmarking, regenerate
+BAMs with the release recipe's explicit `--modified-bases-threshold 0` and an
+auditable model command in `@PG`.
 
 Sources:
 

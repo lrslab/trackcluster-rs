@@ -63,6 +63,37 @@ jobs:
             "$smoke_root/clusterj_batch_summary.txt"
           grep -Eq $'^source_fingerprint\tsha256:[0-9a-f]{64}$' \
             "$smoke_root/clusterj_batch_summary.txt"
+
+          mod_smoke_root=$(mktemp -d)
+          printf 'sample\tgroup\treads\nS1\tcontrol\t%s/tests/fixtures/reads.bed\n' \
+            "$PWD" > "$mod_smoke_root/samples.tsv"
+          printf '%b\n' \
+            'assay_id\tsample\tread_id\tchrom\tpos0\tstrand\tmod_code\tprobability\tobservation_state\tcontext\tsource_transcript_id\tsource_pos0' \
+            'a1\tS1\tS1::read_trunc\tchr1\t125\t+\tA+a\t0.9\texplicit_probability\tNA\tNA\tNA' \
+            > "$mod_smoke_root/observations.tsv"
+          printf '%s\n' \
+            '{"schema_version":1,"assay_id":"a1","caller":"packaged-smoke","caller_version":"1","model_id":"synthetic","chemistry":"RNA004","candidate_rule":"all-context-A","source_emission_threshold":null,"source_site_filter":"none","candidate_observations_complete":true,"provenance_status":"user_declared","implicit_skip_policy":"not_applicable","coordinate_source":"synthetic_genomic","read_id_mapping":"sample_prefixed","source_files":[]}' \
+            > "$mod_smoke_root/assay.json"
+          printf 'sample\tassay_id\tobservations\tassay_metadata\tcoverage_bam\nS1\ta1\t%s\t%s\tNA\n' \
+            "$mod_smoke_root/observations.tsv" "$mod_smoke_root/assay.json" \
+            > "$mod_smoke_root/mod_samples.tsv"
+          "$bin_dir/trackcluster" flow \
+            --manifest "$mod_smoke_root/samples.tsv" \
+            --reference tests/fixtures/ref.bed \
+            --output-root "$mod_smoke_root/output" \
+            --prefix pooled \
+            --threads 1 \
+            --max-reads-per-gene 0 \
+            --force \
+            --mod-manifest "$mod_smoke_root/mod_samples.tsv" \
+            --mod-analysis-threshold a1=0.5
+          current="$mod_smoke_root/output/pooled.mod.current.json"
+          test "$(jq -r '.complete' "$current")" = true
+          run_id=$(jq -r '.run_id' "$current")
+          test -s "$mod_smoke_root/output/pooled.mod.generations/$run_id/manifest.json"
+          test -s "$mod_smoke_root/output/pooled.isoform_mod_sites.tsv"
+          test -s "$mod_smoke_root/output/pooled.isoform_mod_design.tsv"
+
           package_summary="$smoke_root/clusterj_batch_summary.txt"
           package_commit=$(awk -F '\t' '$1 == "git_commit" { print $2; exit }' \
             "$package_summary")

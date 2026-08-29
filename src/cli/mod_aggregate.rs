@@ -9,6 +9,7 @@ use crate::modification::aggregate::{
     aggregate_modifications, write_isoform_mod_design_tsv, write_isoform_mod_sites_tsv,
     write_join_qc_tsv, write_site_join_qc_tsv, AggregateOptions, ModSampleInput,
 };
+use crate::modification::EligibilityProfile;
 
 #[derive(Clone, Debug)]
 pub(crate) struct AnalysisThreshold {
@@ -65,14 +66,28 @@ pub struct Args {
     /// Per-assay hard-call threshold as ASSAY_ID=PROBABILITY; repeat for each assay.
     #[arg(long = "analysis-threshold", required = true, value_parser = parse_analysis_threshold)]
     analysis_thresholds: Vec<AnalysisThreshold>,
+    /// Eligibility policy: exploratory preserves V1 counting behavior; strict requires coverage,
+    /// reference validation, and molecule-representation guardrails.
+    #[arg(long, default_value_t = EligibilityProfile::Exploratory)]
+    pub eligibility_profile: EligibilityProfile,
+    /// Minimum independently covering molecules in strict mode.
+    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u64).range(1..))]
+    pub min_covering: u64,
     /// Minimum callable molecules for an eligible sample/isoform/site row.
-    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..))]
-    pub min_callable: u64,
-    /// Minimum distinct-read join rate for each sample/assay.
+    /// Defaults to 1 in exploratory mode and 10 in strict mode.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    pub min_callable: Option<u64>,
+    /// Minimum candidate/covering molecule fraction in strict mode.
+    #[arg(long, default_value = "0.8", value_parser = parse_rate)]
+    pub min_candidate_rate: f64,
+    /// Minimum callable/covering molecule fraction in strict mode.
+    #[arg(long, default_value = "0.8", value_parser = parse_rate)]
+    pub min_callable_rate: f64,
+    /// Minimum assigned-read join rate for each sample/assay.
     #[arg(long, default_value = "0.9", value_parser = parse_rate)]
     pub min_read_join_rate: f64,
     /// Emit low-join rows as ineligible instead of failing.
-    #[arg(long)]
+    #[arg(long = "allow-low-global-join", visible_alias = "allow-low-join")]
     pub allow_low_join: bool,
     /// Output prefix for the four modification aggregate TSV files.
     #[arg(short, long)]
@@ -83,6 +98,34 @@ fn append_suffix(prefix: &Path, suffix: &str) -> PathBuf {
     let mut value: OsString = prefix.as_os_str().to_os_string();
     value.push(suffix);
     PathBuf::from(value)
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AggregateOutputPaths {
+    pub(crate) join_qc: PathBuf,
+    pub(crate) site_join_qc: PathBuf,
+    pub(crate) sites: PathBuf,
+    pub(crate) design: PathBuf,
+}
+
+impl AggregateOutputPaths {
+    pub(crate) fn for_prefix(prefix: &Path) -> Self {
+        Self {
+            join_qc: append_suffix(prefix, ".mod_join_qc.tsv"),
+            site_join_qc: append_suffix(prefix, ".mod_site_join_qc.tsv"),
+            sites: append_suffix(prefix, ".isoform_mod_sites.tsv"),
+            design: append_suffix(prefix, ".isoform_mod_design.tsv"),
+        }
+    }
+
+    fn labeled(&self) -> [(&'static str, &Path); 4] {
+        [
+            ("join QC output", self.join_qc.as_path()),
+            ("site join QC output", self.site_join_qc.as_path()),
+            ("isoform modification sites output", self.sites.as_path()),
+            ("isoform modification design output", self.design.as_path()),
+        ]
+    }
 }
 
 fn ensure_nested_inputs_are_not_outputs(
@@ -141,22 +184,22 @@ pub(crate) fn collect_thresholds(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn run_with_paths(
+pub(crate) fn run_with_output_paths(
     manifest: &Path,
     isoforms: &Path,
     read_to_isoform: &Path,
     mod_manifest: &Path,
     reference_fasta: Option<&Path>,
     thresholds: BTreeMap<String, f64>,
+    eligibility_profile: EligibilityProfile,
+    min_covering: u64,
     min_callable: u64,
+    min_candidate_rate: f64,
+    min_callable_rate: f64,
     min_read_join_rate: f64,
     allow_low_join: bool,
-    out: &Path,
+    outputs: &AggregateOutputPaths,
 ) -> anyhow::Result<crate::modification::aggregate::AggregateResult> {
-    let join_qc_path = append_suffix(out, ".mod_join_qc.tsv");
-    let site_join_qc_path = append_suffix(out, ".mod_site_join_qc.tsv");
-    let sites_path = append_suffix(out, ".isoform_mod_sites.tsv");
-    let design_path = append_suffix(out, ".isoform_mod_design.tsv");
     let mut inputs = vec![
         ("sample manifest", manifest),
         ("isoform catalog", isoforms),
@@ -166,15 +209,7 @@ pub(crate) fn run_with_paths(
     if let Some(path) = reference_fasta {
         inputs.push(("reference FASTA", path));
     }
-    crate::cli::ensure_distinct_inputs_and_outputs(
-        &inputs,
-        &[
-            ("join QC output", join_qc_path.as_path()),
-            ("site join QC output", site_join_qc_path.as_path()),
-            ("isoform modification sites output", sites_path.as_path()),
-            ("isoform modification design output", design_path.as_path()),
-        ],
-    )?;
+    crate::cli::ensure_distinct_inputs_and_outputs(&inputs, &outputs.labeled())?;
 
     let samples = crate::io::manifest::read_manifest_tsv(manifest)?;
     let isoform_records = crate::io::bed::read_bed12(isoforms)
@@ -184,15 +219,7 @@ pub(crate) fn run_with_paths(
     let read_to_isoform_records = crate::count::read_read_to_isoform_tsv(read_to_isoform)
         .with_context(|| format!("read unique mapping {read_to_isoform:?}"))?;
     let mod_rows = crate::io::mod_manifest::read_mod_manifest_tsv(mod_manifest)?;
-    ensure_nested_inputs_are_not_outputs(
-        &mod_rows,
-        &[
-            ("join QC output", join_qc_path.as_path()),
-            ("site join QC output", site_join_qc_path.as_path()),
-            ("isoform modification sites output", sites_path.as_path()),
-            ("isoform modification design output", design_path.as_path()),
-        ],
-    )?;
+    ensure_nested_inputs_are_not_outputs(&mod_rows, &outputs.labeled())?;
 
     let mut mod_inputs = Vec::with_capacity(mod_rows.len());
     for row in mod_rows {
@@ -241,31 +268,74 @@ pub(crate) fn run_with_paths(
         &mod_inputs,
         &AggregateOptions {
             analysis_thresholds: thresholds,
+            eligibility_profile,
+            min_covering,
             min_callable,
+            min_candidate_rate,
+            min_callable_rate,
             min_read_join_rate,
             allow_low_join,
             reference_bases,
         },
     )?;
 
-    crate::flow::artifact_manifest::atomic_write_with(&join_qc_path, |writer| {
+    crate::flow::artifact_manifest::atomic_write_with(&outputs.join_qc, |writer| {
         write_join_qc_tsv(writer, &result.join_qc)
     })?;
-    crate::flow::artifact_manifest::atomic_write_with(&site_join_qc_path, |writer| {
+    crate::flow::artifact_manifest::atomic_write_with(&outputs.site_join_qc, |writer| {
         write_site_join_qc_tsv(writer, &result.site_join_qc)
     })?;
-    crate::flow::artifact_manifest::atomic_write_with(&sites_path, |writer| {
+    crate::flow::artifact_manifest::atomic_write_with(&outputs.sites, |writer| {
         write_isoform_mod_sites_tsv(writer, &result.sites)
     })?;
-    crate::flow::artifact_manifest::atomic_write_with(&design_path, |writer| {
+    crate::flow::artifact_manifest::atomic_write_with(&outputs.design, |writer| {
         write_isoform_mod_design_tsv(writer, &result.design)
     })?;
 
     Ok(result)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_with_paths(
+    manifest: &Path,
+    isoforms: &Path,
+    read_to_isoform: &Path,
+    mod_manifest: &Path,
+    reference_fasta: Option<&Path>,
+    thresholds: BTreeMap<String, f64>,
+    eligibility_profile: EligibilityProfile,
+    min_covering: u64,
+    min_callable: u64,
+    min_candidate_rate: f64,
+    min_callable_rate: f64,
+    min_read_join_rate: f64,
+    allow_low_join: bool,
+    out: &Path,
+) -> anyhow::Result<crate::modification::aggregate::AggregateResult> {
+    run_with_output_paths(
+        manifest,
+        isoforms,
+        read_to_isoform,
+        mod_manifest,
+        reference_fasta,
+        thresholds,
+        eligibility_profile,
+        min_covering,
+        min_callable,
+        min_candidate_rate,
+        min_callable_rate,
+        min_read_join_rate,
+        allow_low_join,
+        &AggregateOutputPaths::for_prefix(out),
+    )
+}
+
 pub fn run(args: Args) -> anyhow::Result<()> {
     let thresholds = collect_thresholds(args.analysis_thresholds)?;
+    crate::modification::generation::ensure_standalone_prefix(&args.out)?;
+    let min_callable = args
+        .min_callable
+        .unwrap_or_else(|| args.eligibility_profile.default_min_callable());
     let result = run_with_paths(
         &args.manifest,
         &args.isoforms,
@@ -273,7 +343,11 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         &args.mod_manifest,
         args.reference_fasta.as_deref(),
         thresholds,
-        args.min_callable,
+        args.eligibility_profile,
+        args.min_covering,
+        min_callable,
+        args.min_candidate_rate,
+        args.min_callable_rate,
         args.min_read_join_rate,
         args.allow_low_join,
         &args.out,

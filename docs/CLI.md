@@ -103,14 +103,19 @@ Flags and defaults:
   default).
 - `--include-supplementary`: retain records carrying flag `0x800` (excluded by
   default).
+- `--invalid-record-policy` (default `skip`): `skip` excludes an independently
+  decoded record that cannot be converted and continues; `fail` restores
+  all-or-nothing record conversion.
 
 Unmapped records are always skipped. Missing MAPQ is treated as zero for
 filtering and for the BED score. For each retained alignment, only CIGAR `N`
 starts a new exon: reference-consuming matches, mismatches, and deletions stay
 inside the current block, while insertions and clipping do not consume the
 reference. Every emitted block must contain at least one `M`, `=`, or `X`;
-deletion-only blocks and alignments beyond the BAM header reference length are
-rejected. Reverse-complement flag `0x10` sets the minus strand. Multiple
+deletion-only blocks, zero-length CIGAR operations, non-UTF-8 or unsafe query
+names, and alignments beyond the BAM header reference length are invalid. In
+the default `skip` mode these decoded records are excluded without stopping
+later records. Reverse-complement flag `0x10` sets the minus strand. Multiple
 retained records with the same query name remain separate BED alignment
 instances; downstream counting applies the molecule-ID policy.
 
@@ -119,10 +124,15 @@ The BED score is the record MAPQ. The converter writes `name2=none`,
 one `-1` exon frame per block. See [Converter-produced BED12+8](FORMATS.md#converter-produced-bed128)
 for the complete field contract.
 
-On success, stderr reports total decoded records, emitted records, and counts
-skipped as unmapped, secondary, supplementary, or below MAPQ. Conversion is
-streamed and the destination is atomically published only after the complete
-BAM succeeds.
+On success, stderr reports total decoded records, emitted records, filtering
+counts, and the invalid-record count. Each invalid-reason class prints only its
+first record as a bounded diagnostic. BAM header, BGZF/framing, record-decode,
+truncation, and output-write errors always fail because the reader cannot
+safely resynchronize. A scan that encounters invalid candidate records but
+emits no valid record also fails; an input containing only policy-filtered
+unmapped/secondary/supplementary/low-MAPQ records may legitimately emit an
+empty file. Conversion is streamed, and a failure leaves the previous BED
+destination untouched.
 
 ### `trackcluster gff2bigg`
 
@@ -149,30 +159,43 @@ Flags and defaults:
   `gene_id` is used.
 - `--input-format` (default `auto`): `auto`, `gff3`, or `gtf`. Auto mode
   detects `key=value` versus `key "value"` attribute syntax per data row.
+- `--invalid-record-policy` (default `skip`): quarantine safely attributable
+  malformed rows or invalid transcript models; `fail` restores strict
+  all-or-nothing parsing.
+- `--rejected-records` (default `<out>.rejected.tsv`): escaped TSV audit of
+  rejected source rows/models, including unambiguous JSON transcript-ID lists.
 
-Every data row must have exactly nine tab-separated columns and valid positive,
-one-based inclusive coordinates. Blank/comment lines are ignored, and parsing
-stops at `##FASTA`. GFF3 attributes are percent-decoded; GTF quoted attributes
-are unescaped. `?` and `.` strands map to unknown.
+Model-bearing data rows use exactly nine tab-separated columns and valid
+positive, one-based inclusive coordinates; the recovery exceptions for
+identifiable models and unused features are described below. Blank/comment
+lines are ignored, and parsing stops at `##FASTA`. GFF3 attributes are
+percent-decoded; GTF quoted attributes are unescaped. `?` and `.` strands map
+to unknown.
 
 Only `exon` rows define BED blocks. GFF3 groups them by comma-separated
 `Parent`, and every parent must resolve to a declared non-gene feature with a
 unique `ID`; GTF groups exon-only or full models by `transcript_id`.
 Transcript rows and exon-level `gene_id` attributes provide gene hints.
 Multiple distinct hints are sorted and joined with `||`; missing gene
-annotation is written as `none`. Duplicate exon intervals are collapsed, while
-duplicate graph identities, cross-contig or conflicting-strand parent/child
-features, parent spans that do not contain their exons, overlapping blocks, or
-otherwise invalid transcript models fail conversion. BED transcript spans are
-derived from the outer exon bounds, independent of input order.
+annotation is written as `none`. Duplicate exon intervals are collapsed. In
+the default recovery mode, an invalid exon or graph/model violation is accepted
+for recovery only when its transcript identity is known; the complete affected
+model is then quarantined, so a bad exon can never silently shorten an emitted
+transcript. Malformed non-model features that the converter does not use are
+audited and ignored. A malformed model row with unknown ownership, an invalid
+feature type, line/decompression I/O failure, an annotation without exons, or a
+catalog in which every model is quarantined remains fatal. BED transcript spans
+are derived from the outer exon bounds, independent of input order.
 
 CDS, UTR, phase, feature score, and declared transcript span are not projected
 into the current output. Each model therefore has score `100`, `itemRgb=0`,
 `thickStart=thickEnd=0`, `name2=none`, `cdsStartStat=cdsEndStat=none`,
 all exon frames `-1`, `type=isoform_anno`, and no sample/group. Output
 transcript IDs are validated as reference IDs and sorted by structure before
-writing. The output is atomically published only after the entire annotation
-passes. On success, stderr reports the number of transcripts written.
+writing. The audit TSV and BED are each published atomically, with the BED
+published last as the conversion commit point; they are not a single
+multi-file transaction. On success, stderr reports written transcripts,
+rejected source records, and quarantined transcript models.
 
 ### `trackcluster export`
 
@@ -246,13 +269,18 @@ Key flags:
   manifest mode and `--assignment-mode unique`; modification aggregation runs
   only after clustering/count artifacts have been published.
 - `--mod-analysis-threshold ASSAY=VALUE`: required once per assay when
-  `--mod-manifest` is set. `--mod-min-callable`,
-  `--mod-min-read-join-rate`, and `--mod-allow-low-join` mirror
-  `mod-aggregate`.
+  `--mod-manifest` is set. `--mod-eligibility-profile`,
+  `--mod-min-covering`, `--mod-min-callable`,
+  `--mod-min-candidate-rate`, `--mod-min-callable-rate`, and
+  `--mod-min-read-join-rate` mirror `mod-aggregate`.
+- `--mod-allow-low-global-join`: retain a sample/assay that fails the global
+  read-join gate as ineligible rows instead of aborting. The former
+  `--mod-allow-low-join` spelling remains an alias. Site-local observation
+  assignment rates are emitted as audit-only QC.
 - `--mod-contrasts`: optional explicit contrast specification processed after
   the modification design table is written.
 - `--emit-pooled-reads`: when using `--manifest`, also write `<prefix>_pooled_reads.bed`
-- `--max-reads-per-gene` (default: `50000`; set `0` to disable),
+- `--max-reads-per-gene` (default: `5000`; set `0` to disable),
   `--downsample-gene <BIOLOGICAL_GENE_ID>` (repeatable),
   `--downsample-seed`: per-gene downsampling (writes
   `clusterj_batch_downsample.tsv` or `cluster_batch_downsample.tsv` and scales
@@ -444,6 +472,20 @@ records), ambiguity in a read base does not create a candidate, and an explicit
 target call outside the declared motif is rejected. Motif observations carry
 the normalized motif in `context`.
 
+Before decoding records, the importer audits BAM `@PG` entries whose program
+ID, program name, or command executable identifies Dorado. Merely mentioning
+`dorado` in a later command argument, such as an input filename passed to
+`samtools`, does not qualify. The importer recovers `VN`, explicit
+`--modified-bases-models` (or singular model), and
+`--modified-bases-threshold` values from `CL`, uses recovered values when the
+corresponding declaration is unknown or omitted, and fails before writing any
+output when a declaration conflicts with the model-matching source record.
+Metadata and import QC record `provenance_status`: `verified_from_pg` requires
+version, the declared model, and one source threshold to agree within at least
+one coherent `@PG` record; fields from different records are never combined to
+claim verification. Otherwise provenance is `user_declared` or `unavailable`.
+Strict aggregation does not accept an unverified Dorado row as eligible.
+
 `.` or omitted skip flags become `implicit_below_emission_threshold`; `?`
 becomes `unknown`. An emission threshold is required before low-probability
 implicit rows can be represented by valid assay metadata.
@@ -524,6 +566,7 @@ trackcluster mod-aggregate \
   --mod-manifest mod_samples.tsv \
   --reference-fasta GRCh38.fa \
   --analysis-threshold dorado_rna004_m6a=0.5 \
+  --eligibility-profile strict \
   --out out/pooled
 ```
 
@@ -539,9 +582,32 @@ sample-tagged query name and CIGAR `M`/`=`/`X` blocks provide exact genomic-base
 coverage. Every uniquely assigned molecule for that sample must be present;
 duplicate primary names or mismatched chromosome/strand assignments fail.
 Without a coverage BAM, `n_covering=NA` and `coverage_basis=unavailable`.
-The global and site-local join gates use the same
-`--min-read-join-rate`. `--allow-low-join` retains failures as ineligible rows;
-it never turns them into eligible evidence.
+The default `--eligibility-profile exploratory` preserves the V1
+count-oriented behavior and labels every row with that profile. For
+comparison-ready evidence, `strict` additionally requires exact coverage,
+FASTA validation, Dorado version/model/threshold provenance verified from one
+coherent source `@PG` record, `n_covering >= 20`,
+`n_callable >= 10`, `candidate_rate >= 0.8`, and `callable_rate >= 0.8` by
+default. All four numeric guardrails are configurable and should be calibrated
+for the caller, model, chemistry, and benchmark data rather than treated as
+universal biological cutoffs. The global join gate uses
+`--min-read-join-rate`, with the unique-assignment molecule set as the
+denominator. Observation reads that never received an assignment remain in
+`unknown_read` and do not fail that gate. Raw global and site-local observation
+assignment rates still include those rows for audit, but the site-local rate is
+not an eligibility gate because caller files can retain reads intentionally
+removed by clustering downsampling. `--allow-low-global-join` retains a failing
+global sample/assay as ineligible rows. The old `--allow-low-join` spelling
+remains an alias.
+
+Standalone aggregation publishes the four flat TSVs atomically per file. When
+invoked by `flow`, outputs are first completed and hash-verified in
+`<prefix>.mod.generations/<run_id>/`; `<prefix>.mod.current.json` is published
+last as the authoritative generation pointer. A failed rerun invalidates that
+pointer, so any surviving flat compatibility files are stale and are rejected
+by `mod-site-summary` and `mod-contrast`. Standalone `mod-aggregate` rejects an
+`--out` prefix already marked as flow-managed; choose a different prefix or
+rerun `flow` so the current pointer cannot disagree with replaced flat files.
 
 ### `trackcluster mod-site-summary`
 Reduce one or more complete site tables to a deterministic genomic-site
@@ -554,10 +620,14 @@ trackcluster mod-site-summary \
   --out out/all_genes
 ```
 
-The command streams each strict 27-column input and writes
-`<out>.mod_site_summary.tsv`. It reports how many catalog isoforms are present,
+The command streams each exact current 31-column input and also accepts the
+exact v0.3.0 27-column schema for patch-release compatibility. Legacy rows are
+treated as `eligibility_profile=exploratory`. It writes
+`<out>.mod_site_summary.tsv` and reports how many catalog isoforms are present,
 eligible, absent, context dependent, reference-base mismatched, or ineligible
-for other reasons at each `(assay, sample, gene, site, mod_code)`. A
+for each dedicated eligibility reason at
+`(assay, sample, gene, site, mod_code)`. `n_isoforms_other_ineligible` is
+reserved for future or unknown reasons. A
 `shared_eligible` state requires at least two eligible isoforms. Input row keys
 must be unique across all supplied files.
 
@@ -641,9 +711,13 @@ Key flags:
 - `--sl-partial-5prime-offset` (default: `15`), `--sl-same-junction-5prime-offset` (default: `25`), `--sl-5prime-cluster-offset` (default: `15`), `--sl-5prime-min-support` (default: `2`): SL 5' merge controls
 - `--same-junction-3prime-offset` (default: `50`), `--3prime-cluster-offset` (default: active junction correction offset), `--3prime-min-support` (default: `5`): same-junction 3' terminal retention controls
 - `--invalid-read-policy`: `skip` (default) excludes only the invalid read track; `fail` restores strict parsing
+- `--max-reads-per-locus` (default: `5000`; set `0` to disable): reservoir-sample each overlapping locus. Dropped reads are written to `unused.bed` and are **not** scaled back into counts. `flow`/`clusterj_batch` already cap per gene and do not apply this locus cap again.
+- `--downsample-seed`: mixed with chrom, strand, and locus span for deterministic per-locus sampling
+- `--heartbeat-seconds` (default: `60`; `0` disables), `--heartbeat-top`: periodic status while a chrom/strand partition is in flight
 
 Performance note:
-- 5' truncation collapsing is implemented via a junction-suffix index to avoid quadratic scans on large loci; `--batch-size`/`--batch-rounds` remain useful as hard caps for extreme genes.
+- 5' truncation collapsing uses a junction-suffix index. Single-exon containment, same-5′, and terminal-exon merges use a candidate index instead of all-pairs scans. Equal-length fuzzy same-junction compares zip within a first-junction window rather than a DP over every same-length pair. `--batch-size`/`--batch-rounds` still bound intermediate work; remaining tracks always receive one final full merge.
+- `--max-reads-per-locus 0` disables the standalone cap for time, not only memory: a diverse single-exon locus can still run for a long time.
 - SL-supported reads with enough nearby 5' support can be protected as alternative isoforms; singleton likely-degradation reads can still merge into compatible longer/reference tracks.
 - Supported same-junction 3' terminal clusters are retained as isoforms and remain compatible with unique counting, which assigns reads to the closest terminal structure.
 
@@ -833,7 +907,7 @@ Useful flags:
 - `--heartbeat-seconds`, `--heartbeat-top`: periodic status line (and which gene(s) are currently in-flight when progress is not moving)
 - `--invalid-read-policy`: `skip` (default) excludes only malformed/empty-ID read tracks within each gene and writes `<gene-path-key>/rejected_reads.tsv`; `fail` restores strict per-gene read parsing.
 - `--strict-gene-errors`: return nonzero after all genes finish if any gene failed. Without it, failures are reported and successful/verified genes remain available to downstream callers.
-- `--max-reads-per-gene` (default: `50000`; set `0` to disable),
+- `--max-reads-per-gene` (default: `5000`; set `0` to disable),
   `--downsample-gene <BIOLOGICAL_GENE_ID>` (repeatable),
   `--downsample-seed`: per-gene downsampling (writes
   `clusterj_batch_downsample.tsv`). A later `flow --count-only` or

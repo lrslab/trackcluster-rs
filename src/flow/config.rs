@@ -247,6 +247,14 @@ pub struct CountingConfig {
     pub unique_assignment: UniqueAssignmentOptions,
 }
 
+/// Default per-gene read cap used to keep high-expression loci tractable.
+///
+/// Junction clustering still has quadratic regions for diverse single-exon
+/// loci. Five thousand reads limits the default 500-read merge configuration
+/// to ten input batches while retaining a large discovery sample. Users can
+/// raise the cap, restrict it to selected genes, or set it to zero explicitly.
+pub const DEFAULT_MAX_READS_PER_GENE: usize = 5_000;
+
 /// Per-gene read downsampling settings.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DownsampleConfig {
@@ -262,7 +270,7 @@ impl Default for DownsampleConfig {
     fn default() -> Self {
         Self {
             genes: Vec::new(),
-            max_reads_per_gene: 50_000,
+            max_reads_per_gene: DEFAULT_MAX_READS_PER_GENE,
             seed: 1,
         }
     }
@@ -394,7 +402,9 @@ mod tests {
         PrepareConfig::default().validate().unwrap();
         ClusteringConfig::default().validate().unwrap();
         RuntimeConfig::default().validate().unwrap();
-        DownsampleConfig::default().validate().unwrap();
+        let downsample = DownsampleConfig::default();
+        downsample.validate().unwrap();
+        assert_eq!(downsample.max_reads_per_gene, DEFAULT_MAX_READS_PER_GENE);
     }
 
     #[test]

@@ -63,6 +63,7 @@ mod matching;
 pub mod model;
 /// Isoform-level RNA modification observations, aggregation, and contrasts.
 pub mod modification;
+mod rng;
 #[allow(missing_docs)]
 mod sample;
 

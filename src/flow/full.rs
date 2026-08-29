@@ -237,42 +237,8 @@ pub(super) struct GeneFailure {
     pub(super) message: String,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct Lcg64 {
-    state: u64,
-}
-
-impl Lcg64 {
-    fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1);
-        self.state
-    }
-
-    fn gen_below(&mut self, upper: usize) -> usize {
-        debug_assert!(upper > 0);
-        (self.next_u64() % (upper as u64)) as usize
-    }
-}
-
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut hash = 14695981039346656037;
-    update_fnv1a64(&mut hash, bytes);
-    hash
-}
-
-fn update_fnv1a64(hash: &mut u64, bytes: &[u8]) {
-    for &b in bytes {
-        *hash ^= b as u64;
-        *hash = hash.wrapping_mul(1099511628211);
-    }
-}
-
 fn seed_for_gene(base_seed: u64, gene: &str) -> u64 {
-    base_seed ^ fnv1a64(gene.as_bytes())
+    base_seed ^ crate::rng::fnv1a64(gene.as_bytes())
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -327,7 +293,7 @@ fn reservoir_sample_reads(
     seed: u64,
     invalid_read_policy: InvalidReadPolicy,
 ) -> anyhow::Result<(Vec<Transcript>, usize, Vec<RejectedReadRecord>)> {
-    let mut rng = Lcg64::new(seed);
+    let mut rng = crate::rng::Lcg64::new(seed);
     // Avoid huge preallocation when downsampling is enabled by default. The vector will grow to
     // `target_reads` as needed, but most genes are far smaller than the cap.
     let mut sampled: Vec<Transcript> = Vec::with_capacity(target_reads.min(4096));
@@ -392,7 +358,7 @@ fn fingerprint_file(path: &Path) -> anyhow::Result<String> {
         if read_len == 0 {
             break;
         }
-        update_fnv1a64(&mut hash, &buffer[..read_len]);
+        crate::rng::update_fnv1a64(&mut hash, &buffer[..read_len]);
     }
     Ok(format!("fnv1a64:{hash:016x}"))
 }
@@ -1039,6 +1005,17 @@ fn process_gene_inputs(
         } else {
             None
         };
+        if let Some(record) = downsample.as_ref() {
+            eprintln!(
+                "{}: subsample gene={} original_reads={} sampled_reads={} scale_factor={:.6} seed={}",
+                args.cluster_mode.batch_log_label(),
+                record.gene,
+                record.original_reads,
+                record.sampled_reads,
+                record.scale_factor,
+                record.seed
+            );
+        }
         (sampled, downsample, rejected_reads)
     } else {
         let (records, rejected_reads) =
@@ -1225,6 +1202,18 @@ pub fn run_clusterj_batch(args: BatchRunOptions) -> anyhow::Result<BatchRunResul
         "{batch_log_label}: {} genes, {} worker threads",
         total, args.runtime.threads
     );
+
+    if args.downsample.max_reads_per_gene > 0 {
+        let scope = if args.downsample.genes.is_empty() {
+            "all genes".to_owned()
+        } else {
+            format!("{} selected gene(s)", args.downsample.genes.len())
+        };
+        eprintln!(
+            "{batch_log_label}: per-gene subsampling enabled: cap={} scope={scope} seed={}",
+            args.downsample.max_reads_per_gene, args.downsample.seed
+        );
+    }
 
     if args.runtime.threads > 1 && args.downsample.max_reads_per_gene == 0 {
         eprintln!(

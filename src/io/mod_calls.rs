@@ -479,6 +479,7 @@ mod tests {
             source_emission_threshold: None,
             source_site_filter: "min_reads=20".to_owned(),
             candidate_observations_complete: true,
+            provenance_status: crate::modification::ProvenanceStatus::UserDeclared,
             implicit_skip_policy: ImplicitSkipPolicy::NotApplicable,
             coordinate_source: "reference_transcript_projected_to_genome".to_owned(),
             read_id_mapping: "explicit_read_index_map".to_owned(),

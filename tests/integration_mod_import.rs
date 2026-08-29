@@ -120,15 +120,35 @@ fn dorado_import_cli_emits_explicit_and_implicit_candidates() {
         data::field::{value::Array as BufArray, Value as BufValue},
         Cigar, Data, Sequence,
     };
-    use sam::header::record::value::{map::ReferenceSequence, Map};
+    use sam::header::record::value::{
+        map::{program::tag, Program, ReferenceSequence},
+        Map,
+    };
 
     let root = TestDir::new("dorado-import-e2e");
     let bam_path = root.join("calls.bam");
+    let dorado_program = Map::<Program>::builder()
+        .insert(tag::NAME, "dorado")
+        .insert(tag::VERSION, "0.9.1")
+        .insert(
+            tag::COMMAND_LINE,
+            "dorado basecaller sup reads --modified-bases-models rna004-test-m6a --modified-bases-threshold 0.05",
+        )
+        .build()
+        .unwrap();
+    let samtools_program = Map::<Program>::builder()
+        .insert(tag::NAME, "samtools")
+        .insert(tag::VERSION, "1.20")
+        .insert(tag::COMMAND_LINE, "samtools sort calls.dorado.bam")
+        .build()
+        .unwrap();
     let header = sam::Header::builder()
         .add_reference_sequence(
             "chr1",
             Map::<ReferenceSequence>::new(NonZero::new(1000).unwrap()),
         )
+        .add_program("dorado", dorado_program)
+        .add_program("samtools", samtools_program)
         .build();
     let cigar: Cigar = [Op::new(Kind::Match, 4)].into_iter().collect();
     let data: Data = [
@@ -207,6 +227,8 @@ fn dorado_import_cli_emits_explicit_and_implicit_candidates() {
     let metadata = fs::read_to_string(root.join("sample.mod.assay.json")).unwrap();
     assert!(metadata.contains("\"candidate_observations_complete\": true"));
     assert!(metadata.contains("\"implicit_skip_policy\": \"low_probability\""));
+    assert!(metadata.contains("\"caller_version\": \"0.9.1\""));
+    assert!(metadata.contains("\"provenance_status\": \"verified_from_pg\""));
     assert!(metadata.contains("mm_question_mark_policy=below_emission_threshold"));
     let qc = fs::read_to_string(root.join("sample.mod.import_qc.tsv")).unwrap();
     assert!(qc.contains("target_groups_unknown\t1\n"));
@@ -214,6 +236,84 @@ fn dorado_import_cli_emits_explicit_and_implicit_candidates() {
     assert!(qc.contains("mm_question_mark_policy\tbelow_emission_threshold\n"));
     assert!(qc.contains("emitted_explicit_observations\t1\n"));
     assert!(qc.contains("emitted_implicit_observations\t3\n"));
+    assert!(qc.contains("provenance_status\tverified_from_pg\n"));
+    assert!(qc.contains("dorado_pg_records\t1\n"));
+    assert!(qc.contains("dorado_pg_caller_versions\t0.9.1\n"));
+    assert!(!qc.contains("1.20"));
+
+    let conflicting_prefix = root.join("conflicting.mod");
+    let conflicting = Command::new(env!("CARGO_BIN_EXE_trackcluster"))
+        .args([
+            "mod-import-dorado",
+            "--sample",
+            "S1",
+            "--assay-id",
+            "dorado_rna004_m6a",
+            "--model-id",
+            "rna004-test-m6a",
+            "--source-emission-threshold",
+            "0.1",
+            "--bam",
+        ])
+        .arg(&bam_path)
+        .arg("--out")
+        .arg(&conflicting_prefix)
+        .output()
+        .unwrap();
+    assert!(!conflicting.status.success());
+    assert!(String::from_utf8_lossy(&conflicting.stderr)
+        .contains("conflicts with @PG --modified-bases-threshold"));
+    assert!(!root.join("conflicting.mod.assay.json").exists());
+
+    let conflicting_model_prefix = root.join("conflicting-model.mod");
+    let conflicting_model = Command::new(env!("CARGO_BIN_EXE_trackcluster"))
+        .args([
+            "mod-import-dorado",
+            "--sample",
+            "S1",
+            "--assay-id",
+            "dorado_rna004_m6a",
+            "--model-id",
+            "different-model",
+            "--source-emission-threshold",
+            "0.05",
+            "--bam",
+        ])
+        .arg(&bam_path)
+        .arg("--out")
+        .arg(&conflicting_model_prefix)
+        .output()
+        .unwrap();
+    assert!(!conflicting_model.status.success());
+    assert!(String::from_utf8_lossy(&conflicting_model.stderr)
+        .contains("declared Dorado model \"different-model\" conflicts with @PG"));
+    assert!(!root.join("conflicting-model.mod.assay.json").exists());
+
+    let conflicting_version_prefix = root.join("conflicting-version.mod");
+    let conflicting_version = Command::new(env!("CARGO_BIN_EXE_trackcluster"))
+        .args([
+            "mod-import-dorado",
+            "--sample",
+            "S1",
+            "--assay-id",
+            "dorado_rna004_m6a",
+            "--model-id",
+            "rna004-test-m6a",
+            "--caller-version",
+            "1.0.0",
+            "--source-emission-threshold",
+            "0.05",
+            "--bam",
+        ])
+        .arg(&bam_path)
+        .arg("--out")
+        .arg(&conflicting_version_prefix)
+        .output()
+        .unwrap();
+    assert!(!conflicting_version.status.success());
+    assert!(String::from_utf8_lossy(&conflicting_version.stderr)
+        .contains("declared Dorado caller version \"1.0.0\" conflicts with @PG"));
+    assert!(!root.join("conflicting-version.mod.assay.json").exists());
 }
 
 #[test]

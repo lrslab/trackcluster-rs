@@ -77,7 +77,7 @@ Defaults:
 - `--name2-mode coverage` (memory-friendly). Use `--name2-mode full` to embed read IDs in the isoform BED (larger outputs); otherwise rely on `*_read_to_isoform.tsv` for counting.
 - SL-supported junction-mode 5' merge controls default to `--sl-partial-5prime-offset 15`, `--sl-same-junction-5prime-offset 25`, `--sl-5prime-cluster-offset 15`, and `--sl-5prime-min-support 2`.
 - Supported same-junction 3' terminal clusters are retained as isoforms with `--same-junction-3prime-offset 50`, `--3prime-min-support 5`, and a default `--3prime-cluster-offset` equal to the active junction correction offset.
-- `--max-reads-per-gene 50000` (memory-friendly cap; set `0` to disable). Counts/usage tables are scaled when downsampling occurs. If an actually downsampled gene shares a molecule ID with another selected gene, final flow/count-only processing fails before publishing merged abundance outputs because independent per-gene reservoirs cannot preserve cross-gene candidate probabilities. Disable the cap or exclude every affected gene from downsampling.
+- `--max-reads-per-gene 5000` (runtime- and memory-bounded cap; set `0` to disable). This lower default protects high-expression, single-exon loci such as mitochondrial `cox1`, whose diverse read endpoints can otherwise drive near-quadratic merge work. With the default 500-read merge batch it admits at most ten input batches per gene. Counts/usage tables are scaled when downsampling occurs. If an actually downsampled gene shares a molecule ID with another selected gene, final flow/count-only processing fails before publishing merged abundance outputs because independent per-gene reservoirs cannot preserve cross-gene candidate probabilities. Disable the cap or exclude every affected gene from downsampling.
 - `--invalid-read-policy skip`: exclude only an individual malformed read track or a track with an empty read ID and continue with the valid tracks. Use `--invalid-read-policy fail` for strict read parsing.
 
 Overlap-mode example:
@@ -231,19 +231,32 @@ trackcluster flow \
   --assignment-mode unique \
   --mod-manifest mod_samples.tsv \
   --mod-reference-fasta genome.fa \
-  --mod-analysis-threshold dorado_rna004_m6a=0.5
+  --mod-analysis-threshold dorado_rna004_m6a=0.5 \
+  --mod-eligibility-profile strict
 ```
 
-The optional stage writes `<prefix>.mod_join_qc.tsv`,
-`<prefix>.mod_site_join_qc.tsv`, `<prefix>.isoform_mod_sites.tsv`, and
-`<prefix>.isoform_mod_design.tsv`. Pass `--mod-contrasts contrasts.tsv` to also
-write `<prefix>.isoform_mod_contrasts.tsv`. The same aggregation can be run
-standalone with `trackcluster mod-aggregate` when clustering/counting is already
-complete.
+The optional stage completes a hash-verified generation under
+`<prefix>.mod.generations/<run_id>/`, synchronizes the flat compatibility files
+`<prefix>.mod_join_qc.tsv`, `<prefix>.mod_site_join_qc.tsv`,
+`<prefix>.isoform_mod_sites.tsv`, and `<prefix>.isoform_mod_design.tsv`, then
+publishes `<prefix>.mod.current.json` last. Pass `--mod-contrasts contrasts.tsv`
+to also write `<prefix>.isoform_mod_contrasts.tsv`. A rerun invalidates the
+current pointer before core outputs can change; if the modification stage then
+fails, surviving flat files are stale and downstream site-summary/contrast
+commands reject them. Historical generation directories remain for audit.
+The same aggregation can be run standalone with `trackcluster mod-aggregate`
+when clustering/counting is already complete.
 
 V1 requires exact unique assignment and keeps caller/model/chemistry strata
 separate. Missing or unknown observations are not silently classified as
 unmodified, and effect-only contrasts report `p_value` and `q_value` as `NA`.
+The default `exploratory` eligibility profile is intended for QC and method
+development. The `strict` profile additionally requires exact BAM coverage,
+FASTA validation, Dorado version/model/threshold provenance verified from one
+coherent source `@PG` record, and configurable covering, callable,
+candidate-rate, and callable-rate guardrails; its default minima are
+20, 10, 0.8, and 0.8 respectively and require caller/model-specific
+calibration.
 See the [CLI reference](CLI.md#trackcluster-mod-import-dorado), the exact
 [modification formats and denominator rules](FORMATS.md#isoform-level-modification-formats),
 and the [validation strategy and scientific limitations](MODIFICATION_VALIDATION.md).

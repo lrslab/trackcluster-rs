@@ -8,6 +8,87 @@ use crate::model::Strand;
 /// Schema version for normalized modification observations and assay metadata.
 pub const MODIFICATION_SCHEMA_VERSION: u32 = 1;
 
+/// Eligibility policy applied to modification site rows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EligibilityProfile {
+    /// Preserve the V1 count-oriented behavior for exploratory analysis.
+    #[default]
+    Exploratory,
+    /// Require independent coverage, reference validation, and representation guardrails.
+    Strict,
+}
+
+impl EligibilityProfile {
+    /// Return the stable CLI and TSV token.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Exploratory => "exploratory",
+            Self::Strict => "strict",
+        }
+    }
+
+    /// Default callable-count guardrail for this profile.
+    pub const fn default_min_callable(self) -> u64 {
+        match self {
+            Self::Exploratory => 1,
+            Self::Strict => 10,
+        }
+    }
+}
+
+impl fmt::Display for EligibilityProfile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for EligibilityProfile {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "exploratory" => Ok(Self::Exploratory),
+            "strict" => Ok(Self::Strict),
+            _ => Err(format!(
+                "invalid eligibility profile {value:?}; expected exploratory or strict"
+            )),
+        }
+    }
+}
+
+/// Strength of caller/model provenance recovered from the source artifact.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProvenanceStatus {
+    /// Version, model, and source threshold agree with a source program record.
+    VerifiedFromPg,
+    /// Provenance was supplied by the user but could not be fully cross-checked.
+    #[default]
+    UserDeclared,
+    /// Source and declared provenance conflict. Importers normally fail before writing this.
+    Conflicting,
+    /// Required provenance was neither recoverable nor fully declared.
+    Unavailable,
+}
+
+impl ProvenanceStatus {
+    /// Return the stable metadata and QC token.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::VerifiedFromPg => "verified_from_pg",
+            Self::UserDeclared => "user_declared",
+            Self::Conflicting => "conflicting",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+impl fmt::Display for ProvenanceStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Caller interpretation of one candidate read-site observation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ObservationState {
@@ -149,6 +230,18 @@ pub enum EligibilityReason {
     Ok,
     /// Too few callable molecules passed the configured minimum.
     LowCallable,
+    /// Independent exact coverage was not supplied under the strict profile.
+    CoverageUnavailable,
+    /// A reference FASTA was not supplied under the strict profile.
+    ReferenceUnvalidated,
+    /// Too few independently covering molecules passed the configured minimum.
+    LowCovering,
+    /// Too few covering molecules were represented in the caller candidate universe.
+    LowCandidateRate,
+    /// Too few covering molecules contributed an interpretable callable state.
+    LowCallableRate,
+    /// Dorado model provenance was not fully verified from a source `@PG` record.
+    ProvenanceUnverified,
     /// The site is structurally absent from this isoform.
     SiteAbsent,
     /// The candidate context depends on splice structure.
@@ -159,7 +252,9 @@ pub enum EligibilityReason {
     IncompleteCandidateUniverse,
     /// Observation-to-assignment join rate is below the configured minimum.
     JoinRateLow,
-    /// Observation-to-assignment join rate at this genomic site is below the minimum.
+    /// Legacy token for a site-local join gate emitted by older aggregators.
+    /// Current aggregation retains the raw rate as audit-only because caller
+    /// files can contain reads intentionally omitted from clustering.
     SiteJoinRateLow,
     /// At least one candidate state needed for the fraction denominator is unknown.
     UnknownDenominator,
@@ -173,6 +268,12 @@ impl EligibilityReason {
         match self {
             Self::Ok => "ok",
             Self::LowCallable => "low_callable",
+            Self::CoverageUnavailable => "coverage_unavailable",
+            Self::ReferenceUnvalidated => "reference_unvalidated",
+            Self::LowCovering => "low_covering",
+            Self::LowCandidateRate => "low_candidate_rate",
+            Self::LowCallableRate => "low_callable_rate",
+            Self::ProvenanceUnverified => "provenance_unverified",
             Self::SiteAbsent => "site_absent",
             Self::ContextDependent => "context_dependent",
             Self::ReferenceBaseMismatch => "reference_base_mismatch",
@@ -330,6 +431,9 @@ pub struct AssayMetadata {
     pub source_site_filter: String,
     /// Whether all observations in the retained candidate universe are represented.
     pub candidate_observations_complete: bool,
+    /// Strength of caller/model provenance recovered from the source artifact.
+    #[serde(default)]
+    pub provenance_status: ProvenanceStatus,
     /// Interpretation of candidates omitted by the source encoding.
     pub implicit_skip_policy: ImplicitSkipPolicy,
     /// How source coordinates became genomic coordinates.
@@ -377,6 +481,9 @@ impl AssayMetadata {
                 "implicit_skip_policy=low_probability requires source_emission_threshold"
                     .to_owned(),
             );
+        }
+        if self.provenance_status == ProvenanceStatus::Conflicting {
+            return Err("provenance_status=conflicting is not valid analysis input".to_owned());
         }
         for source in &self.source_files {
             validate_identifier("source_files entry", source)?;
@@ -568,6 +675,7 @@ mod tests {
             source_emission_threshold: None,
             source_site_filter: "none".to_owned(),
             candidate_observations_complete: true,
+            provenance_status: ProvenanceStatus::UserDeclared,
             implicit_skip_policy: ImplicitSkipPolicy::LowProbability,
             coordinate_source: "genome_aligned_bam".to_owned(),
             read_id_mapping: "bam_qname_with_sample_prefix".to_owned(),

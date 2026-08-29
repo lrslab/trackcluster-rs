@@ -72,6 +72,16 @@ fn deletion_only_middle_block_cigar() -> Cigar {
     .collect()
 }
 
+fn zero_length_intron_cigar() -> Cigar {
+    vec![
+        CigarOp::new(CigarKind::Match, 10),
+        CigarOp::new(CigarKind::Skip, 0),
+        CigarOp::new(CigarKind::Match, 10),
+    ]
+    .into_iter()
+    .collect()
+}
+
 #[test]
 fn addgene_and_desc_cli_publish_valid_outputs() {
     let root = temp_dir("annotate");
@@ -295,7 +305,11 @@ fn gff2bigg_cli_converts_minimal_gff3_and_gtf() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "gff2bigg: transcripts=1\n"
+        "gff2bigg: transcripts=1 rejected_records=0 rejected_transcripts=0\n"
+    );
+    assert_eq!(
+        fs::read_to_string(format!("{}.rejected.tsv", gff3_bed.display())).unwrap(),
+        "source_path\tanchor_line\ttranscript_ids_json\tkind\treason\n"
     );
     let records = trackcluster_rs::io::bed::read_bed12(&gff3_bed)
         .unwrap()
@@ -358,6 +372,84 @@ fn gff2bigg_cli_converts_minimal_gff3_and_gtf() {
 }
 
 #[test]
+fn gff2bigg_cli_quarantines_identifiable_bad_models_and_audits_them() {
+    let root = temp_dir("gff2bigg-recovery");
+    let executable = env!("CARGO_BIN_EXE_trackcluster");
+    let gtf = root.join("annotation.gtf");
+    let bed = root.join("annotation.bed");
+    let rejected = root.join("rejected.tsv");
+    fs::write(
+        &gtf,
+        concat!(
+            "chr1\ttest\ttranscript\t1\t100\t.\t+\t.\tgene_id \"G1\"; transcript_id \"bad,tx\";\n",
+            "chr1\ttest\texon\tnot-a-coordinate\t100\t.\t+\t.\tgene_id \"G1\"; transcript_id \"bad,tx\";\n",
+            "chr1\ttest\ttranscript\t201\t250\t.\t+\t.\tgene_id \"G2\"; transcript_id \"good_tx\";\n",
+            "chr1\ttest\texon\t201\t250\t.\t+\t.\tgene_id \"G2\"; transcript_id \"good_tx\";\n",
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(executable)
+        .args(["gff2bigg", "--gff"])
+        .arg(&gtf)
+        .arg("--out")
+        .arg(&bed)
+        .args(["--input-format", "gtf", "--rejected-records"])
+        .arg(&rejected)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("excluded 1 invalid record(s) affecting 1 transcript model(s)"));
+    assert!(stderr.contains("transcripts=1 rejected_records=1 rejected_transcripts=1"));
+    let records = trackcluster_rs::io::bed::read_bed12(&bed)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].name, "good_tx");
+    let audit = fs::read_to_string(&rejected).unwrap();
+    assert!(audit.contains("\t2\t[\"bad,tx\"]\tparse\t"), "{audit}");
+    assert!(audit.contains("not-a-coordinate"), "{audit}");
+
+    fs::write(&bed, "previous output\n").unwrap();
+    let strict = Command::new(executable)
+        .args(["gff2bigg", "--gff"])
+        .arg(&gtf)
+        .arg("--out")
+        .arg(&bed)
+        .args(["--input-format", "gtf", "--invalid-record-policy", "fail"])
+        .output()
+        .unwrap();
+    assert!(!strict.status.success());
+    assert!(String::from_utf8_lossy(&strict.stderr).contains("not-a-coordinate"));
+    assert_eq!(fs::read_to_string(&bed).unwrap(), "previous output\n");
+
+    let all_bad = root.join("all-bad.gtf");
+    fs::write(
+        &all_bad,
+        "chr1\ttest\texon\tnot-a-coordinate\t100\t.\t+\t.\tgene_id \"G3\"; transcript_id \"only_bad\";\n",
+    )
+    .unwrap();
+    let recovered = Command::new(executable)
+        .args(["gff2bigg", "--gff"])
+        .arg(&all_bad)
+        .arg("--out")
+        .arg(&bed)
+        .args(["--input-format", "gtf"])
+        .output()
+        .unwrap();
+    assert!(!recovered.status.success());
+    assert!(String::from_utf8_lossy(&recovered.stderr)
+        .contains("annotation contains no valid transcript models"));
+    assert_eq!(fs::read_to_string(&bed).unwrap(), "previous output\n");
+}
+
+#[test]
 fn bam2bigg_cli_converts_spliced_bam_and_filters_low_mapq() {
     let root = temp_dir("bam2bigg");
     let executable = env!("CARGO_BIN_EXE_trackcluster");
@@ -397,7 +489,7 @@ fn bam2bigg_cli_converts_spliced_bam_and_filters_low_mapq() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stderr).contains(
-        "bam2bigg: total=2 records=1 skipped_unmapped=0 skipped_secondary=0 skipped_supplementary=0 skipped_below_mapq=1"
+        "bam2bigg: total=2 records=1 skipped_unmapped=0 skipped_secondary=0 skipped_supplementary=0 skipped_below_mapq=1 skipped_invalid=0"
     ));
     let imported = trackcluster_rs::io::bed::read_bed12(&bed)
         .unwrap()
@@ -416,6 +508,173 @@ fn bam2bigg_cli_converts_spliced_bam_and_filters_low_mapq() {
             .collect::<Vec<_>>(),
         vec![(100, 110), (130, 140)]
     );
+}
+
+#[test]
+fn bam2bigg_skips_only_invalid_decoded_records_and_reports_bounded_diagnostics() {
+    let root = temp_dir("bam2bigg-invalid-record");
+    let executable = env!("CARGO_BIN_EXE_trackcluster");
+    let bam = root.join("mixed.bam");
+    let bed = root.join("mixed.bed");
+
+    let header = noodles_sam::Header::builder()
+        .add_reference_sequence(
+            "chr1".to_owned(),
+            Map::<ReferenceSequence>::new(NonZeroUsize::new(1000).unwrap()),
+        )
+        .build();
+    let mut writer = noodles_bam::io::Writer::new(fs::File::create(&bam).unwrap());
+    writer.write_header(&header).unwrap();
+    writer
+        .write_alignment_record(&header, &bam_record("before", 101, match_cigar(10), 60))
+        .unwrap();
+    writer
+        .write_alignment_record(
+            &header,
+            &bam_record("zero-length", 121, zero_length_intron_cigar(), 60),
+        )
+        .unwrap();
+    for name in ["invalid-1", "invalid-2"] {
+        writer
+            .write_alignment_record(
+                &header,
+                &bam_record(name, 151, deletion_only_middle_block_cigar(), 60),
+            )
+            .unwrap();
+    }
+    writer
+        .write_alignment_record(
+            &header,
+            &bam_record("invalid-name", 251, match_cigar(10), 60),
+        )
+        .unwrap();
+    writer
+        .write_alignment_record(&header, &bam_record("after", 301, match_cigar(10), 60))
+        .unwrap();
+    writer.try_finish().unwrap();
+    drop(writer);
+
+    // The typed BAM writer correctly rejects non-ASCII names, so patch the
+    // uncompressed BAM payload to exercise a legacy/malformed producer without
+    // changing any record boundary.
+    let mut raw_bam = Vec::new();
+    let mut decoder = noodles_bgzf::io::Reader::new(fs::File::open(&bam).unwrap());
+    std::io::Read::read_to_end(&mut decoder, &mut raw_bam).unwrap();
+    let marker = b"invalid-name\0";
+    let marker_offsets = raw_bam
+        .windows(marker.len())
+        .enumerate()
+        .filter_map(|(offset, window)| (window == marker).then_some(offset))
+        .collect::<Vec<_>>();
+    assert_eq!(marker_offsets.len(), 1);
+    raw_bam[marker_offsets[0]] = 0xff;
+    let mut encoder = noodles_bgzf::io::Writer::new(Vec::new());
+    std::io::Write::write_all(&mut encoder, &raw_bam).unwrap();
+    fs::write(&bam, encoder.finish().unwrap()).unwrap();
+
+    let output = Command::new(executable)
+        .args(["bam2bigg", "--bamfile"])
+        .arg(&bam)
+        .arg("--out")
+        .arg(&bed)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(
+        "bam2bigg: total=6 records=2 skipped_unmapped=0 skipped_secondary=0 skipped_supplementary=0 skipped_below_mapq=0 skipped_invalid=4"
+    ));
+    assert!(
+        stderr.contains("invalid_record_reason=invalid_cigar_structure records=3 first_record=2")
+    );
+    assert!(stderr.contains("zero-length CIGAR operation"));
+    assert!(stderr.contains("zero-length"));
+    assert!(!stderr.contains("invalid-1"));
+    assert!(!stderr.contains("invalid-2"));
+    assert!(stderr.contains("invalid_record_reason=invalid_query_name records=1 first_record=5"));
+    assert!(stderr.contains("non-UTF-8 query name"));
+    assert!(!stderr.contains('\u{fffd}'));
+
+    let records = trackcluster_rs::io::bed::read_bed12(&bed)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["before", "after"]
+    );
+
+    fs::write(&bed, "previous output\n").unwrap();
+    let strict = Command::new(executable)
+        .args(["bam2bigg", "--bamfile"])
+        .arg(&bam)
+        .arg("--out")
+        .arg(&bed)
+        .args(["--invalid-record-policy", "fail"])
+        .output()
+        .unwrap();
+    assert!(!strict.status.success());
+    assert!(String::from_utf8_lossy(&strict.stderr).contains("convert BAM record 2"));
+    assert_eq!(fs::read_to_string(&bed).unwrap(), "previous output\n");
+}
+
+#[test]
+fn bam2bigg_does_not_recover_from_a_truncated_record_stream() {
+    let root = temp_dir("bam2bigg-truncated-record");
+    let executable = env!("CARGO_BIN_EXE_trackcluster");
+    let bam = root.join("truncated.bam");
+    let bed = root.join("existing.bed");
+
+    let header = noodles_sam::Header::builder()
+        .add_reference_sequence(
+            "chr1".to_owned(),
+            Map::<ReferenceSequence>::new(NonZeroUsize::new(1000).unwrap()),
+        )
+        .build();
+    let mut writer = noodles_bam::io::Writer::new(fs::File::create(&bam).unwrap());
+    writer.write_header(&header).unwrap();
+    std::io::Write::flush(writer.get_mut()).unwrap();
+    writer
+        .write_alignment_record(&header, &bam_record("valid", 101, match_cigar(10), 60))
+        .unwrap();
+    std::io::Write::flush(writer.get_mut()).unwrap();
+    let complete_prefix_len = writer.get_ref().position();
+    writer
+        .write_alignment_record(&header, &bam_record("truncated", 201, match_cigar(10), 60))
+        .unwrap();
+    std::io::Write::flush(writer.get_mut()).unwrap();
+    let second_record_end = writer.get_ref().position();
+    writer.try_finish().unwrap();
+    drop(writer);
+
+    assert!(second_record_end > complete_prefix_len + 18);
+    let truncated_len = second_record_end - 1;
+    assert!(fs::metadata(&bam).unwrap().len() > truncated_len);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&bam)
+        .unwrap()
+        .set_len(truncated_len)
+        .unwrap();
+    fs::write(&bed, "previous output\n").unwrap();
+
+    let output = Command::new(executable)
+        .args(["bam2bigg", "--bamfile"])
+        .arg(&bam)
+        .arg("--out")
+        .arg(&bed)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("read BAM record 2"));
+    assert_eq!(fs::read_to_string(&bed).unwrap(), "previous output\n");
 }
 
 #[test]
@@ -466,6 +725,19 @@ fn converter_failures_preserve_inputs_and_previous_outputs() {
         .arg(&bam)
         .arg("--out")
         .arg(&bed)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("produced no valid records after skipping 1 invalid decoded record"));
+    assert_eq!(fs::read_to_string(&bed).unwrap(), "previous output\n");
+
+    let output = Command::new(executable)
+        .args(["bam2bigg", "--bamfile"])
+        .arg(&bam)
+        .arg("--out")
+        .arg(&bed)
+        .args(["--invalid-record-policy", "fail"])
         .output()
         .unwrap();
     assert!(!output.status.success());

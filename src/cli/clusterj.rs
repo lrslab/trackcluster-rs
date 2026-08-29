@@ -77,6 +77,26 @@ pub struct Args {
     /// Handling of malformed read tracks: skip only that track, or fail the command
     #[arg(long = "invalid-read-policy", default_value_t = crate::flow::config::InvalidReadPolicy::Skip)]
     pub invalid_read_policy: crate::flow::config::InvalidReadPolicy,
+
+    /// Per-locus cap: reservoir-sample reads down to this count (set to 0 to disable).
+    /// Dropped reads are written to unused.bed and are not scaled back into counts.
+    #[arg(
+        long = "max-reads-per-locus",
+        default_value_t = crate::flow::config::DEFAULT_MAX_READS_PER_GENE
+    )]
+    pub max_reads_per_locus: usize,
+
+    /// Deterministic RNG seed mixed with chrom, strand, and locus span for per-locus sampling.
+    #[arg(long = "downsample-seed", default_value_t = 1)]
+    pub downsample_seed: u64,
+
+    /// Emit a heartbeat status line every N seconds during chrom/strand partitioning (0 disables).
+    #[arg(long = "heartbeat-seconds", default_value_t = 60)]
+    pub heartbeat_seconds: u64,
+
+    /// When a heartbeat sees no progress, print up to this many in-flight partitions (0 => 1).
+    #[arg(long = "heartbeat-top", default_value_t = 5)]
+    pub heartbeat_top: usize,
 }
 
 impl Args {
@@ -122,20 +142,33 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     let (reads, rejected_reads) = super::read_read_tracks(&args.reads, args.invalid_read_policy)?;
     let refs: Vec<crate::model::Transcript> = crate::io::bed::read_bed12(&args.reference)?
         .collect::<Result<Vec<_>, crate::io::bed::BedError>>()?;
-    let clustering = crate::flow::config::ClusteringConfig {
-        sw_score: args.sw_score,
-        batch_size: args.batch_size,
-        batch_rounds: args.batch_rounds,
-        name2_mode: args.name2_mode,
-        junction: args.junction_config(),
-        overlap: crate::flow::config::OverlapConfig::default(),
-    };
-    let result = clustering.cluster_gene(
-        crate::flow::full::ClusterMode::Clusterj,
-        &reads,
-        &refs,
-        args.threads,
-    )?;
+    if args.max_reads_per_locus == 0 {
+        eprintln!(
+            "clusterj: note: --max-reads-per-locus=0 disables the per-locus read cap; \
+large overlapping loci can take a long time"
+        );
+    }
+    let junction = args.junction_config();
+    let (result, summary) =
+        crate::cluster::clusterj::try_clusterj_with_runtime_options_and_summary(
+            &reads,
+            Some(&refs),
+            args.threads,
+            args.sw_score,
+            args.batch_size,
+            args.batch_rounds,
+            args.name2_mode,
+            junction.sl,
+            junction.three_prime,
+            junction.correction,
+            crate::cluster::clusterj::ClusterjRuntimeOptions {
+                max_reads_per_locus: args.max_reads_per_locus,
+                downsample_seed: args.downsample_seed,
+                heartbeat_seconds: args.heartbeat_seconds,
+                heartbeat_top: args.heartbeat_top,
+            },
+        )?;
+    summary.emit();
 
     crate::flow::artifact_manifest::atomic_write_with(&args.out, |temporary| {
         crate::cluster::output::write_isoforms_bed_to_writer(temporary, &result.isoforms)

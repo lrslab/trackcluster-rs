@@ -435,13 +435,14 @@ object. The complete JSON shape is:
   "schema_version": 1,
   "assay_id": "rna004_m6a_model_1",
   "caller": "dorado",
-  "caller_version": "unknown",
+  "caller_version": "0.9.1",
   "model_id": "rna004_model_name",
   "chemistry": "RNA004",
   "candidate_rule": "all-target-canonical-bases",
   "source_emission_threshold": 0.1,
   "source_site_filter": "none",
   "candidate_observations_complete": true,
+  "provenance_status": "verified_from_pg",
   "implicit_skip_policy": "low_probability",
   "coordinate_source": "genome_aligned_input",
   "read_id_mapping": "sample_prefixed_source_read_id",
@@ -451,8 +452,9 @@ object. The complete JSON shape is:
 
 Unknown JSON fields are rejected. On input, `source_emission_threshold` may be
 omitted and is then treated as `null`; `source_files` may be omitted and defaults
-to an empty array. All other fields are required. The writer emits both optional
-fields explicitly and terminates pretty-printed JSON with a newline.
+to an empty array. Legacy metadata may omit `provenance_status`, which defaults
+to `user_declared`. The writer emits all three optional/defaulted fields
+explicitly and terminates pretty-printed JSON with a newline.
 
 | Field | Type | Contract |
 | --- | --- | --- |
@@ -466,6 +468,7 @@ fields explicitly and terminates pretty-printed JSON with a newline.
 | `source_emission_threshold` | finite float in `[0,1]` or `null` | Threshold below which the source omitted candidates. It is mandatory when `implicit_skip_policy` is `low_probability`. |
 | `source_site_filter` | string | Site/candidate filtering provenance. |
 | `candidate_observations_complete` | boolean | Whether every observation in the retained candidate universe is represented in the normalized TSV. This is an assertion; aggregation does not synthesize rows for absent candidates. |
+| `provenance_status` | enum | `verified_from_pg`, `user_declared`, or `unavailable`. For Dorado, `verified_from_pg` requires version, the declared model, and one source threshold in a coherent model-matching `@PG` record; fields are not combined across records. `conflicting` is reserved for importer diagnostics and is rejected as analysis input. |
 | `implicit_skip_policy` | enum | `low_probability`, `unknown`, or `not_applicable`. |
 | `coordinate_source` | string | How source coordinates became genomic coordinates. |
 | `read_id_mapping` | string | How source IDs became final TrackCluster read IDs. |
@@ -474,11 +477,12 @@ fields explicitly and terminates pretty-printed JSON with a newline.
 All scalar string fields are required to be non-whitespace, not the literal
 `NA`, and free of control characters. Inputs sharing an `assay_id` must match
 exactly in caller, caller version, model, chemistry, candidate rule, source
-emission threshold, site filter, coordinate source, and read-ID mapping.
-`candidate_observations_complete`, `implicit_skip_policy`, and `source_files`
-may differ between samples: completeness and the actually observed skip state
-are sample-level QC. Each sample's skip policy is still applied independently
-when deciding whether implicit observations are callable. An incomplete sample
+emission threshold, site filter, implicit skip policy, coordinate source, and
+read-ID mapping. `candidate_observations_complete`, `provenance_status`, and
+`source_files` may differ between samples as sample-level QC. Each sample's skip
+policy is applied independently when deciding whether observations that actually
+exist are callable; a dataset-level `unknown` policy does not invalidate a site
+containing only explicit observations. An incomplete sample
 is retained for audit but made ineligible. Dorado's configured question-mark
 policy is embedded in `source_site_filter`, so different overrides remain
 incompatible even if no omitted candidate happened to occur in one sample.
@@ -580,11 +584,17 @@ Otherwise that observation is counted in `n_unknown`. This prevents a sparse
 source encoding from silently turning missing or uninterpretable evidence into
 unmodified calls.
 
-The current defaults are `min_callable=1`, `min_read_join_rate=0.9`, and strict
-low-join handling. The minimum callable count must be at least one and the join
-rate must be finite and in `[0,1]`. If a sample/assay read join rate is below the
-minimum, aggregation fails unless `--allow-low-join` is supplied; with that flag,
-affected present-site rows are emitted as ineligible.
+The default `--eligibility-profile exploratory` preserves V1 count-oriented
+behavior with `min_callable=1`. `--eligibility-profile strict` instead defaults
+to `min_covering=20`, `min_callable=10`, `min_candidate_rate=0.8`, and
+`min_callable_rate=0.8`, and also requires exact BAM coverage and FASTA
+validation. Dorado inputs must additionally have `verified_from_pg` provenance
+from one coherent model-matching `@PG` record.
+These guardrails are conservative starting values for calibration, not
+universal biological cutoffs. The global join default is `0.9`; a failing
+sample/assay aborts unless `--allow-low-global-join` is supplied (the former
+`--allow-low-join` spelling remains an alias), in which case affected rows are
+retained as ineligible.
 
 ### `mod-aggregate` outputs
 
@@ -594,6 +604,19 @@ For output prefix `<out>`, the command writes:
 - `<out>.mod_site_join_qc.tsv`
 - `<out>.isoform_mod_sites.tsv`
 - `<out>.isoform_mod_design.tsv`
+
+When aggregation is invoked by `flow`, these files are first written under
+`<prefix>.mod.generations/<run_id>/`. A complete `manifest.json` records tool,
+input, option, and output SHA-256 provenance. Compatibility files are synchronized
+only after the generation is complete, and `<prefix>.mod.current.json` is the
+authoritative pointer published last. The pointer is invalidated before a rerun
+can replace core outputs. A failed run can therefore leave historical or flat
+files on disk, but they are not current; `mod-site-summary` and `mod-contrast`
+reject such stale flow-managed flat inputs. Standalone `mod-aggregate` rejects
+an output prefix that already has flow generation state, preventing a flat-file
+replacement from disagreeing with the current pointer.
+Standalone `mod-contrast` likewise rejects a flow-managed `--out` prefix so it
+cannot replace the flat contrast file without publishing a new generation.
 
 The site universe contains joined observations keyed by
 `(assay_id, gene, chrom, pos0, strand, mod_code)`. Each universe site is expanded
@@ -618,7 +641,7 @@ position, strand, and modification code; design rows inherit that order.
 The exact header is:
 
 ```tsv
-assay_id	analysis_threshold	sample	input_rows	valid_rows	projected_rows	joined_rows	joined_reads	read_join_rate	observation_join_rate	unknown_read	unknown_sample	unknown_isoform	duplicate_exact	duplicate_conflict	unprojectable	invalid_probability	candidate_observations_complete
+assay_id	analysis_threshold	sample	input_rows	valid_rows	projected_rows	joined_rows	joined_reads	assigned_reads	read_join_rate	observation_join_rate	unknown_read	unknown_sample	unknown_isoform	duplicate_exact	duplicate_conflict	unprojectable	invalid_probability	candidate_observations_complete
 ```
 
 | Column | Meaning |
@@ -631,8 +654,9 @@ assay_id	analysis_threshold	sample	input_rows	valid_rows	projected_rows	joined_r
 | `projected_rows` | Rows in genomic coordinates. It currently equals `valid_rows` because normalized input is already genomic. |
 | `joined_rows` | Unique observation rows whose read ID joined a unique isoform assignment. |
 | `joined_reads` | Distinct joined molecule IDs. |
-| `read_join_rate` | Distinct joined reads divided by distinct input reads; `0` when there are no input reads. This is the rate used by the low-join gate. |
-| `observation_join_rate` | `joined_rows / valid_rows`; `0` when there are no valid rows. |
+| `assigned_reads` | Distinct unique-mapping molecules for this sample. This is the `read_join_rate` denominator. |
+| `read_join_rate` | Distinct joined reads divided by `assigned_reads`; `0` when there are no assigned reads. This is the rate used by the low-join gate. Observation reads that never received an assignment (for example reads dropped by per-gene downsampling) stay in `unknown_read` and do not enter the denominator. |
+| `observation_join_rate` | `joined_rows / valid_rows`; `0` when there are no valid rows. This is a raw assignment audit and is not the global gate. |
 | `unknown_read` | Unique observation rows with no assignment. |
 | `unknown_sample` | `0` in successful current output; sample mismatches fail earlier. |
 | `unknown_isoform` | `0` in successful current output; unknown assignment isoforms fail earlier. |
@@ -652,17 +676,20 @@ assay_id	sample	site_id	chrom	pos0	strand	mod_code	input_rows	joined_rows	observ
 
 Each normalized observation key contains one read and one genomic site, so
 `input_rows` and `joined_rows` are distinct read-site counts after exact
-deduplication. The rate is evaluated independently for each source genomic site.
-Sites with zero joined rows remain present with rate `0`. A present isoform/site
-row is ineligible with `site_join_rate_low` when its sample/site rate is below
-`--min-read-join-rate`, even if the sample/assay global join rate passes.
+deduplication. The rate is `joined_rows / input_rows`, so rows whose read was
+never assigned remain visible in this audit. `passes_min_join_rate` compares
+that raw rate with `--min-read-join-rate`, but it is not an eligibility gate:
+caller files can legitimately retain reads removed by clustering downsampling.
+The global assigned-read `read_join_rate` is the authoritative join gate. The
+`site_join_rate_low` token remains accepted when summarizing older site tables,
+but current aggregation does not emit it.
 
 #### Complete site table (`*.isoform_mod_sites.tsv`)
 
 The exact header is:
 
 ```tsv
-assay_id	analysis_threshold	sample	group	gene	isoform_id	site_id	chrom	pos0	strand	mod_code	context	site_state	coverage_basis	n_assigned	n_covering	n_candidate	n_callable	n_modified	n_unmodified	n_unknown	mod_fraction	mean_probability	ci_low	ci_high	eligibility	eligibility_reason
+assay_id	analysis_threshold	sample	group	gene	isoform_id	site_id	chrom	pos0	strand	mod_code	context	site_state	coverage_basis	eligibility_profile	n_assigned	n_covering	n_not_candidate	n_candidate	candidate_rate	n_callable	callable_rate	n_modified	n_unmodified	n_unknown	mod_fraction	mean_probability	ci_low	ci_high	eligibility	eligibility_reason
 ```
 
 | Column | Meaning |
@@ -681,10 +708,14 @@ assay_id	analysis_threshold	sample	group	gene	isoform_id	site_id	chrom	pos0	stra
 | `context` | Shared caller context/rule label, or `NA`. |
 | `site_state` | `present`, `structurally_absent`, `context_dependent`, `reference_base_mismatch`, or `unprojectable`. |
 | `coverage_basis` | Coverage provenance token: `bam_exact` when a coverage BAM was supplied, otherwise `unavailable`. `bed_approximate` remains reserved. |
+| `eligibility_profile` | `exploratory` or `strict`; this makes the meaning of `eligible` explicit in every row. |
 | `n_assigned` | Distinct molecules uniquely assigned to this sample/isoform, independent of whether they have a candidate observation at this site. |
 | `n_covering` | Assigned molecules whose primary alignment covers the genomic base with a CIGAR `M`, `=`, or `X` operation. Deletions, reference skips, insertions, and clips do not cover a genomic base. It is numeric, including zero, for `bam_exact` and `NA` for `unavailable`. |
+| `n_not_candidate` | `n_covering - n_candidate` when exact coverage is available; otherwise `NA`. |
 | `n_candidate` | Joined candidate observations represented for this sample/isoform/site. |
+| `candidate_rate` | `n_candidate / n_covering` for positive exact coverage; otherwise `NA`. |
 | `n_callable` | Candidate observations with an interpretable thresholded state. |
+| `callable_rate` | `n_callable / n_covering` for positive exact coverage; otherwise `NA`. |
 | `n_modified` | Callable observations with explicit probability at or above the analysis threshold. |
 | `n_unmodified` | Explicit probabilities below threshold plus any implicit-below-threshold observations that satisfy the implicit-call rule. |
 | `n_unknown` | Represented candidates excluded from the callable denominator. Always `n_candidate - n_callable`. |
@@ -710,18 +741,19 @@ A mismatch is `reference_base_mismatch` and is not callable.
 
 #### Site summary (`*.mod_site_summary.tsv`)
 
-`mod-site-summary` streams one or more exact 27-column complete site tables and
-writes:
+`mod-site-summary` streams one or more current 31-column complete site tables.
+For patch-release compatibility it also accepts the exact v0.3.0 27-column
+header and treats those rows as `eligibility_profile=exploratory`. It writes:
 
 ```tsv
-assay_id	analysis_threshold	sample	group	gene	site_id	chrom	pos0	strand	mod_code	context	coverage_basis	n_isoforms_total	n_isoforms_assigned	n_isoforms_present	n_isoforms_eligible	n_isoforms_site_absent	n_isoforms_context_dependent	n_isoforms_reference_base_mismatch	n_isoforms_unprojectable	n_isoforms_incomplete_candidate_universe	n_isoforms_join_rate_low	n_isoforms_low_callable	n_isoforms_other_ineligible	min_eligible_n_covering	min_eligible_n_callable	summary_state
+assay_id	analysis_threshold	sample	group	gene	site_id	chrom	pos0	strand	mod_code	context	coverage_basis	eligibility_profile	n_isoforms_total	n_isoforms_assigned	n_isoforms_present	n_isoforms_eligible	n_isoforms_site_absent	n_isoforms_context_dependent	n_isoforms_reference_base_mismatch	n_isoforms_unprojectable	n_isoforms_incomplete_candidate_universe	n_isoforms_join_rate_low	n_isoforms_site_join_rate_low	n_isoforms_unknown_denominator	n_isoforms_coverage_unavailable	n_isoforms_reference_unvalidated	n_isoforms_low_covering	n_isoforms_low_callable	n_isoforms_low_candidate_rate	n_isoforms_low_callable_rate	n_isoforms_provenance_unverified	n_isoforms_other_ineligible	min_eligible_n_covering	min_eligible_n_callable	summary_state
 ```
 
 `summary_state` is `shared_eligible`, `single_eligible`, or
 `no_eligible_isoform` according to whether 2+, 1, or 0 isoforms are eligible.
-`n_isoforms_other_ineligible` retains stable or future present-site reasons not
-assigned their own summary column, including `site_join_rate_low` and
-`unknown_denominator`. Eligible minima are `NA` when no isoform is eligible;
+Every current present-site eligibility reason has a dedicated count column;
+`n_isoforms_other_ineligible` is reserved for unknown future extensions.
+Eligible minima are `NA` when no isoform is eligible;
 the covering minimum is also `NA` when coverage is unavailable.
 
 #### Comparison design (`*.isoform_mod_design.tsv`)
@@ -732,9 +764,11 @@ The exact header is:
 assay_id	analysis_threshold	sample	group	gene	site_id	mod_code	isoform_id	n_modified	n_unmodified	mod_fraction	eligibility	eligibility_reason
 ```
 
-This is a lossless projection of the comparison fields from the complete site
-table; it includes eligible and ineligible rows. `group` and `mod_fraction` may
-be `NA`. Counts are always non-negative integers, including zero. The other
+This projects comparison counts from the complete site table and includes both
+eligible and ineligible rows. `group` may be `NA`; `mod_fraction` is numeric only
+for an eligible row and is forced to `NA` for every ineligible row, even when the
+audit table retains a descriptive fraction. Counts are always non-negative
+integers, including zero. The other
 columns have the meanings above. In particular, `mod_code` remains part of the
 comparison key even though it is not embedded in `site_id`.
 
@@ -775,7 +809,7 @@ is:
 | `candidate_observations_complete=false` | Thresholded counts and explicit mean may still be numeric | `NA` | The retained candidate universe is incomplete, so a fraction is not estimated. |
 | `structurally_absent` or `unprojectable` | Counts remain explicit audit integers | `NA` | Modification fraction is not biologically defined for that isoform/site. |
 | `context_dependent`, complete universe, `n_callable > 0` | Numeric | Numeric | The descriptive denominator exists, but the row remains ineligible for contrast. |
-| No coverage BAM supplied | `n_covering=NA` | Not applicable | `coverage_basis=unavailable`; zero must not be substituted for missing coverage. |
+| No coverage BAM supplied | `n_covering=NA`, coverage-derived fields `NA` | Not applicable | `coverage_basis=unavailable`; zero must not be substituted for missing coverage. |
 
 Eligibility is independent of whether a descriptive fraction happens to be
 numeric. The first applicable rule below determines `eligibility_reason`:
@@ -787,11 +821,16 @@ numeric. The first applicable rule below determines `eligibility_reason`:
 | 3 | `site_state=reference_base_mismatch` | `reference_base_mismatch` | `ineligible` |
 | 4 | `site_state=unprojectable` | `unprojectable` | `ineligible` |
 | 5 | Present site with incomplete candidate universe | `incomplete_candidate_universe` | `ineligible` |
-| 6 | Present site in a sample/assay retained with `--allow-low-join` after failing the global read-join threshold | `join_rate_low` | `ineligible` |
-| 7 | Present site whose site-local observation join rate fails the same threshold | `site_join_rate_low` | `ineligible` |
-| 8 | Present site with an unknown observation or unknown implicit denominator policy | `unknown_denominator` | `ineligible` |
-| 9 | Present site with `n_callable < min_callable` | `low_callable` | `ineligible` |
-| 10 | All preceding conditions pass | `ok` | `eligible` |
+| 6 | Present site in a sample/assay retained with `--allow-low-global-join` after failing the global read-join threshold | `join_rate_low` | `ineligible` |
+| 7 | Present site with an actual unknown observation, or an actual implicit observation that is not callable | `unknown_denominator` | `ineligible` |
+| 8 | Strict profile without exact BAM coverage | `coverage_unavailable` | `ineligible` |
+| 9 | Strict profile without FASTA validation | `reference_unvalidated` | `ineligible` |
+| 10 | Strict Dorado row not fully verified from one coherent `@PG` record | `provenance_unverified` | `ineligible` |
+| 11 | Strict profile with `n_covering < min_covering` | `low_covering` | `ineligible` |
+| 12 | Any profile with `n_callable < min_callable` | `low_callable` | `ineligible` |
+| 13 | Strict profile with `candidate_rate < min_candidate_rate` | `low_candidate_rate` | `ineligible` |
+| 14 | Strict profile with `callable_rate < min_callable_rate` | `low_callable_rate` | `ineligible` |
+| 15 | All preceding conditions pass | `ok` | `eligible` |
 
 Consequently, an isoform or interaction contrast uses a site only when both
 isoform rows are independently `eligible` in the same sample. Structural exon

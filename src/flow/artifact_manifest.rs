@@ -691,7 +691,7 @@ impl Drop for TemporaryGuard {
     }
 }
 
-fn sha256_file(path: &Path) -> anyhow::Result<String> {
+pub(crate) fn sha256_file(path: &Path) -> anyhow::Result<String> {
     let file = fs::File::open(path).with_context(|| format!("open file for SHA-256 {path:?}"))?;
     let mut reader = BufReader::new(file);
     let mut hasher = Sha256::new();

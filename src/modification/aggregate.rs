@@ -10,8 +10,8 @@ use crate::io::manifest::SampleRow;
 use crate::io::mod_calls::ObservationReadResult;
 use crate::model::{Coord, Strand, Transcript};
 use crate::modification::{
-    AssayMetadata, CoverageBasis, EligibilityReason, ImplicitSkipPolicy, ModSiteKey,
-    ObservationState, SiteState,
+    AssayMetadata, CoverageBasis, EligibilityProfile, EligibilityReason, ImplicitSkipPolicy,
+    ModSiteKey, ObservationState, ProvenanceStatus, SiteState,
 };
 
 /// Loaded normalized data for one `(sample, assay)` manifest row.
@@ -34,8 +34,16 @@ pub struct ModSampleInput {
 pub struct AggregateOptions {
     /// Per-assay hard-call probability thresholds.
     pub analysis_thresholds: BTreeMap<String, f64>,
+    /// Eligibility policy applied to every output row.
+    pub eligibility_profile: EligibilityProfile,
+    /// Minimum independently covering molecules required by the strict profile.
+    pub min_covering: u64,
     /// Minimum callable molecules required for an eligible site row.
     pub min_callable: u64,
+    /// Minimum fraction of covering molecules represented as candidates in strict mode.
+    pub min_candidate_rate: f64,
+    /// Minimum fraction of covering molecules contributing a callable state in strict mode.
+    pub min_callable_rate: f64,
     /// Minimum unique-read join rate for each sample/assay.
     pub min_read_join_rate: f64,
     /// Keep low-join rows as ineligible output instead of failing the command.
@@ -48,7 +56,11 @@ impl Default for AggregateOptions {
     fn default() -> Self {
         Self {
             analysis_thresholds: BTreeMap::new(),
+            eligibility_profile: EligibilityProfile::Exploratory,
+            min_covering: 20,
             min_callable: 1,
+            min_candidate_rate: 0.8,
+            min_callable_rate: 0.8,
             min_read_join_rate: 0.9,
             allow_low_join: false,
             reference_bases: None,
@@ -75,9 +87,11 @@ pub struct JoinQcRow {
     pub joined_rows: usize,
     /// Distinct joined molecules.
     pub joined_reads: usize,
-    /// Fraction of distinct input molecules that joined.
+    /// Unique-mapping molecules for this sample (join-rate denominator).
+    pub assigned_reads: usize,
+    /// Fraction of assigned molecules that joined a modification observation.
     pub read_join_rate: f64,
-    /// Fraction of unique observation rows that joined.
+    /// Fraction of validated observation rows whose read is in the assignment table.
     pub observation_join_rate: f64,
     /// Observation rows with no read assignment.
     pub unknown_read: usize,
@@ -112,9 +126,11 @@ pub struct SiteJoinQcRow {
     pub input_rows: u64,
     /// Distinct normalized read-site observations with a unique isoform assignment.
     pub joined_rows: u64,
-    /// Site-local observation join rate.
+    /// Fraction of site observations whose read is in the assignment table.
     pub observation_join_rate: f64,
-    /// Whether the site-local join rate passes the configured threshold.
+    /// Audit flag comparing the raw site-local rate with the configured threshold.
+    /// This flag is not an eligibility gate because unassigned, downsampled reads
+    /// remain in the caller observation file.
     pub passes_min_join_rate: bool,
 }
 
@@ -143,14 +159,22 @@ pub struct IsoformModSiteRow {
     pub site_state: SiteState,
     /// Coverage evidence used for `n_covering`.
     pub coverage_basis: CoverageBasis,
+    /// Eligibility policy applied to this row.
+    pub eligibility_profile: EligibilityProfile,
     /// Molecules uniquely assigned to the sample/isoform.
     pub n_assigned: u64,
     /// Assigned molecules covering the genomic base, when available.
     pub n_covering: Option<u64>,
+    /// Covering molecules absent from the caller candidate universe, when coverage is available.
+    pub n_not_candidate: Option<u64>,
     /// Candidate observations evaluated by the caller.
     pub n_candidate: u64,
+    /// Candidate observations divided by independently covering molecules.
+    pub candidate_rate: Option<f64>,
     /// Candidate observations with an interpretable hard-call state.
     pub n_callable: u64,
+    /// Callable observations divided by independently covering molecules.
+    pub callable_rate: Option<f64>,
     /// Callable observations at or above the analysis threshold.
     pub n_modified: u64,
     /// Callable observations below the analysis threshold.
@@ -257,9 +281,28 @@ struct SiteJoinCounts {
     joined_rows: u64,
 }
 
+fn join_rate(numerator: u64, denominator: u64) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64
+    }
+}
+
 fn validate_options(options: &AggregateOptions) -> anyhow::Result<()> {
+    if options.min_covering == 0 {
+        anyhow::bail!("min_covering must be at least 1");
+    }
     if options.min_callable == 0 {
         anyhow::bail!("min_callable must be at least 1");
+    }
+    for (name, rate) in [
+        ("min_candidate_rate", options.min_candidate_rate),
+        ("min_callable_rate", options.min_callable_rate),
+    ] {
+        if !rate.is_finite() || !(0.0..=1.0).contains(&rate) {
+            anyhow::bail!("{name} must be finite and in [0, 1]");
+        }
     }
     if !options.min_read_join_rate.is_finite() || !(0.0..=1.0).contains(&options.min_read_join_rate)
     {
@@ -299,6 +342,7 @@ fn assay_compatible(left: &AssayMetadata, right: &AssayMetadata) -> bool {
         && left.candidate_rule == right.candidate_rule
         && left.source_emission_threshold == right.source_emission_threshold
         && left.source_site_filter == right.source_site_filter
+        && left.implicit_skip_policy == right.implicit_skip_policy
         && left.coordinate_source == right.coordinate_source
         && left.read_id_mapping == right.read_id_mapping
 }
@@ -549,9 +593,13 @@ pub fn aggregate_modifications(
 
     for input in mod_inputs {
         let threshold = options.analysis_thresholds[&input.assay_id];
-        let mut input_reads = HashSet::new();
+        let assigned_reads = n_assigned
+            .iter()
+            .filter(|((sample, _), _)| sample == &input.sample)
+            .map(|(_, count)| *count)
+            .sum::<u64>();
         let mut joined_reads = HashSet::new();
-        let mut joined_rows = 0usize;
+        let mut joined_rows = 0u64;
         let mut unknown_read = 0usize;
 
         for observation in &input.observations.observations {
@@ -565,7 +613,6 @@ pub fn aggregate_modifications(
                     input.assay_id
                 );
             }
-            input_reads.insert(observation.key.read_id.as_str());
             let site_join = site_join_counts
                 .entry(SiteJoinKey {
                     assay_id: input.assay_id.clone(),
@@ -630,21 +677,14 @@ pub fn aggregate_modifications(
             }
         }
 
-        let read_join_rate = if input_reads.is_empty() {
-            0.0
-        } else {
-            joined_reads.len() as f64 / input_reads.len() as f64
-        };
-        let observation_join_rate = if input.observations.observations.is_empty() {
-            0.0
-        } else {
-            joined_rows as f64 / input.observations.observations.len() as f64
-        };
+        let read_join_rate = join_rate(joined_reads.len() as u64, assigned_reads);
+        let observation_join_rate =
+            join_rate(joined_rows, input.observations.observations.len() as u64);
         if read_join_rate < options.min_read_join_rate {
             low_join.insert((input.sample.clone(), input.assay_id.clone()));
             if !options.allow_low_join {
                 anyhow::bail!(
-                    "sample {:?}, assay {:?} read join rate {:.6} is below minimum {:.6}; use --allow-low-join to emit ineligible rows",
+                    "sample {:?}, assay {:?} read join rate {:.6} is below minimum {:.6}; use --allow-low-global-join to emit ineligible rows",
                     input.sample,
                     input.assay_id,
                     read_join_rate,
@@ -659,8 +699,9 @@ pub fn aggregate_modifications(
             input_rows: input.observations.input_rows,
             valid_rows: input.observations.observations.len(),
             projected_rows: input.observations.observations.len(),
-            joined_rows,
+            joined_rows: joined_rows as usize,
             joined_reads: joined_reads.len(),
+            assigned_reads: assigned_reads as usize,
             read_join_rate,
             observation_join_rate,
             unknown_read,
@@ -681,7 +722,7 @@ pub fn aggregate_modifications(
     let site_join_qc = site_join_counts
         .iter()
         .map(|(key, counts)| {
-            let observation_join_rate = counts.joined_rows as f64 / counts.input_rows as f64;
+            let observation_join_rate = join_rate(counts.joined_rows, counts.input_rows);
             SiteJoinQcRow {
                 assay_id: key.assay_id.clone(),
                 sample: key.sample.clone(),
@@ -904,6 +945,13 @@ pub fn aggregate_modifications(
                 let n_callable = n_modified + n_unmodified;
                 let n_unknown = n_candidate - n_callable;
                 debug_assert_eq!(n_candidate, n_callable + n_unknown);
+                let n_not_candidate = n_covering.map(|covering| covering - n_candidate);
+                let candidate_rate = n_covering
+                    .filter(|&covering| covering > 0)
+                    .map(|covering| n_candidate as f64 / covering as f64);
+                let callable_rate = n_covering
+                    .filter(|&covering| covering > 0)
+                    .map(|covering| n_callable as f64 / covering as f64);
 
                 let mean_probability = if site_can_be_called && explicit > 0 {
                     Some(explicit_probability_sum / explicit as f64)
@@ -912,19 +960,9 @@ pub fn aggregate_modifications(
                 };
                 let join_is_low =
                     low_join.contains(&(sample.clone(), universe_key.assay_id.clone()));
-                let site_join_is_low = site_join_counts
-                    .get(&SiteJoinKey {
-                        assay_id: universe_key.assay_id.clone(),
-                        sample: sample.clone(),
-                        site: universe_key.site.clone(),
-                    })
-                    .is_some_and(|counts| {
-                        counts.joined_rows as f64 / (counts.input_rows as f64)
-                            < options.min_read_join_rate
-                    });
-                let denominator_is_known = source_unknown == 0
-                    && (implicit == 0 || implicit_callable)
-                    && sample_metadata.implicit_skip_policy != ImplicitSkipPolicy::Unknown;
+                let denominator_is_known =
+                    source_unknown == 0 && (implicit == 0 || implicit_callable);
+                let strict = options.eligibility_profile == EligibilityProfile::Strict;
                 let reason = match site_state {
                     SiteState::StructurallyAbsent => EligibilityReason::SiteAbsent,
                     SiteState::ContextDependent => EligibilityReason::ContextDependent,
@@ -934,12 +972,46 @@ pub fn aggregate_modifications(
                         EligibilityReason::IncompleteCandidateUniverse
                     }
                     SiteState::Present if join_is_low => EligibilityReason::JoinRateLow,
-                    SiteState::Present if site_join_is_low => EligibilityReason::SiteJoinRateLow,
                     SiteState::Present if !denominator_is_known => {
                         EligibilityReason::UnknownDenominator
                     }
+                    SiteState::Present if strict && !has_exact_coverage => {
+                        EligibilityReason::CoverageUnavailable
+                    }
+                    SiteState::Present if strict && options.reference_bases.is_none() => {
+                        EligibilityReason::ReferenceUnvalidated
+                    }
+                    SiteState::Present
+                        if strict
+                            && sample_metadata.caller.eq_ignore_ascii_case("dorado")
+                            && sample_metadata.provenance_status
+                                != ProvenanceStatus::VerifiedFromPg =>
+                    {
+                        EligibilityReason::ProvenanceUnverified
+                    }
+                    SiteState::Present
+                        if strict
+                            && n_covering.expect("strict exact coverage checked above")
+                                < options.min_covering =>
+                    {
+                        EligibilityReason::LowCovering
+                    }
                     SiteState::Present if n_callable < options.min_callable => {
                         EligibilityReason::LowCallable
+                    }
+                    SiteState::Present
+                        if strict
+                            && candidate_rate.expect("strict positive coverage checked above")
+                                < options.min_candidate_rate =>
+                    {
+                        EligibilityReason::LowCandidateRate
+                    }
+                    SiteState::Present
+                        if strict
+                            && callable_rate.expect("strict positive coverage checked above")
+                                < options.min_callable_rate =>
+                    {
+                        EligibilityReason::LowCallableRate
                     }
                     SiteState::Present => EligibilityReason::Ok,
                 };
@@ -972,13 +1044,17 @@ pub fn aggregate_modifications(
                     } else {
                         CoverageBasis::Unavailable
                     },
+                    eligibility_profile: options.eligibility_profile,
                     n_assigned: n_assigned
                         .get(&(sample.clone(), isoform.name.clone()))
                         .copied()
                         .unwrap_or(0),
                     n_covering,
+                    n_not_candidate,
                     n_candidate,
+                    candidate_rate,
                     n_callable,
+                    callable_rate,
                     n_modified,
                     n_unmodified,
                     n_unknown,
@@ -1012,7 +1088,11 @@ pub fn aggregate_modifications(
             isoform_id: row.isoform_id.clone(),
             n_modified: row.n_modified,
             n_unmodified: row.n_unmodified,
-            mod_fraction: row.mod_fraction,
+            mod_fraction: row
+                .eligibility_reason
+                .is_eligible()
+                .then_some(row.mod_fraction)
+                .flatten(),
             eligibility_reason: row.eligibility_reason,
         })
         .collect();
@@ -1046,6 +1126,7 @@ pub fn write_join_qc_tsv<W: Write>(writer: W, rows: &[JoinQcRow]) -> anyhow::Res
         "projected_rows",
         "joined_rows",
         "joined_reads",
+        "assigned_reads",
         "read_join_rate",
         "observation_join_rate",
         "unknown_read",
@@ -1067,6 +1148,7 @@ pub fn write_join_qc_tsv<W: Write>(writer: W, rows: &[JoinQcRow]) -> anyhow::Res
             row.projected_rows.to_string(),
             row.joined_rows.to_string(),
             row.joined_reads.to_string(),
+            row.assigned_reads.to_string(),
             row.read_join_rate.to_string(),
             row.observation_join_rate.to_string(),
             row.unknown_read.to_string(),
@@ -1147,10 +1229,14 @@ pub fn write_isoform_mod_sites_tsv<W: Write>(
         "context",
         "site_state",
         "coverage_basis",
+        "eligibility_profile",
         "n_assigned",
         "n_covering",
+        "n_not_candidate",
         "n_candidate",
+        "candidate_rate",
         "n_callable",
+        "callable_rate",
         "n_modified",
         "n_unmodified",
         "n_unknown",
@@ -1177,10 +1263,14 @@ pub fn write_isoform_mod_sites_tsv<W: Write>(
             optional(row.context.clone()),
             row.site_state.to_string(),
             row.coverage_basis.to_string(),
+            row.eligibility_profile.to_string(),
             row.n_assigned.to_string(),
             optional(row.n_covering),
+            optional(row.n_not_candidate),
             row.n_candidate.to_string(),
+            optional(row.candidate_rate),
             row.n_callable.to_string(),
+            optional(row.callable_rate),
             row.n_modified.to_string(),
             row.n_unmodified.to_string(),
             row.n_unknown.to_string(),
@@ -1306,6 +1396,7 @@ mod tests {
             source_emission_threshold: Some(0.1),
             source_site_filter: "none".to_owned(),
             candidate_observations_complete: complete,
+            provenance_status: ProvenanceStatus::UserDeclared,
             implicit_skip_policy: ImplicitSkipPolicy::LowProbability,
             coordinate_source: "genome".to_owned(),
             read_id_mapping: "test".to_owned(),
@@ -1397,6 +1488,7 @@ mod tests {
                 min_read_join_rate: 1.0,
                 allow_low_join: false,
                 reference_bases: None,
+                ..AggregateOptions::default()
             },
         )
         .unwrap()
@@ -1456,9 +1548,10 @@ mod tests {
             &AggregateOptions {
                 analysis_thresholds: BTreeMap::from([("a1".to_owned(), 0.5)]),
                 min_callable: 1,
-                min_read_join_rate: 1.0,
+                min_read_join_rate: 0.0,
                 allow_low_join: false,
                 reference_bases: None,
+                ..AggregateOptions::default()
             },
         )
         .unwrap();
@@ -1569,6 +1662,7 @@ mod tests {
                 min_read_join_rate: 1.0,
                 allow_low_join: false,
                 reference_bases: None,
+                ..AggregateOptions::default()
             },
         )
         .unwrap();
@@ -1578,6 +1672,7 @@ mod tests {
         assert_eq!((row.n_callable, row.n_modified), (1, 1));
         assert_eq!(row.mod_fraction, Some(1.0));
         assert_eq!(row.eligibility_reason, EligibilityReason::ContextDependent);
+        assert_eq!(result.design[0].mod_fraction, None);
     }
 
     #[test]
@@ -1588,7 +1683,10 @@ mod tests {
             reads: "unused".into(),
         }];
         let isoforms = vec![transcript("iso1", "GENE1", &[(100, 120)])];
-        let assignments = vec![("S1::r1".to_owned(), "iso1".to_owned())];
+        let assignments = vec![
+            ("S1::r1".to_owned(), "iso1".to_owned()),
+            ("S1::r2".to_owned(), "iso1".to_owned()),
+        ];
         let observations = vec![
             observation(
                 "S1::r1",
@@ -1620,6 +1718,7 @@ mod tests {
             min_read_join_rate: 0.75,
             allow_low_join: false,
             reference_bases: None,
+            ..AggregateOptions::default()
         };
 
         let error = aggregate_modifications(&samples, &isoforms, &assignments, &inputs, &options)
@@ -1631,6 +1730,8 @@ mod tests {
         let result =
             aggregate_modifications(&samples, &isoforms, &assignments, &inputs, &options).unwrap();
         assert_eq!(result.join_qc[0].read_join_rate, 0.5);
+        assert_eq!(result.join_qc[0].assigned_reads, 2);
+        assert_eq!(result.join_qc[0].joined_reads, 1);
         assert_eq!(result.join_qc[0].unknown_read, 1);
         assert_eq!(
             result.sites[0].eligibility_reason,
@@ -1639,7 +1740,7 @@ mod tests {
     }
 
     #[test]
-    fn site_local_low_join_is_ineligible_even_when_global_join_passes() {
+    fn unassigned_site_observations_are_audited_without_gating_eligibility() {
         let samples = vec![SampleRow {
             sample: "S1".to_owned(),
             group: None,
@@ -1701,17 +1802,28 @@ mod tests {
                 min_read_join_rate: 0.9,
                 allow_low_join: false,
                 reference_bases: None,
+                ..AggregateOptions::default()
             },
         )
         .unwrap();
 
         assert!(result.join_qc[0].read_join_rate > 0.9);
+        assert_eq!(result.join_qc[0].assigned_reads, 101);
+        assert_eq!(result.join_qc[0].joined_reads, 101);
         let local = result
             .sites
             .iter()
             .find(|row| row.site.pos0 == 210)
             .unwrap();
-        assert_eq!(local.eligibility_reason, EligibilityReason::SiteJoinRateLow);
+        assert_eq!(local.eligibility_reason, EligibilityReason::Ok);
+        let local_join = result
+            .site_join_qc
+            .iter()
+            .find(|row| row.site.pos0 == 210)
+            .unwrap();
+        assert!(!local_join.passes_min_join_rate);
+        assert_eq!(local_join.joined_rows, 1);
+        assert_eq!(local_join.observation_join_rate, 0.25);
         let zero_join = result
             .site_join_qc
             .iter()
@@ -1719,6 +1831,65 @@ mod tests {
             .unwrap();
         assert_eq!(zero_join.joined_rows, 0);
         assert!(!zero_join.passes_min_join_rate);
+    }
+
+    #[test]
+    fn unassigned_observation_reads_do_not_enter_the_join_rate_denominator() {
+        let samples = vec![SampleRow {
+            sample: "S1".to_owned(),
+            group: None,
+            reads: "unused".into(),
+        }];
+        let isoforms = vec![transcript("iso1", "GENE1", &[(100, 120)])];
+        let assignments = vec![("S1::kept".to_owned(), "iso1".to_owned())];
+        let mut observations = vec![observation(
+            "S1::kept",
+            110,
+            ObservationState::ExplicitProbability,
+            Some(0.9),
+        )];
+        for index in 0..20 {
+            observations.push(observation(
+                &format!("S1::downsampled-{index}"),
+                110,
+                ObservationState::ExplicitProbability,
+                Some(0.1),
+            ));
+        }
+        let inputs = vec![ModSampleInput {
+            sample: "S1".to_owned(),
+            assay_id: "a1".to_owned(),
+            metadata: metadata(true),
+            observations: ObservationReadResult {
+                input_rows: observations.len(),
+                duplicate_exact: 0,
+                observations,
+            },
+            coverage: None,
+        }];
+        let result = aggregate_modifications(
+            &samples,
+            &isoforms,
+            &assignments,
+            &inputs,
+            &AggregateOptions {
+                analysis_thresholds: BTreeMap::from([("a1".to_owned(), 0.5)]),
+                min_callable: 1,
+                min_read_join_rate: 0.9,
+                allow_low_join: false,
+                reference_bases: None,
+                ..AggregateOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.join_qc[0].assigned_reads, 1);
+        assert_eq!(result.join_qc[0].joined_reads, 1);
+        assert_eq!(result.join_qc[0].unknown_read, 20);
+        assert_eq!(result.join_qc[0].read_join_rate, 1.0);
+        assert!((result.join_qc[0].observation_join_rate - (1.0 / 21.0)).abs() < f64::EPSILON);
+        assert!(!result.site_join_qc[0].passes_min_join_rate);
+        assert_eq!(result.sites[0].eligibility_reason, EligibilityReason::Ok);
     }
 
     #[test]
@@ -1759,6 +1930,7 @@ mod tests {
                 min_read_join_rate: 1.0,
                 allow_low_join: false,
                 reference_bases: Some(BTreeMap::from([(site, b'C')])),
+                ..AggregateOptions::default()
             },
         )
         .unwrap();
@@ -1791,15 +1963,184 @@ mod tests {
     }
 
     #[test]
-    fn sample_level_qc_does_not_split_an_otherwise_compatible_assay() {
+    fn implicit_skip_policy_is_part_of_assay_compatibility() {
         let complete = metadata(true);
         let mut sample_specific = metadata(false);
         sample_specific.implicit_skip_policy = ImplicitSkipPolicy::Unknown;
-        assert!(assay_compatible(&complete, &sample_specific));
+        assert!(!assay_compatible(&complete, &sample_specific));
 
         let mut different_model = sample_specific;
         different_model.model_id = "other-model".to_owned();
         assert!(!assay_compatible(&complete, &different_model));
+    }
+
+    #[test]
+    fn explicit_only_site_with_unknown_skip_policy_has_a_known_denominator() {
+        let samples = vec![SampleRow {
+            sample: "S1".to_owned(),
+            group: None,
+            reads: "unused".into(),
+        }];
+        let isoforms = vec![transcript("iso1", "GENE1", &[(100, 120)])];
+        let assignments = vec![("S1::r1".to_owned(), "iso1".to_owned())];
+        let mut assay = metadata(true);
+        assay.implicit_skip_policy = ImplicitSkipPolicy::Unknown;
+        assay.source_emission_threshold = None;
+        let inputs = vec![ModSampleInput {
+            sample: "S1".to_owned(),
+            assay_id: "a1".to_owned(),
+            metadata: assay,
+            observations: ObservationReadResult {
+                input_rows: 1,
+                duplicate_exact: 0,
+                observations: vec![observation(
+                    "S1::r1",
+                    110,
+                    ObservationState::ExplicitProbability,
+                    Some(0.9),
+                )],
+            },
+            coverage: None,
+        }];
+        let result = aggregate_modifications(
+            &samples,
+            &isoforms,
+            &assignments,
+            &inputs,
+            &AggregateOptions {
+                analysis_thresholds: BTreeMap::from([("a1".to_owned(), 0.5)]),
+                min_read_join_rate: 1.0,
+                ..AggregateOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(result.sites[0].eligibility_reason, EligibilityReason::Ok);
+        assert_eq!(result.sites[0].mod_fraction, Some(1.0));
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn strict_representation_fixture(
+        include_coverage: bool,
+        include_reference: bool,
+    ) -> (
+        Vec<SampleRow>,
+        Vec<Transcript>,
+        Vec<(String, String)>,
+        Vec<ModSampleInput>,
+        AggregateOptions,
+    ) {
+        let samples = vec![SampleRow {
+            sample: "S1".to_owned(),
+            group: None,
+            reads: "unused".into(),
+        }];
+        let isoforms = vec![transcript("iso1", "GENE1", &[(100, 120)])];
+        let assignments = (0..100)
+            .map(|index| (format!("S1::r{index}"), "iso1".to_owned()))
+            .collect::<Vec<_>>();
+        let coverage = include_coverage.then(|| BamCoverageResult {
+            reads: (0..100)
+                .map(|index| ReadCoverage {
+                    read_id: format!("S1::r{index}"),
+                    chrom: "chr1".to_owned(),
+                    strand: Strand::Plus,
+                    match_blocks: vec![Interval::new(Coord::new(100), Coord::new(120)).unwrap()],
+                })
+                .collect(),
+            total_records: 100,
+            ..BamCoverageResult::default()
+        });
+        let site = ModSiteKey {
+            chrom: "chr1".to_owned(),
+            pos0: 110,
+            strand: Strand::Plus,
+            mod_code: "A+a".to_owned(),
+        };
+        let inputs = vec![ModSampleInput {
+            sample: "S1".to_owned(),
+            assay_id: "a1".to_owned(),
+            metadata: metadata(true),
+            observations: ObservationReadResult {
+                input_rows: 1,
+                duplicate_exact: 0,
+                observations: vec![observation(
+                    "S1::r0",
+                    110,
+                    ObservationState::ExplicitProbability,
+                    Some(0.9),
+                )],
+            },
+            coverage,
+        }];
+        let options = AggregateOptions {
+            analysis_thresholds: BTreeMap::from([("a1".to_owned(), 0.5)]),
+            eligibility_profile: EligibilityProfile::Strict,
+            min_covering: 20,
+            min_callable: 1,
+            min_candidate_rate: 0.8,
+            min_callable_rate: 0.8,
+            min_read_join_rate: 0.0,
+            allow_low_join: false,
+            reference_bases: include_reference.then(|| BTreeMap::from([(site, b'A')])),
+        };
+        (samples, isoforms, assignments, inputs, options)
+    }
+
+    #[test]
+    fn strict_profile_requires_coverage_and_reference_validation() {
+        let (samples, isoforms, assignments, inputs, options) =
+            strict_representation_fixture(false, false);
+        let result =
+            aggregate_modifications(&samples, &isoforms, &assignments, &inputs, &options).unwrap();
+        assert_eq!(
+            result.sites[0].eligibility_reason,
+            EligibilityReason::CoverageUnavailable
+        );
+
+        let (samples, isoforms, assignments, inputs, options) =
+            strict_representation_fixture(true, false);
+        let result =
+            aggregate_modifications(&samples, &isoforms, &assignments, &inputs, &options).unwrap();
+        assert_eq!(
+            result.sites[0].eligibility_reason,
+            EligibilityReason::ReferenceUnvalidated
+        );
+    }
+
+    #[test]
+    fn strict_profile_rejects_sparse_candidate_representation() {
+        let (samples, isoforms, assignments, inputs, options) =
+            strict_representation_fixture(true, true);
+        let result =
+            aggregate_modifications(&samples, &isoforms, &assignments, &inputs, &options).unwrap();
+        let row = &result.sites[0];
+        assert_eq!(row.n_covering, Some(100));
+        assert_eq!(row.n_not_candidate, Some(99));
+        assert_eq!(row.candidate_rate, Some(0.01));
+        assert_eq!(row.callable_rate, Some(0.01));
+        assert_eq!(row.eligibility_reason, EligibilityReason::LowCandidateRate);
+        assert_eq!(result.design[0].mod_fraction, None);
+    }
+
+    #[test]
+    fn strict_profile_requires_verified_dorado_program_provenance() {
+        let (samples, isoforms, assignments, mut inputs, options) =
+            strict_representation_fixture(true, true);
+        inputs[0].metadata.caller = "dorado".to_owned();
+        let result =
+            aggregate_modifications(&samples, &isoforms, &assignments, &inputs, &options).unwrap();
+        assert_eq!(
+            result.sites[0].eligibility_reason,
+            EligibilityReason::ProvenanceUnverified
+        );
+
+        inputs[0].metadata.provenance_status = ProvenanceStatus::VerifiedFromPg;
+        let result =
+            aggregate_modifications(&samples, &isoforms, &assignments, &inputs, &options).unwrap();
+        assert_eq!(
+            result.sites[0].eligibility_reason,
+            EligibilityReason::LowCandidateRate
+        );
     }
 
     #[test]
@@ -1884,6 +2225,12 @@ mod tests {
     #[test]
     fn writers_emit_na_and_stable_headers() {
         let result = run(true);
+        let mut join = Vec::new();
+        write_join_qc_tsv(&mut join, &result.join_qc).unwrap();
+        assert!(String::from_utf8(join)
+            .unwrap()
+            .starts_with("assay_id\tanalysis_threshold\tsample\tinput_rows\tvalid_rows\tprojected_rows\tjoined_rows\tjoined_reads\tassigned_reads\tread_join_rate\t"));
+
         let mut sites = Vec::new();
         write_isoform_mod_sites_tsv(&mut sites, &result.sites).unwrap();
         let sites = String::from_utf8(sites).unwrap();

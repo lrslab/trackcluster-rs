@@ -85,7 +85,9 @@ clusterj_batch --help
 ```bash
 # One-line flow: prepare per-gene inputs, run per-gene clustering, merge outputs, count, and desc
 trackcluster flow -s examples/reads.bed -r examples/ref.bed -o out --prefix sample
-# Tip: disable the default per-gene downsampling cap with `--max-reads-per-gene 0` (uses more memory).
+# Genes above 5,000 reads are deterministically subsampled by default so loci such as
+# mitochondrial cox1 cannot dominate runtime. Set `--max-reads-per-gene 0` to disable it.
+# For a tighter targeted cap: `--downsample-gene cox1 --max-reads-per-gene 2000`.
 # Independent per-gene downsampling is rejected when one molecule belongs to multiple genes;
 # disable the cap or exclude every affected gene from downsampling in that case.
 # Malformed or empty-ID read tracks are skipped individually by default and recorded in
@@ -207,7 +209,9 @@ trackcluster mod-aggregate --manifest samples.tsv \
   --isoforms out/pooled_isoform.bed \
   --read-to-isoform out/pooled_read_to_isoform.unique.tsv \
   --mod-manifest mod_samples.tsv \
-  --analysis-threshold dorado_rna004_m6a=0.5 --out out/pooled
+  --reference-fasta genome.fa \
+  --analysis-threshold dorado_rna004_m6a=0.5 \
+  --eligibility-profile strict --out out/pooled
 
 # Optional technical coverage test: split one parent sample by molecule.
 trackcluster mod-subsample --manifest samples.tsv \
@@ -229,6 +233,14 @@ Pinned public-data and realistic-simulation checks are described in
 groups are intentionally blank and they must not be used as biological
 replicates.
 
+The default modification eligibility profile is `exploratory`. Use `strict`
+for comparison-ready screening: it requires exact coverage BAMs, an indexed
+reference FASTA, Dorado version/model/threshold provenance verified within one
+coherent source `@PG` record, and configurable minimum covering/callable counts
+plus candidate/covering and callable/covering rates.
+Flow-integrated modification results are committed as hash-verified generations
+and are current only while `<prefix>.mod.current.json` exists and validates.
+
 New catalogs use deterministic `tc_novel_v1:` structural IDs for novel
 isoforms and a percent-encoded `tc_name2_v1:` payload in `--name2-mode full`.
 Count CSVs have columns `gene,isoform_id,count` and use standard CSV escaping.
@@ -249,6 +261,7 @@ and algorithm errors are not downgraded by `--invalid-read-policy skip`.
 - [File formats](docs/FORMATS.md)
 - [Modification validation](docs/MODIFICATION_VALIDATION.md)
 - [Interchange formats](docs/INTERCHANGE.md)
+- [Rust API policy](docs/RUST_API.md)
 - [Clustering behavior](docs/behavior/cluster.md)
 - [Description/classification behavior](docs/behavior/desc.md)
 

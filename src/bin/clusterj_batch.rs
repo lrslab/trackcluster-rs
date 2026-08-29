@@ -133,7 +133,10 @@ struct Args {
     downsample_genes: Vec<String>,
 
     /// Per-gene cap: reservoir-sample reads down to this count (set to 0 to disable downsampling).
-    #[arg(long = "max-reads-per-gene", default_value_t = 50000)]
+    #[arg(
+        long = "max-reads-per-gene",
+        default_value_t = trackcluster_rs::flow::config::DEFAULT_MAX_READS_PER_GENE
+    )]
     max_reads_per_gene: usize,
 
     /// Deterministic RNG seed used for per-gene downsampling.

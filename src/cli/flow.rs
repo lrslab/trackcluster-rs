@@ -136,16 +136,50 @@ pub struct Args {
     )]
     mod_analysis_thresholds: Vec<crate::cli::mod_aggregate::AnalysisThreshold>,
 
+    /// Modification eligibility policy: exploratory or strict.
+    #[arg(
+        long = "mod-eligibility-profile",
+        requires = "mod_manifest",
+        default_value_t = crate::modification::EligibilityProfile::Exploratory
+    )]
+    pub mod_eligibility_profile: crate::modification::EligibilityProfile,
+
+    /// Minimum independently covering molecules for strict modification eligibility.
+    #[arg(
+        long = "mod-min-covering",
+        requires = "mod_manifest",
+        default_value_t = 20,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub mod_min_covering: u64,
+
     /// Minimum callable molecules for an eligible modification site row.
     #[arg(
         long = "mod-min-callable",
         requires = "mod_manifest",
-        default_value_t = 1,
         value_parser = clap::value_parser!(u64).range(1..)
     )]
-    pub mod_min_callable: u64,
+    pub mod_min_callable: Option<u64>,
 
-    /// Minimum modification read-ID join rate.
+    /// Minimum candidate/covering molecule fraction for strict eligibility.
+    #[arg(
+        long = "mod-min-candidate-rate",
+        requires = "mod_manifest",
+        default_value = "0.8",
+        value_parser = crate::cli::mod_aggregate::parse_rate
+    )]
+    pub mod_min_candidate_rate: f64,
+
+    /// Minimum callable/covering molecule fraction for strict eligibility.
+    #[arg(
+        long = "mod-min-callable-rate",
+        requires = "mod_manifest",
+        default_value = "0.8",
+        value_parser = crate::cli::mod_aggregate::parse_rate
+    )]
+    pub mod_min_callable_rate: f64,
+
+    /// Minimum assigned-read join rate for each sample/assay.
     #[arg(
         long = "mod-min-read-join-rate",
         requires = "mod_manifest",
@@ -155,7 +189,11 @@ pub struct Args {
     pub mod_min_read_join_rate: f64,
 
     /// Emit low-join modification rows as ineligible instead of failing.
-    #[arg(long = "mod-allow-low-join", requires = "mod_manifest")]
+    #[arg(
+        long = "mod-allow-low-global-join",
+        visible_alias = "mod-allow-low-join",
+        requires = "mod_manifest"
+    )]
     pub mod_allow_low_join: bool,
 
     /// Optional explicit contrast specification run after modification aggregation.
@@ -201,7 +239,10 @@ pub struct Args {
     pub downsample_genes: Vec<String>,
 
     /// Per-gene cap: reservoir-sample reads down to this count (set to 0 to disable downsampling).
-    #[arg(long = "max-reads-per-gene", default_value_t = 50000)]
+    #[arg(
+        long = "max-reads-per-gene",
+        default_value_t = crate::flow::config::DEFAULT_MAX_READS_PER_GENE
+    )]
     pub max_reads_per_gene: usize,
 
     /// Deterministic RNG seed used for per-gene downsampling.
@@ -294,7 +335,11 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     } else if !args.mod_analysis_thresholds.is_empty()
         || args.mod_contrasts.is_some()
         || args.mod_reference_fasta.is_some()
-        || args.mod_min_callable != 1
+        || args.mod_min_callable.is_some()
+        || args.mod_eligibility_profile != crate::modification::EligibilityProfile::Exploratory
+        || args.mod_min_covering != 20
+        || args.mod_min_candidate_rate != 0.8
+        || args.mod_min_callable_rate != 0.8
         || args.mod_min_read_join_rate != 0.9
         || args.mod_allow_low_join
     {
@@ -306,7 +351,14 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     let mod_contrasts = args.mod_contrasts.clone();
     let mod_thresholds =
         crate::cli::mod_aggregate::collect_thresholds(args.mod_analysis_thresholds.clone())?;
+    let mod_min_callable = args
+        .mod_min_callable
+        .unwrap_or_else(|| args.mod_eligibility_profile.default_min_callable());
     let mod_output_prefix = args.output_root.join(&args.prefix);
+    if mod_manifest.is_some() {
+        crate::modification::generation::ensure_managed(&mod_output_prefix)?;
+    }
+    crate::modification::generation::invalidate_current(&mod_output_prefix)?;
 
     let result = crate::flow::full::run_full_flow(crate::flow::full::FullFlowOptions {
         cluster_mode: args.cluster_mode,
@@ -367,36 +419,93 @@ pub fn run(args: Args) -> anyhow::Result<()> {
             .unique_read_to_isoform_tsv
             .as_deref()
             .expect("validated unique assignment mode");
-        let mod_result = crate::cli::mod_aggregate::run_with_paths(
+        let generation = crate::modification::generation::begin(&mod_output_prefix).with_context(
+            || {
+                "flow modification generation failed; no current pointer was published and flat modification outputs must not be used"
+            },
+        )?;
+        let generation_outputs = crate::cli::mod_aggregate::AggregateOutputPaths {
+            join_qc: generation.join_qc.clone(),
+            site_join_qc: generation.site_join_qc.clone(),
+            sites: generation.sites.clone(),
+            design: generation.design.clone(),
+        };
+        let generation_options = crate::modification::generation::GenerationOptions::new(
+            mod_thresholds.clone(),
+            args.mod_eligibility_profile,
+            args.mod_min_covering,
+            mod_min_callable,
+            args.mod_min_candidate_rate,
+            args.mod_min_callable_rate,
+            args.mod_min_read_join_rate,
+            args.mod_allow_low_join,
+            args.mod_reference_fasta.is_some(),
+            mod_contrasts.is_some(),
+        );
+        let inputs_before = crate::modification::generation::collect_inputs(
             sample_manifest,
             &result.isoform_bed,
             read_to_isoform,
             mod_manifest,
             args.mod_reference_fasta.as_deref(),
-            mod_thresholds,
-            args.mod_min_callable,
-            args.mod_min_read_join_rate,
-            args.mod_allow_low_join,
-            &mod_output_prefix,
-        )?;
+            mod_contrasts.as_deref(),
+        )
+        .with_context(|| {
+            "flow modification generation failed; no current pointer was published and flat modification outputs must not be used"
+        })?;
+        let generation_result = (|| -> anyhow::Result<_> {
+            let mod_result = crate::cli::mod_aggregate::run_with_output_paths(
+                sample_manifest,
+                &result.isoform_bed,
+                read_to_isoform,
+                mod_manifest,
+                args.mod_reference_fasta.as_deref(),
+                mod_thresholds,
+                args.mod_eligibility_profile,
+                args.mod_min_covering,
+                mod_min_callable,
+                args.mod_min_candidate_rate,
+                args.mod_min_callable_rate,
+                args.mod_min_read_join_rate,
+                args.mod_allow_low_join,
+                &generation_outputs,
+            )?;
+            if let Some(contrasts) = mod_contrasts.as_deref() {
+                crate::cli::mod_contrast::run_with_output_path(
+                    &generation.design,
+                    contrasts,
+                    &generation.contrasts,
+                )?;
+            }
+            let inputs_after = crate::modification::generation::collect_inputs(
+                sample_manifest,
+                &result.isoform_bed,
+                read_to_isoform,
+                mod_manifest,
+                args.mod_reference_fasta.as_deref(),
+                mod_contrasts.as_deref(),
+            )?;
+            if inputs_before != inputs_after {
+                anyhow::bail!("modification inputs changed while the generation was running");
+            }
+            crate::modification::generation::publish(
+                &mod_output_prefix,
+                &generation,
+                inputs_after,
+                generation_options,
+                mod_contrasts.is_some(),
+            )?;
+            Ok(mod_result)
+        })()
+        .with_context(|| {
+            "flow modification generation failed; no current pointer was published and flat modification outputs must not be used"
+        })?;
         eprintln!(
             "flow: modification join_qc_rows={} site_rows={} design_rows={}",
-            mod_result.join_qc.len(),
-            mod_result.sites.len(),
-            mod_result.design.len()
+            generation_result.join_qc.len(),
+            generation_result.sites.len(),
+            generation_result.design.len()
         );
-        match mod_contrasts {
-            Some(contrasts) => {
-                crate::cli::mod_contrast::run(crate::cli::mod_contrast::Args {
-                    design: append_suffix(&mod_output_prefix, ".isoform_mod_design.tsv"),
-                    contrasts,
-                    out: mod_output_prefix.clone(),
-                })?;
-            }
-            None => {
-                remove_stale_optional_output(&mod_output_prefix, MOD_CONTRAST_OUTPUT_SUFFIX)?;
-            }
-        }
     } else {
         remove_stale_modification_outputs(&mod_output_prefix)?;
     }

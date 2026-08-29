@@ -1,4 +1,7 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::cluster::result::ClusterResult;
 use crate::interval::{cluster_by_span, StrandMode};
@@ -80,7 +83,7 @@ pub struct JunctionClusterSummary {
 }
 
 impl JunctionClusterSummary {
-    fn emit(self) {
+    pub(crate) fn emit(self) {
         eprintln!(
             "clusterj: input_reads={} represented_reads={} mapping_rows={} rare_reads={} unmatched_reads={} unused_reads={}",
             self.input_reads,
@@ -117,6 +120,33 @@ impl JunctionCorrectionOptions {
         )?;
         let _ = crate::config::BasePairOffset::new(self.offset);
         Ok(())
+    }
+}
+
+/// Runtime bounds for one `clusterj` invocation (downsample, heartbeat).
+///
+/// Library callers default to no per-locus cap and no heartbeat. The
+/// standalone CLI enables the same 5,000-read locus cap used by `flow`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClusterjRuntimeOptions {
+    /// Reservoir cap per overlapping locus; zero disables downsampling.
+    pub max_reads_per_locus: usize,
+    /// Base seed mixed with chrom, strand, and locus span.
+    pub downsample_seed: u64,
+    /// Heartbeat interval in seconds; zero disables.
+    pub heartbeat_seconds: u64,
+    /// How many in-flight partitions to print when a heartbeat sees no progress.
+    pub heartbeat_top: usize,
+}
+
+impl Default for ClusterjRuntimeOptions {
+    fn default() -> Self {
+        Self {
+            max_reads_per_locus: 0,
+            downsample_seed: 1,
+            heartbeat_seconds: 0,
+            heartbeat_top: 5,
+        }
     }
 }
 
@@ -602,7 +632,10 @@ fn ordered_boundary_matches(a: &[u32], b: &[u32], offset: u32) -> Vec<(usize, us
 }
 
 fn junctions_equal(a: &[u32], b: &[u32], offset: u32) -> bool {
-    a.len() == b.len() && ordered_boundary_matches(a, b, offset).len() == a.len()
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .all(|(left, right)| left.abs_diff(*right) <= offset)
 }
 
 fn compare_ei_by_boundary(a: &[u32], reference: &[u32], offset: u32) -> (Vec<usize>, Vec<usize>) {
@@ -1125,15 +1158,174 @@ fn build_junction_suffix_index<'a>(
 fn build_junction_length_index(
     junctions_cache: &[Vec<u32>],
     target_eligible: &[bool],
-) -> HashMap<usize, Vec<usize>> {
-    let mut length_index: HashMap<usize, Vec<usize>> = HashMap::new();
+) -> HashMap<usize, Vec<(u32, u32, usize)>> {
+    let mut length_index: HashMap<usize, Vec<(u32, u32, usize)>> = HashMap::new();
     for (idx, junctions) in junctions_cache.iter().enumerate() {
         if !target_eligible[idx] || junctions.is_empty() {
             continue;
         }
-        length_index.entry(junctions.len()).or_default().push(idx);
+        let first = junctions[0];
+        let last = *junctions.last().expect("non-empty junctions");
+        length_index
+            .entry(junctions.len())
+            .or_default()
+            .push((first, last, idx));
+    }
+    for bucket in length_index.values_mut() {
+        bucket.sort_unstable_by_key(|(first, last, idx)| (*first, *last, *idx));
     }
     length_index
+}
+
+fn same_length_window_candidates(
+    length_index: &HashMap<usize, Vec<(u32, u32, usize)>>,
+    junctions: &[u32],
+    offset: u32,
+) -> Vec<usize> {
+    if offset == 0 || junctions.is_empty() {
+        return Vec::new();
+    }
+    let Some(bucket) = length_index.get(&junctions.len()) else {
+        return Vec::new();
+    };
+    let first = junctions[0];
+    let last = *junctions.last().expect("non-empty junctions");
+    let lo = first.saturating_sub(offset);
+    let hi = first.saturating_add(offset);
+    let start = bucket.partition_point(|(value, _, _)| *value < lo);
+    let mut out = Vec::new();
+    for &(value, other_last, idx) in &bucket[start..] {
+        if value > hi {
+            break;
+        }
+        if last.abs_diff(other_last) <= offset {
+            out.push(idx);
+        }
+    }
+    out
+}
+
+struct SingleExonTargetIndex {
+    exact_span: HashMap<(u32, u32), Vec<usize>>,
+    single_by_start: Vec<(u32, u32, usize)>,
+    five_prime: Vec<(u32, usize)>,
+    spliced_plus: Vec<(u32, u32, usize)>,
+    spliced_minus: Vec<(u32, u32, usize)>,
+}
+
+impl SingleExonTargetIndex {
+    fn new(tracks: &[Track], junctions_cache: &[Vec<u32>], target_eligible: &[bool]) -> Self {
+        let mut exact_span: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+        let mut single_by_start = Vec::new();
+        let mut five_prime = Vec::new();
+        let mut spliced_plus = Vec::new();
+        let mut spliced_minus = Vec::new();
+
+        for (idx, track) in tracks.iter().enumerate() {
+            if !target_eligible[idx] {
+                continue;
+            }
+            let start = track.tx.tx_start.get();
+            let end = track.tx.tx_end.get();
+            if junctions_cache[idx].is_empty() {
+                exact_span.entry((start, end)).or_default().push(idx);
+                single_by_start.push((start, end, idx));
+                if let Some(pos) = five_prime_position(&track.tx) {
+                    five_prime.push((pos, idx));
+                }
+            } else {
+                let last_junction = *junctions_cache[idx].last().expect("non-empty");
+                match track.tx.strand {
+                    Strand::Plus => spliced_plus.push((last_junction, end, idx)),
+                    Strand::Minus => spliced_minus.push((start, last_junction, idx)),
+                    Strand::Unknown => {}
+                }
+            }
+        }
+
+        single_by_start.sort_unstable_by_key(|(start, end, idx)| (*start, *end, *idx));
+        five_prime.sort_unstable_by_key(|(pos, idx)| (*pos, *idx));
+        spliced_plus.sort_unstable_by_key(|(last, end, idx)| (*last, *end, *idx));
+        spliced_minus.sort_unstable_by_key(|(start, last, idx)| (*start, *last, *idx));
+
+        Self {
+            exact_span,
+            single_by_start,
+            five_prime,
+            spliced_plus,
+            spliced_minus,
+        }
+    }
+
+    fn candidates(
+        &self,
+        source_idx: usize,
+        source: &Transcript,
+        sl_options: SlMergeOptions,
+    ) -> Vec<usize> {
+        let start = source.tx_start.get();
+        let end = source.tx_end.get();
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        let mut push = |idx: usize| {
+            if idx != source_idx && seen.insert(idx) {
+                out.push(idx);
+            }
+        };
+
+        if let Some(ids) = self.exact_span.get(&(start, end)) {
+            for &idx in ids {
+                push(idx);
+            }
+        }
+
+        let prefix = self
+            .single_by_start
+            .partition_point(|(other_start, _, _)| *other_start < start);
+        for &(_, other_end, idx) in &self.single_by_start[..prefix] {
+            if other_end > end {
+                push(idx);
+            }
+        }
+
+        if let Some(five_prime_pos) = five_prime_position(source) {
+            let lo = five_prime_pos.saturating_sub(sl_options.partial_five_prime_end_offset);
+            let hi = five_prime_pos.saturating_add(sl_options.partial_five_prime_end_offset);
+            let window_start = self.five_prime.partition_point(|(pos, _)| *pos < lo);
+            for &(pos, idx) in &self.five_prime[window_start..] {
+                if pos > hi {
+                    break;
+                }
+                push(idx);
+            }
+        }
+
+        match source.strand {
+            Strand::Plus => {
+                let prefix = self
+                    .spliced_plus
+                    .partition_point(|(last_junction, _, _)| *last_junction <= start);
+                for &(_, tx_end, idx) in &self.spliced_plus[..prefix] {
+                    if end <= tx_end {
+                        push(idx);
+                    }
+                }
+            }
+            Strand::Minus => {
+                let prefix = self
+                    .spliced_minus
+                    .partition_point(|(tx_start, _, _)| *tx_start <= start);
+                for &(_, last_junction, idx) in &self.spliced_minus[..prefix] {
+                    if end <= last_junction {
+                        push(idx);
+                    }
+                }
+            }
+            Strand::Unknown => {}
+        }
+
+        out
+    }
 }
 
 fn build_exact_duplicate_representatives<'a>(
@@ -1224,6 +1416,7 @@ fn junction_simple_merge_with_options(
 
     let suffix_index = build_junction_suffix_index(&junctions_cache, &target_eligible);
     let length_index = build_junction_length_index(&junctions_cache, &target_eligible);
+    let single_exon_index = SingleExonTargetIndex::new(tracks, &junctions_cache, &target_eligible);
 
     let mut dropped: Vec<bool> = vec![false; tracks.len()];
     for i in 0..tracks.len() {
@@ -1233,14 +1426,8 @@ fn junction_simple_merge_with_options(
 
         let junctions_i = &junctions_cache[i];
         if junctions_i.is_empty() {
-            for j in 0..tracks.len() {
-                if i == j {
-                    continue;
-                }
+            for j in single_exon_index.candidates(i, &tracks[i].tx, sl_options) {
                 if dropped[j] && !is_reference[j] {
-                    continue;
-                }
-                if !target_eligible[j] {
                     continue;
                 }
 
@@ -1270,10 +1457,9 @@ fn junction_simple_merge_with_options(
         }
 
         let exact_candidates = suffix_index.get(junctions_i.as_slice());
-        let same_length_candidates = (same_junction_offset > 0)
-            .then(|| length_index.get(&junctions_i.len()))
-            .flatten();
-        if exact_candidates.is_none() && same_length_candidates.is_none() {
+        let same_length_candidates =
+            same_length_window_candidates(&length_index, junctions_i, same_junction_offset);
+        if exact_candidates.is_none() && same_length_candidates.is_empty() {
             continue;
         }
 
@@ -1281,7 +1467,7 @@ fn junction_simple_merge_with_options(
         for &j in exact_candidates
             .into_iter()
             .flatten()
-            .chain(same_length_candidates.into_iter().flatten())
+            .chain(same_length_candidates.iter())
         {
             if !seen_candidates.insert(j) {
                 continue;
@@ -1560,29 +1746,16 @@ fn batch_junction_simple_merge(
     }
 
     let (refs, reads) = split_reference_and_read_tracks(tracks);
-    if reads.len() <= batch_size {
-        let mut combined: Vec<Track> = Vec::with_capacity(refs.len() + reads.len());
-        combined.extend(refs);
-        combined.extend(reads);
-        return merge_one_batch(
-            combined,
-            sw_score,
-            sl_options,
-            three_prime_options,
-            same_junction_offset,
-        );
-    }
-
-    let (merged, _) = merge_read_batches(
-        &refs,
-        reads,
-        batch_size,
+    let mut combined: Vec<Track> = Vec::with_capacity(refs.len() + reads.len());
+    combined.extend(refs);
+    combined.extend(reads);
+    merge_one_batch(
+        combined,
         sw_score,
         sl_options,
         three_prime_options,
         same_junction_offset,
-    );
-    merged
+    )
 }
 
 fn build_read_to_isoform(isoforms: &[Track]) -> Vec<(String, String)> {
@@ -1697,12 +1870,96 @@ struct PartitionResult {
     represented_read_indices: HashSet<usize>,
     rare_read_indices: Vec<usize>,
     unmatched_read_indices: Vec<usize>,
+    downsampled_read_indices: Vec<usize>,
 }
 
 struct WorkItem {
     index: usize,
+    key: PartitionKey,
     ref_indices: Vec<usize>,
     read_indices: Vec<usize>,
+}
+
+#[derive(Default)]
+struct PartitionWorkerState {
+    key: Option<String>,
+    started_at: Option<Instant>,
+}
+
+fn seed_for_locus(base_seed: u64, tracks: &[Track]) -> u64 {
+    let mut hash = crate::rng::fnv1a64(b"clusterj-locus");
+    if let Some(first) = tracks.first() {
+        crate::rng::update_fnv1a64(&mut hash, first.tx.chrom.as_bytes());
+        crate::rng::update_fnv1a64(&mut hash, &[first.tx.strand.as_char() as u8]);
+    }
+    let start = tracks
+        .iter()
+        .map(|track| track.tx.tx_start.get())
+        .min()
+        .unwrap_or(0);
+    let end = tracks
+        .iter()
+        .map(|track| track.tx.tx_end.get())
+        .max()
+        .unwrap_or(0);
+    crate::rng::update_fnv1a64(&mut hash, &start.to_le_bytes());
+    crate::rng::update_fnv1a64(&mut hash, &end.to_le_bytes());
+    crate::rng::update_fnv1a64(&mut hash, &(tracks.len() as u64).to_le_bytes());
+    base_seed ^ hash
+}
+
+fn downsample_locus_tracks(
+    tracks: Vec<Track>,
+    runtime: ClusterjRuntimeOptions,
+    downsampled_read_indices: &mut Vec<usize>,
+) -> Vec<Track> {
+    if runtime.max_reads_per_locus == 0 {
+        return tracks;
+    }
+
+    let (refs, reads) = split_reference_and_read_tracks(tracks);
+    let original_reads = reads.len();
+    if original_reads <= runtime.max_reads_per_locus {
+        let mut combined = refs;
+        combined.extend(reads);
+        return combined;
+    }
+
+    let seed = seed_for_locus(runtime.downsample_seed, &reads);
+    let keep =
+        crate::rng::reservoir_sample_indices(original_reads, runtime.max_reads_per_locus, seed);
+    let mut keep_mask = vec![false; original_reads];
+    for idx in &keep {
+        keep_mask[*idx] = true;
+    }
+
+    let mut sampled = Vec::with_capacity(keep.len());
+    for (idx, track) in reads.into_iter().enumerate() {
+        if keep_mask[idx] {
+            sampled.push(track);
+        } else {
+            downsampled_read_indices.extend(track.subreads.iter().map(|subread| subread.index));
+        }
+    }
+
+    eprintln!(
+        "clusterj: subsample locus chrom={} strand={} original_reads={} sampled_reads={} seed={}",
+        refs.first()
+            .or(sampled.first())
+            .map(|track| track.tx.chrom.as_str())
+            .unwrap_or("none"),
+        refs.first()
+            .or(sampled.first())
+            .map(|track| track.tx.strand.as_char())
+            .unwrap_or('.'),
+        original_reads,
+        sampled.len(),
+        seed
+    );
+
+    let mut combined = refs;
+    combined.extend(sampled);
+    combined
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1718,6 +1975,7 @@ fn process_partition(
     sl_options: SlMergeOptions,
     three_prime_options: ThreePrimeMergeOptions,
     junction_correction: JunctionCorrectionOptions,
+    runtime: ClusterjRuntimeOptions,
 ) -> PartitionResult {
     let mut tracks: Vec<Track> = Vec::with_capacity(ref_indices.len() + read_indices.len());
     for &idx in ref_indices {
@@ -1730,6 +1988,7 @@ fn process_partition(
     let mut kept: Vec<Track> = Vec::new();
     let mut rare_read_indices: Vec<usize> = Vec::new();
     let mut unmatched_read_indices: Vec<usize> = Vec::new();
+    let mut downsampled_read_indices: Vec<usize> = Vec::new();
 
     // Split before junction correction so a read at a disjoint locus cannot borrow junction
     // support from an unrelated reference on the same chromosome and strand. This matches the
@@ -1744,6 +2003,8 @@ fn process_partition(
             continue;
         }
 
+        let locus_tracks =
+            downsample_locus_tracks(locus_tracks, runtime, &mut downsampled_read_indices);
         let (corrected, rare) = flow_junction_correct(
             locus_tracks,
             junction_correction.min_support,
@@ -1803,6 +2064,7 @@ fn process_partition(
         represented_read_indices,
         rare_read_indices,
         unmatched_read_indices,
+        downsampled_read_indices,
     }
 }
 
@@ -1991,6 +2253,36 @@ pub fn try_clusterj_with_options_and_summary(
     three_prime_options: ThreePrimeMergeOptions,
     junction_correction: JunctionCorrectionOptions,
 ) -> Result<(ClusterResult, JunctionClusterSummary), crate::config::ParameterError> {
+    try_clusterj_with_runtime_options_and_summary(
+        reads,
+        references,
+        threads,
+        sw_score,
+        batch_size,
+        batch_rounds,
+        name2_mode,
+        sl_options,
+        three_prime_options,
+        junction_correction,
+        ClusterjRuntimeOptions::default(),
+    )
+}
+
+/// Junction-cluster with summary output and explicit runtime bounds.
+#[allow(clippy::too_many_arguments)]
+pub fn try_clusterj_with_runtime_options_and_summary(
+    reads: &[Transcript],
+    references: Option<&[Transcript]>,
+    threads: usize,
+    sw_score: i64,
+    batch_size: usize,
+    batch_rounds: usize,
+    name2_mode: Name2Mode,
+    sl_options: SlMergeOptions,
+    three_prime_options: ThreePrimeMergeOptions,
+    junction_correction: JunctionCorrectionOptions,
+    runtime: ClusterjRuntimeOptions,
+) -> Result<(ClusterResult, JunctionClusterSummary), crate::config::ParameterError> {
     let threads = crate::config::WorkerThreads::new(threads)?.get();
     crate::config::BatchRounds::new(batch_rounds)?;
     sl_options.validate()?;
@@ -2059,14 +2351,91 @@ pub fn try_clusterj_with_options_and_summary(
     for (index, key) in keys.iter().enumerate() {
         work.push(WorkItem {
             index,
+            key: key.clone(),
             ref_indices: refs_by_key.remove(key).unwrap_or_default(),
             read_indices: reads_by_key.remove(key).unwrap_or_default(),
         });
     }
 
+    let started = Instant::now();
+    let total = keys.len();
+    let done = Arc::new(AtomicUsize::new(0));
+    let worker_count = if threads == 1 || work.len() <= 1 {
+        1
+    } else {
+        threads.min(keys.len().max(1))
+    };
+    let worker_states: Arc<Vec<Mutex<PartitionWorkerState>>> = Arc::new(
+        (0..worker_count)
+            .map(|_| Mutex::new(PartitionWorkerState::default()))
+            .collect(),
+    );
+    let (heartbeat_stop_tx, heartbeat_handle) = if runtime.heartbeat_seconds > 0 && total > 0 {
+        use std::sync::mpsc::RecvTimeoutError;
+
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+        let done = Arc::clone(&done);
+        let worker_states = Arc::clone(&worker_states);
+        let heartbeat_seconds = runtime.heartbeat_seconds;
+        let heartbeat_top = runtime.heartbeat_top.max(1);
+        let handle = std::thread::spawn(move || {
+            let mut last_done = done.load(Ordering::Relaxed);
+            loop {
+                match stop_rx.recv_timeout(Duration::from_secs(heartbeat_seconds)) {
+                    Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+                    Err(RecvTimeoutError::Timeout) => {}
+                }
+
+                let done_now = done.load(Ordering::Relaxed);
+                eprintln!(
+                    "heartbeat: {done_now}/{total} elapsed={:?}",
+                    started.elapsed()
+                );
+                if done_now == last_done && done_now < total {
+                    let mut inflight = Vec::new();
+                    for state_lock in worker_states.iter() {
+                        let Ok(state) = state_lock.lock() else {
+                            continue;
+                        };
+                        let (Some(key), Some(started_at)) = (state.key.as_ref(), state.started_at)
+                        else {
+                            continue;
+                        };
+                        inflight.push((key.clone(), started_at.elapsed()));
+                    }
+                    if inflight.is_empty() {
+                        eprintln!("heartbeat: no in-flight partitions (all workers idle?)");
+                    } else {
+                        inflight.sort_by(|left, right| right.1.cmp(&left.1));
+                        let mut line = String::from("in_flight(top):");
+                        for (key, duration) in inflight.into_iter().take(heartbeat_top) {
+                            line.push(' ');
+                            line.push_str(&format!("{key}={:.1}s", duration.as_secs_f64()));
+                        }
+                        eprintln!("{line}");
+                    }
+                }
+                last_done = done_now;
+                if done_now >= total {
+                    break;
+                }
+            }
+        });
+        (Some(stop_tx), Some(handle))
+    } else {
+        (None, None)
+    };
+
     let mut parts: Vec<Option<PartitionResult>> = (0..keys.len()).map(|_| None).collect();
     if threads == 1 || work.len() <= 1 {
         for item in work {
+            let label = format!("{}:{}", item.key.chrom, item.key.strand.as_char());
+            if let Ok(mut state) = worker_states[0].lock() {
+                *state = PartitionWorkerState {
+                    key: Some(label),
+                    started_at: Some(Instant::now()),
+                };
+            }
             parts[item.index] = Some(process_partition(
                 references,
                 reads,
@@ -2079,19 +2448,23 @@ pub fn try_clusterj_with_options_and_summary(
                 sl_options,
                 three_prime_options,
                 junction_correction,
+                runtime,
             ));
+            if let Ok(mut state) = worker_states[0].lock() {
+                *state = PartitionWorkerState::default();
+            }
+            done.fetch_add(1, Ordering::Relaxed);
         }
     } else {
-        use std::sync::{mpsc, Arc, Mutex};
-
         let queue = Arc::new(Mutex::new(work));
-        let (tx, rx) = mpsc::channel::<(usize, PartitionResult)>();
+        let (tx, rx) = std::sync::mpsc::channel::<(usize, PartitionResult)>();
 
-        let worker_count = threads.min(keys.len());
         std::thread::scope(|scope| {
-            for _ in 0..worker_count {
+            for worker_idx in 0..worker_count {
                 let queue = Arc::clone(&queue);
                 let tx = tx.clone();
+                let done = Arc::clone(&done);
+                let worker_states = Arc::clone(&worker_states);
 
                 scope.spawn(move || loop {
                     let item = {
@@ -2102,6 +2475,13 @@ pub fn try_clusterj_with_options_and_summary(
                         break;
                     };
 
+                    let label = format!("{}:{}", item.key.chrom, item.key.strand.as_char());
+                    if let Ok(mut state) = worker_states[worker_idx].lock() {
+                        *state = PartitionWorkerState {
+                            key: Some(label),
+                            started_at: Some(Instant::now()),
+                        };
+                    }
                     let result = process_partition(
                         references,
                         reads,
@@ -2114,7 +2494,12 @@ pub fn try_clusterj_with_options_and_summary(
                         sl_options,
                         three_prime_options,
                         junction_correction,
+                        runtime,
                     );
+                    if let Ok(mut state) = worker_states[worker_idx].lock() {
+                        *state = PartitionWorkerState::default();
+                    }
+                    done.fetch_add(1, Ordering::Relaxed);
                     if tx.send((item.index, result)).is_err() {
                         break;
                     }
@@ -2129,18 +2514,29 @@ pub fn try_clusterj_with_options_and_summary(
         });
     }
 
+    if let Some(tx) = heartbeat_stop_tx {
+        let _ = tx.send(());
+    }
+    if let Some(handle) = heartbeat_handle {
+        let _ = handle.join();
+    }
+
+    let mut downsampled_read_indices: Vec<usize> = Vec::new();
     for part in parts.into_iter().flatten() {
         all_isoforms.extend(part.isoforms);
         all_pairs.extend(part.pairs);
         represented_read_indices.extend(part.represented_read_indices);
         rare_read_indices.extend(part.rare_read_indices);
         unmatched_read_indices.extend(part.unmatched_read_indices);
+        downsampled_read_indices.extend(part.downsampled_read_indices);
     }
 
     rare_read_indices.sort_unstable();
     unmatched_read_indices.sort_unstable();
+    downsampled_read_indices.sort_unstable();
     let mut unused_read_indices = rare_read_indices.clone();
     unused_read_indices.extend(unmatched_read_indices.iter().copied());
+    unused_read_indices.extend(downsampled_read_indices.iter().copied());
     unused_read_indices.sort_unstable();
 
     let unused_instance_set: HashSet<usize> = unused_read_indices.iter().copied().collect();
@@ -4020,5 +4416,157 @@ mod tests {
             },
         )
         .is_err());
+    }
+
+    #[test]
+    fn single_exon_index_candidates_cover_naive_merges_and_stay_sparse() {
+        let sl = SlMergeOptions::default();
+        let mut tracks = vec![make_track(
+            "long",
+            Strand::Plus,
+            &[(0, 5000)],
+            "nanopore_read",
+            1,
+        )];
+        for index in 0..40 {
+            let start = 100 + index * 120;
+            tracks.push(make_track(
+                &format!("short_{index}"),
+                Strand::Plus,
+                &[(start, start + 40)],
+                "nanopore_read",
+                1,
+            ));
+        }
+        let junctions: Vec<Vec<u32>> = tracks
+            .iter()
+            .map(|track| junction_positions(&track.tx))
+            .collect();
+        let eligible = vec![true; tracks.len()];
+        let index = SingleExonTargetIndex::new(&tracks, &junctions, &eligible);
+        let mut candidate_count = 0usize;
+        let mut naive_merge_count = 0usize;
+        for i in 0..tracks.len() {
+            let indexed: HashSet<_> = index.candidates(i, &tracks[i].tx, sl).into_iter().collect();
+            candidate_count += indexed.len();
+            for j in 0..tracks.len() {
+                if i == j {
+                    continue;
+                }
+                if single_exon_merge_kind(&tracks[i].tx, &tracks[j].tx, &junctions[j], sl).is_some()
+                {
+                    naive_merge_count += 1;
+                    assert!(
+                        indexed.contains(&j),
+                        "index missed merge candidate {i}->{j}"
+                    );
+                }
+            }
+        }
+        let naive_pairs = tracks.len() * (tracks.len() - 1);
+        assert!(naive_merge_count > 0);
+        assert!(
+            candidate_count < naive_pairs / 4,
+            "candidate_count={candidate_count} naive_pairs={naive_pairs}"
+        );
+    }
+
+    #[test]
+    fn fuzzy_same_junction_window_skips_far_first_junctions() {
+        let junctions = [
+            vec![100u32, 200, 300],
+            vec![102, 204, 298],
+            vec![400, 500, 600],
+        ];
+        let eligible = [true, true, true];
+        let index = build_junction_length_index(&junctions, &eligible);
+        let near = same_length_window_candidates(&index, &junctions[0], 5);
+        assert!(near.contains(&1));
+        assert!(!near.contains(&2));
+        assert!(!junctions_equal(&junctions[0], &junctions[2], 5));
+        assert!(junctions_equal(&junctions[0], &junctions[1], 5));
+    }
+
+    #[test]
+    fn batched_merge_collapses_cross_batch_same_junction_reads() {
+        let mut tracks = vec![make_track(
+            "ref",
+            Strand::Plus,
+            &[(50, 400)],
+            "isoform_anno",
+            100,
+        )];
+        for index in 0..6 {
+            tracks.push(make_track(
+                &format!("read_{index}"),
+                Strand::Plus,
+                &[(100, 150), (200, 250), (300, 350)],
+                "nanopore_read",
+                1,
+            ));
+        }
+        let merged = batch_junction_simple_merge(
+            tracks,
+            DEFAULT_SW_SCORE,
+            2,
+            100,
+            SlMergeOptions::default(),
+            ThreePrimeMergeOptions::default(),
+            10,
+        );
+        let isoform = merged
+            .iter()
+            .find(|track| track.is_read())
+            .expect("merged read isoform");
+        assert_eq!(merged.iter().filter(|track| track.is_read()).count(), 1);
+        for index in 0..6 {
+            assert!(has_subread(isoform, &format!("read_{index}")));
+        }
+    }
+
+    #[test]
+    fn locus_read_cap_sends_dropped_reads_to_unused() {
+        let refs = vec![make_tx(
+            "ref",
+            Strand::Plus,
+            &[(0, 500)],
+            "isoform_anno",
+            100,
+        )];
+        let reads = (0..10)
+            .map(|index| {
+                make_tx(
+                    &format!("read_{index}"),
+                    Strand::Plus,
+                    &[(100, 200)],
+                    "nanopore_read",
+                    1,
+                )
+            })
+            .collect::<Vec<_>>();
+        let (result, summary) = try_clusterj_with_runtime_options_and_summary(
+            &reads,
+            Some(&refs),
+            1,
+            DEFAULT_SW_SCORE,
+            500,
+            100,
+            Name2Mode::Coverage,
+            SlMergeOptions::default(),
+            ThreePrimeMergeOptions::default(),
+            JunctionCorrectionOptions::default(),
+            ClusterjRuntimeOptions {
+                max_reads_per_locus: 3,
+                downsample_seed: 7,
+                heartbeat_seconds: 0,
+                heartbeat_top: 5,
+            },
+        )
+        .unwrap();
+        assert_eq!(summary.represented_reads, 3);
+        assert_eq!(summary.unmatched_reads, 0);
+        assert_eq!(summary.unused_reads, 7);
+        assert_eq!(result.unused.len(), 7);
+        assert_eq!(result.read_to_isoform.len(), 3);
     }
 }

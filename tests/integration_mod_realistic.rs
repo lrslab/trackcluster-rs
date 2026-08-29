@@ -184,6 +184,7 @@ fn multi_sample_isoform_condition_effects_recover_known_integer_truth() {
         source_emission_threshold: None,
         source_site_filter: "shared_exon_site".to_owned(),
         candidate_observations_complete: true,
+        provenance_status: trackcluster_rs::modification::ProvenanceStatus::UserDeclared,
         implicit_skip_policy: ImplicitSkipPolicy::NotApplicable,
         coordinate_source: "synthetic_genomic_truth".to_owned(),
         read_id_mapping: "sample_prefixed_simulated_read".to_owned(),
@@ -304,6 +305,7 @@ fn multi_sample_isoform_condition_effects_recover_known_integer_truth() {
         assert_eq!(row["input_rows"], "82");
         assert_eq!(row["joined_rows"], "80");
         assert_eq!(row["joined_reads"], "80");
+        assert_eq!(row["assigned_reads"], "80");
         assert_eq!(row["unknown_read"], "2");
         assert!(value_as_f64(row, "read_join_rate") > 0.97);
         assert_eq!(row["candidate_observations_complete"], "true");

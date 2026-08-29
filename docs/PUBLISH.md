@@ -19,6 +19,7 @@ will be tagged.
   - `docs/FORMATS.md`
   - `docs/MODIFICATION_VALIDATION.md`
   - `docs/INTERCHANGE.md`
+  - `docs/RUST_API.md`
   - `docs/behavior/`
 - Run every README quickstart backed by the checked-in `examples/` inputs, and
   confirm the generated-BAM integration test covers the unbundled `bam2bigg`
@@ -96,10 +97,10 @@ build runner.
 
 Each binary archive contains `trackcluster`, `clusterj_batch`,
 `scripts/run_full_flow_rust.sh`, `README.md`, `CHANGELOG.md`, both license files,
-the core CLI/pipeline/format/interchange and behavior documentation, and the
-complete synthetic `examples/` directory. The workflow verifies this required
-file set, rejects parent-directory entries, rejects README references to
-repository-only fixtures/internal demos, and smoke-tests the unpacked Linux
+the core CLI/pipeline/format/interchange/Rust-API and behavior documentation,
+and the complete synthetic `examples/` directory. The workflow verifies this
+required file set, rejects parent-directory entries, rejects README references
+to repository-only fixtures/internal demos, and smoke-tests the unpacked Linux
 archive, including the packaged full-flow script. The curated changelog section
 is prepended to GitHub's generated commit/PR notes.
 

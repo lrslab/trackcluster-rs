@@ -2,6 +2,22 @@ use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
 use anyhow::Context;
+use clap::ValueEnum;
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum InvalidRecordPolicyArg {
+    Skip,
+    Fail,
+}
+
+impl From<InvalidRecordPolicyArg> for crate::io::bam::InvalidRecordPolicy {
+    fn from(value: InvalidRecordPolicyArg) -> Self {
+        match value {
+            InvalidRecordPolicyArg::Skip => Self::Skip,
+            InvalidRecordPolicyArg::Fail => Self::Fail,
+        }
+    }
+}
 
 #[derive(clap::Args, Debug)]
 pub struct Args {
@@ -38,6 +54,14 @@ pub struct Args {
     /// Include alignments marked supplementary (0x800)
     #[arg(long)]
     pub include_supplementary: bool,
+
+    /// Skip an invalid decoded record, or fail the entire conversion
+    #[arg(
+        long = "invalid-record-policy",
+        value_enum,
+        default_value_t = InvalidRecordPolicyArg::Skip
+    )]
+    invalid_record_policy: InvalidRecordPolicyArg,
 }
 
 fn default_group(path: &std::path::Path) -> String {
@@ -53,6 +77,7 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         min_mapq: args.score,
         include_secondary: args.include_secondary,
         include_supplementary: args.include_supplementary,
+        invalid_record_policy: args.invalid_record_policy.into(),
         group: args.group.unwrap_or_else(|| default_group(&args.bamfile)),
     };
     let summary = crate::flow::artifact_manifest::atomic_write_with(&args.out, |temporary| {
@@ -65,13 +90,23 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         Ok(summary)
     })?;
     eprintln!(
-        "bam2bigg: total={} records={} skipped_unmapped={} skipped_secondary={} skipped_supplementary={} skipped_below_mapq={}",
+        "bam2bigg: total={} records={} skipped_unmapped={} skipped_secondary={} skipped_supplementary={} skipped_below_mapq={} skipped_invalid={}",
         summary.total_records,
         summary.converted_records,
         summary.skipped_unmapped,
         summary.skipped_secondary,
         summary.skipped_supplementary,
-        summary.skipped_below_mapq
+        summary.skipped_below_mapq,
+        summary.skipped_invalid_records()
     );
+    for (reason, stats) in &summary.invalid_records {
+        eprintln!(
+            "bam2bigg: invalid_record_reason={} records={} first_record={} first_error={:?}",
+            reason.as_str(),
+            stats.count,
+            stats.first_record_ordinal,
+            stats.first_error
+        );
+    }
     Ok(())
 }
