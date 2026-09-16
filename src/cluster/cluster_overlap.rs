@@ -44,6 +44,7 @@ struct FilterParams {
     cutoff: f64,
     intron_weight: f64,
     sw_score: i64,
+    sl_five_prime_merge_offset: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -135,6 +136,8 @@ pub struct ClusterOptions {
     pub cutoff2: f64,
     pub intron_weight: f64,
     pub sw_score: i64,
+    /// SL-supported reads may collapse when biological 5' ends are this close.
+    pub sl_five_prime_merge_offset: u32,
     pub name2_mode: Name2Mode,
     pub batch_size: usize,
     pub batch_rounds: usize,
@@ -147,6 +150,8 @@ impl Default for ClusterOptions {
             cutoff2: DEFAULT_CUTOFF2,
             intron_weight: DEFAULT_INTRON_WEIGHT,
             sw_score: DEFAULT_SW_SCORE,
+            sl_five_prime_merge_offset:
+                crate::cluster::clusterj::DEFAULT_SL_PARTIAL_FIVE_PRIME_END_OFFSET,
             name2_mode: Name2Mode::Full,
             batch_size: 0,
             batch_rounds: 100,
@@ -390,8 +395,38 @@ fn readall_subset(tracks: &[Track], keep: &HashSet<usize>) -> HashSet<usize> {
     instances
 }
 
-fn should_drop_read(track: &Track, mode: DistanceMode, sw_score: i64) -> bool {
-    mode == DistanceMode::Ratio || sw_score < 0 || i64::from(track.tx.score) < sw_score
+fn should_drop_read(
+    track: &Track,
+    container: &Track,
+    container_dropped: bool,
+    params: FilterParams,
+) -> bool {
+    if params.mode == DistanceMode::Ratio
+        || params.sw_score < 0
+        || i64::from(track.tx.score) < params.sw_score
+    {
+        return true;
+    }
+    // The second-pass SL exception must retain a live, independently SL-scored
+    // representative; copying subreads into a plain or dropped read loses that
+    // evidence in later pairs or batches. References keep their identity rule.
+    if container.is_read() && (container_dropped || i64::from(container.tx.score) < params.sw_score)
+    {
+        return false;
+    }
+    if track.tx.chrom != container.tx.chrom || track.tx.strand != container.tx.strand {
+        return false;
+    }
+    let delta = match track.tx.strand {
+        Strand::Plus => track
+            .tx
+            .tx_start
+            .get()
+            .abs_diff(container.tx.tx_start.get()),
+        Strand::Minus => track.tx.tx_end.get().abs_diff(container.tx.tx_end.get()),
+        Strand::Unknown => return false,
+    };
+    delta <= params.sl_five_prime_merge_offset
 }
 
 fn filter_pair(
@@ -420,30 +455,32 @@ fn filter_pair(
     match (tracks[i].is_reference(), tracks[j].is_reference()) {
         (true, true) => {}
         (true, false) => {
-            if should_drop_read(&tracks[j], params.mode, params.sw_score) {
+            if should_drop_read(&tracks[j], &tracks[i], drop.contains(&i), params) {
                 drop.insert(j);
                 merge_subreads(j, i, tracks);
             }
         }
         (false, true) => {
-            if should_drop_read(&tracks[i], params.mode, params.sw_score) {
+            if should_drop_read(&tracks[i], &tracks[j], drop.contains(&j), params) {
                 drop.insert(i);
                 merge_subreads(i, j, tracks);
             }
         }
         (false, false) => match li.cmp(&lj) {
             std::cmp::Ordering::Less => {
-                if should_drop_read(&tracks[i], params.mode, params.sw_score) {
+                if should_drop_read(&tracks[i], &tracks[j], drop.contains(&j), params) {
                     drop.insert(i);
                     merge_subreads(i, j, tracks);
                 }
             }
             std::cmp::Ordering::Equal => {
+                // Intentional legacy representative selection for similar
+                // equal-length reads, including SL-supported pairs.
                 drop.insert(i);
                 merge_subreads(i, j, tracks);
             }
             std::cmp::Ordering::Greater => {
-                if should_drop_read(&tracks[j], params.mode, params.sw_score) {
+                if should_drop_read(&tracks[j], &tracks[i], drop.contains(&i), params) {
                     drop.insert(j);
                     merge_subreads(j, i, tracks);
                 }
@@ -458,6 +495,7 @@ fn filter_pass(
     cutoff: f64,
     intron_weight: f64,
     sw_score: i64,
+    sl_five_prime_merge_offset: u32,
 ) -> Vec<Track> {
     let mut tracks = tracks;
     let mut drop: HashSet<usize> = HashSet::new();
@@ -466,6 +504,7 @@ fn filter_pass(
         cutoff,
         intron_weight,
         sw_score,
+        sl_five_prime_merge_offset,
     };
 
     if should_use_sparse_pair_candidates(tracks.len(), cutoff, intron_weight) {
@@ -653,6 +692,7 @@ fn cluster_once(tracks: Vec<Track>, options: ClusterOptions) -> Vec<Track> {
         options.cutoff1,
         options.intron_weight,
         options.sw_score,
+        options.sl_five_prime_merge_offset,
     );
     filter_pass(
         tracks,
@@ -660,6 +700,7 @@ fn cluster_once(tracks: Vec<Track>, options: ClusterOptions) -> Vec<Track> {
         options.cutoff2,
         options.intron_weight,
         options.sw_score,
+        options.sl_five_prime_merge_offset,
     )
 }
 
@@ -1789,6 +1830,226 @@ mod tests {
             .collect();
         assert_eq!(single_names, batch_names);
         assert_eq!(single_names, oversized_names);
+    }
+
+    fn sl_window_test_tx(name: &str, strand: Strand, start: u32, end: u32) -> Transcript {
+        let exon = if strand == Strand::Minus {
+            (2000 - end, 2000 - start)
+        } else {
+            (start, end)
+        };
+        make_tx(
+            name,
+            strand,
+            &[exon],
+            "nanopore_read",
+            DEFAULT_SW_SCORE as u32,
+        )
+    }
+
+    #[test]
+    fn sl_evidence_cannot_be_lost_through_non_sl_intermediate() {
+        for strand in [Strand::Plus, Strand::Minus] {
+            let transcript = |name: &str, start: u32, end: u32, score: u32| {
+                let exons = if strand == Strand::Minus {
+                    vec![(2000 - end, 1500), (1800, 2000 - start)]
+                } else {
+                    vec![(start, 200), (500, end)]
+                };
+                make_tx(name, strand, &exons, "nanopore_read", score)
+            };
+            let refs = vec![transcript("ref", 0, 1200, 100)];
+            for score in [DEFAULT_SW_SCORE as u32, 20] {
+                let reads = vec![
+                    transcript("sl", 100, 800, score),
+                    transcript("long_non_sl", 100, 1000, 0),
+                    transcript("late_non_sl", 150, 1100, 0),
+                ];
+                let sl_id = crate::identity::novel_isoform_id(&reads[0]);
+                for batch_size in [0, 1, 2, 3] {
+                    for sw_score in [DEFAULT_SW_SCORE, -1] {
+                        let result = cluster_with_options(
+                            &reads,
+                            Some(&refs),
+                            1,
+                            ClusterOptions {
+                                batch_size,
+                                sw_score,
+                                ..ClusterOptions::default()
+                            },
+                        );
+                        let protected = sw_score >= 0;
+                        assert_eq!(
+                            result.isoforms.len(),
+                            if protected { 2 } else { 1 },
+                            "{strand:?} score={score} sw={sw_score} batch={batch_size}"
+                        );
+                        if protected {
+                            let sl = result.isoforms.iter().find(|tx| tx.name == sl_id).unwrap();
+                            assert_eq!(sl.exons, reads[0].exons);
+                            assert_eq!(sl.score, score);
+                        }
+                        assert_eq!(
+                            result.read_to_isoform,
+                            vec![
+                                ("late_non_sl".to_owned(), "ref".to_owned()),
+                                ("long_non_sl".to_owned(), "ref".to_owned()),
+                                (
+                                    "sl".to_owned(),
+                                    if protected {
+                                        sl_id.clone()
+                                    } else {
+                                        "ref".to_owned()
+                                    },
+                                ),
+                            ]
+                        );
+                        assert!(result.unused.is_empty());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sl_merge_exception_requires_a_live_sl_read_container() {
+        for strand in [Strand::Plus, Strand::Minus] {
+            for score in [DEFAULT_SW_SCORE as u32 - 1, DEFAULT_SW_SCORE as u32] {
+                for already_dropped in [false, true] {
+                    for reverse in [false, true] {
+                        let short = Track::read(sl_window_test_tx("short", strand, 100, 800), 0);
+                        let mut long = Track::read(sl_window_test_tx("long", strand, 100, 1000), 1);
+                        long.tx.score = score;
+                        let mut tracks = vec![short, long];
+                        let (source, container) = if reverse {
+                            tracks.reverse();
+                            (1, 0)
+                        } else {
+                            (0, 1)
+                        };
+                        let mut dropped = HashSet::new();
+                        if already_dropped {
+                            dropped.insert(container);
+                        }
+                        let pair = PairDistance {
+                            left: 0,
+                            right: 1,
+                            exon_overlap: exonic_overlap_bp(&tracks[0].tx, &tracks[1].tx),
+                            intron_overlap: 0,
+                        };
+                        filter_pair(
+                            &mut tracks,
+                            &mut dropped,
+                            pair,
+                            FilterParams {
+                                mode: DistanceMode::RatioShort,
+                                cutoff: DEFAULT_CUTOFF2,
+                                intron_weight: DEFAULT_INTRON_WEIGHT,
+                                sw_score: DEFAULT_SW_SCORE,
+                                sl_five_prime_merge_offset: 15,
+                            },
+                        );
+                        let should_merge = score >= DEFAULT_SW_SCORE as u32 && !already_dropped;
+                        assert_eq!(dropped.contains(&source), should_merge);
+                        assert_eq!(
+                            tracks[container].subreads.len(),
+                            if should_merge { 2 } else { 1 }
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sl_reads_with_different_lengths_merge_within_five_prime_window() {
+        for strand in [Strand::Plus, Strand::Minus] {
+            for (delta, window, should_merge) in [
+                (0, 0, true),
+                (1, 0, false),
+                (15, 15, true),
+                (16, 15, false),
+                (15, 14, false),
+            ] {
+                let refs = vec![sl_window_test_tx("ref", strand, 90, 101)];
+                let reads = vec![
+                    sl_window_test_tx("long", strand, 100, 1000),
+                    sl_window_test_tx("short", strand, 100 + delta, 900),
+                ];
+                for batch_size in [0, 1, 2, 3] {
+                    let result = cluster_with_options(
+                        &reads,
+                        Some(&refs),
+                        1,
+                        ClusterOptions {
+                            cutoff1: 0.0,
+                            sl_five_prime_merge_offset: window,
+                            batch_size,
+                            ..ClusterOptions::default()
+                        },
+                    );
+                    assert_eq!(
+                        result.isoforms.len(),
+                        if should_merge { 2 } else { 3 },
+                        "{strand:?} delta={delta} window={window} batch={batch_size}"
+                    );
+                    assert_eq!(result.read_to_isoform.len(), 2);
+                    assert!(result.unused.is_empty());
+                    let targets = result
+                        .read_to_isoform
+                        .iter()
+                        .map(|(_, iso)| iso)
+                        .collect::<HashSet<_>>();
+                    assert_eq!(targets.len(), if should_merge { 1 } else { 2 });
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn close_five_prime_ends_do_not_bypass_overlap_similarity() {
+        for strand in [Strand::Plus, Strand::Minus] {
+            let refs = vec![sl_window_test_tx("ref", strand, 90, 101)];
+            let reads = vec![
+                sl_window_test_tx("short", strand, 100, 130),
+                sl_window_test_tx("long", strand, 115, 1000),
+            ];
+            let result = cluster_with_options(
+                &reads,
+                Some(&refs),
+                1,
+                ClusterOptions {
+                    cutoff1: 0.0,
+                    ..ClusterOptions::default()
+                },
+            );
+            assert_eq!(result.isoforms.len(), 3);
+            assert_eq!(result.read_to_isoform.len(), 2);
+        }
+    }
+
+    #[test]
+    fn equal_length_sl_reads_keep_legacy_representative_selection() {
+        for strand in [Strand::Plus, Strand::Minus] {
+            let refs = vec![sl_window_test_tx("ref", strand, 90, 101)];
+            let reads = vec![
+                sl_window_test_tx("left", strand, 100, 1000),
+                sl_window_test_tx("right", strand, 180, 1080),
+            ];
+            let result = cluster_with_options(
+                &reads,
+                Some(&refs),
+                1,
+                ClusterOptions {
+                    cutoff1: 0.0,
+                    cutoff2: 0.1,
+                    ..ClusterOptions::default()
+                },
+            );
+            assert_eq!(result.isoforms.len(), 2);
+            assert_eq!(result.read_to_isoform.len(), 2);
+            assert_eq!(result.read_to_isoform[0].1, result.read_to_isoform[1].1);
+        }
     }
 
     #[test]

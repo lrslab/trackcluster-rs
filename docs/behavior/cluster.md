@@ -30,7 +30,7 @@ Behavior:
   `trackcluster flow --cluster-mode cluster` defaults it to `-1`, consistent
   with the flow-wide no-SL default. Pass `--sw-score 11` to flow explicitly
   when BED score is valid SL/SW 5' evidence.
-- With a non-negative `scorecutoff`, the second pass matches the Python SL boundary behavior: a short read is collapsed only when `score < scorecutoff`; reads with `score == scorecutoff` are retained as their own track. With `--sw-score -1`, Rust treats BED scores as no valid-5' signal and ordinary short-read merging still runs.
+- With a non-negative `scorecutoff`, the second pass treats `score >= scorecutoff` as SL-supported. After the pair passes the exon/intron distance cutoff, an SL-supported read of a different length may collapse into a longer read or reference when their biological 5' ends differ by at most `--sl-partial-5prime-offset` (default `15` bp). A read container must itself meet the SL score cutoff and must not already be dropped; an ordinary read cannot replace the SL representative through this exception. This compares `tx_start` on plus and `tx_end` on minus; unknown strand does not enable this exception. Similar equal-length read pairs still choose one representative under the existing rule, even outside the 5' window. First-pass behavior is unchanged. With `--sw-score -1`, ordinary short-read merging runs without SL protection.
 - In batched `flow --cluster-mode cluster` runs, per-gene overlap outputs use the `*_simple_coverage.bed` suffix and batch summary files use the `cluster_batch_*` prefix.
 
 Current CLI exposure:
@@ -74,8 +74,29 @@ SL information is optional and many datasets do not have it for every read. With
 
 Same-junction reads with enough nearby 3' terminal support are retained as isoforms when their biological 3' end is outside the same-junction terminal tolerance from a compatible longer/reference track. This protects high-expression 3' early-stop isoforms that share the same splice chain as a longer isoform.
 
+SL 5' and same-junction 3' support are computed once over the complete corrected
+locus before any read batching. Each representative retains support for its
+original endpoints through every batch and the final merge. Splitting a
+supported terminal cluster across batches cannot erase its support, and reads
+absorbed from other endpoints do not become new terminal evidence.
+
+After support is frozen, exact same-structure reads are coalesced before batching.
+The representative prefers an independently protected SL read and then stable
+original metadata, not input position. Reference identity and gene/strand/structure
+boundaries are preserved by this coalescing step, and every read instance remains
+in its membership. Ordinary duplicate members do not become SL observations.
+
+A protected 3' endpoint cannot be replaced by a read container without its own
+frozen minimum 3' support, even if the endpoints are close. When a merge is legal,
+original protected endpoint coordinates travel with the membership: every later
+target must be within tolerance of all those coordinates. Several individually
+small shifts cannot add up to a large displacement. SL 5' protection follows
+the relevant merge-kind offset; 3' protection applies to same-junction merging
+and is not transferred from a truncated chain as support for a different chain.
+
 The CLI controls are:
-- `--same-junction-3prime-offset` (default `50`): a same-junction source is protected only when its 3' end is more than this many bp from the merge target.
+
+- `--same-junction-3prime-offset` (default `50`): maximum distance from every retained protected original 3' endpoint to a same-junction merge target; read targets must also have independent minimum 3' support.
 - `--3prime-cluster-offset` (default: active `--junction-correction-offset`): window used to sum nearby same-junction 3' support.
 - `--3prime-min-support` (default `5`): minimum nearby non-reference read support required for protection.
 

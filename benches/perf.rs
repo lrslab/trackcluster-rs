@@ -165,65 +165,92 @@ fn make_clusterj_inputs(
     (refs, reads)
 }
 
-fn make_clusterj_single_locus_inputs(
-    seed: u64,
-    refs_len: usize,
-    reads_len: usize,
-    locus_start: u32,
-) -> (Vec<Transcript>, Vec<Transcript>) {
-    let mut rng = Lcg64::new(seed);
-    let mut refs = Vec::with_capacity(refs_len);
-    let mut reads = Vec::with_capacity(reads_len);
-
-    for i in 0..refs_len {
-        let exon_len = 45 + rng.gen_range_u32(0, 10);
-        let gap_len = 90 + rng.gen_range_u32(0, 30);
-        let exons = exon_chain(locus_start, exon_len, gap_len, 4);
-        refs.push(make_tx(
-            "chr1",
-            Strand::Plus,
-            format!("ref{i}"),
-            exons,
-            "isoform_anno",
-            100,
-        ));
-    }
-
-    for i in 0..reads_len {
-        let exon_len = 30 + rng.gen_range_u32(0, 40);
-        let gap_len = 60 + rng.gen_range_u32(0, 80);
-        let exon_count = if rng.gen_bool() { 3 } else { 4 };
-        let exons = exon_chain(locus_start, exon_len, gap_len, exon_count);
-        reads.push(make_tx(
-            "chr1",
-            Strand::Plus,
-            format!("read{i}"),
-            exons,
-            "nanopore_read",
-            0,
-        ));
-    }
-
-    (refs, reads)
-}
-
-fn make_clusterj_high_diversity_inputs(reads_len: usize, locus_start: u32) -> Vec<Transcript> {
-    (0..reads_len)
-        .map(|index| {
-            let middle_start = locus_start + 100 + (index as u32 * 7);
+fn fixed_splice_catalog() -> Vec<Transcript> {
+    let exons = [
+        (100_000, 100_180),
+        (100_500, 100_640),
+        (101_050, 101_210),
+        (101_800, 101_990),
+        (103_000, 103_160),
+        (104_400, 105_200),
+    ];
+    // Four specified paths through one fixed exon catalog: full length,
+    // exon 3 skipped, exon 4 skipped, and exons 3 + 4 skipped.
+    [0u8, 1, 2, 3]
+        .into_iter()
+        .map(|skip| {
+            let chain = exons
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| {
+                    !(*index == 2 && skip & 1 != 0 || *index == 3 && skip & 2 != 0)
+                })
+                .map(|(_, &exon)| exon)
+                .collect();
             make_tx(
                 "chr1",
                 Strand::Plus,
-                format!("diverse-read-{index}"),
-                vec![
-                    (locus_start, locus_start + 40),
-                    (middle_start, middle_start + 30),
-                    (locus_start + 100_000, locus_start + 100_040),
-                ],
+                format!("catalog-{skip}"),
+                chain,
+                "isoform_anno",
+                100,
+            )
+        })
+        .collect()
+}
+
+fn make_fixed_catalog_reads(catalog: &[Transcript], reads_len: usize) -> Vec<Transcript> {
+    (0..reads_len)
+        .map(|index| {
+            // Interleave 60:25:10:5 abundance without changing splice sites
+            // or adding isoforms as the number of molecules increases.
+            let structure = match index % 100 {
+                0..60 => 0,
+                60..85 => 1,
+                85..95 => 2,
+                _ => 3,
+            };
+            let mut read = catalog[structure].clone();
+            read.name = format!("catalog-read-{index}");
+            read.score = 0;
+            read.metadata_mut().set_transcript_type("nanopore_read");
+            read
+        })
+        .collect()
+}
+
+fn make_terminal_variation_reads(reference: &Transcript, reads_len: usize) -> Vec<Transcript> {
+    let mut rng = Lcg64::new(4);
+    (0..reads_len)
+        .map(|index| {
+            let mut exons = reference
+                .exons
+                .iter()
+                .map(|exon| (exon.start.get(), exon.end.get()))
+                .collect::<Vec<_>>();
+            // Two supported 3' clusters, 160 bp apart, in an 80:20 mixture.
+            // Only the outer endpoints vary by 0..14 bp; every donor and
+            // acceptor remains exactly at its catalog coordinate.
+            let three_prime_shift = if index % 100 < 80 { 0 } else { 160 };
+            exons[0].0 += rng.gen_range_u32(0, 15);
+            exons.last_mut().expect("nonempty exon chain").1 -=
+                three_prime_shift + rng.gen_range_u32(0, 15);
+            make_tx(
+                "chr1",
+                Strand::Plus,
+                format!("terminal-read-{index}"),
+                exons,
                 "nanopore_read",
                 0,
             )
         })
+        .collect()
+}
+
+fn internal_splice_sites(tx: &Transcript) -> Vec<u32> {
+    tx.exons
+        .windows(2)
+        .flat_map(|pair| [pair[0].end.get(), pair[1].start.get()])
         .collect()
 }
 
@@ -347,70 +374,94 @@ fn bench_clusterj_grouping(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_clusterj_large_single_locus(c: &mut Criterion) {
-    let mut group = c.benchmark_group("clusterj_large");
+fn bench_clusterj_fixed_catalog_abundance(c: &mut Criterion) {
+    let mut group = c.benchmark_group("clusterj_abundance");
     group.sample_size(10);
 
-    let refs_len = 200usize;
-    let reads_len = 20_000usize;
-    let (refs, reads) = make_clusterj_single_locus_inputs(4, refs_len, reads_len, 100_000);
-    group.bench_with_input(
-        BenchmarkId::new(
-            "clusterj_simple_merge",
-            format!("{refs_len}_refs_{reads_len}_reads"),
-        ),
-        &(refs, reads),
-        |bench, (refs, reads)| {
-            bench.iter(|| {
-                let result = clusterj::clusterj_with_name2_mode(
-                    black_box(reads),
-                    Some(black_box(refs)),
-                    1,
-                    clusterj::DEFAULT_SW_SCORE,
-                    0,
-                    1,
-                    clusterj::Name2Mode::Coverage,
-                );
-                black_box(result.isoforms.len());
-            });
-        },
-    );
+    let catalog = fixed_splice_catalog();
+    // Only the full-length path is supplied as a reference; the three exon
+    // skipping paths must survive as supported novel structures.
+    let refs = &catalog[..1];
+    for reads_len in [2_000, 10_000, 20_000] {
+        let reads = make_fixed_catalog_reads(&catalog, reads_len);
+        group.bench_with_input(
+            BenchmarkId::new("four_fixed_isoforms", reads_len),
+            &reads,
+            |bench, reads| {
+                bench.iter(|| {
+                    let result = clusterj::clusterj_with_name2_mode(
+                        black_box(reads),
+                        Some(black_box(refs)),
+                        1,
+                        clusterj::DEFAULT_SW_SCORE,
+                        500,
+                        100,
+                        clusterj::Name2Mode::Coverage,
+                    );
+                    assert!(result.unused.is_empty(), "all reads must reach merging");
+                    assert_eq!(result.read_to_isoform.len(), reads.len());
+                    assert_eq!(result.isoforms.len(), catalog.len());
+                    for expected in &catalog {
+                        assert!(result.isoforms.iter().any(|tx| tx.exons == expected.exons));
+                    }
+                    black_box(result);
+                });
+            },
+        );
+    }
 
     group.finish();
 }
 
-fn bench_clusterj_high_diversity_single_locus(c: &mut Criterion) {
-    let mut group = c.benchmark_group("clusterj_high_diversity");
+fn bench_clusterj_terminal_variation(c: &mut Criterion) {
+    let mut group = c.benchmark_group("clusterj_terminal_variation");
     group.sample_size(10);
-
-    let reads = make_clusterj_high_diversity_inputs(2_000, 100_000);
-    let refs = vec![make_tx(
-        "chr1",
-        Strand::Plus,
-        "diverse-reference".to_owned(),
-        vec![(100_000, 100_040), (100_100, 100_130), (200_000, 200_040)],
-        "isoform_anno",
-        100,
-    )];
-    group.bench_with_input(
-        BenchmarkId::new("mostly_nonmergeable_default", reads.len()),
-        &(refs, reads),
-        |bench, (refs, reads)| {
-            bench.iter(|| {
-                let result = clusterj::clusterj_with_name2_mode(
-                    black_box(reads),
-                    Some(black_box(refs)),
-                    1,
-                    clusterj::DEFAULT_SW_SCORE,
-                    500,
-                    100,
-                    clusterj::Name2Mode::Coverage,
-                );
-                black_box(result.isoforms.len() + result.unused.len());
-            });
-        },
-    );
-
+    let catalog = fixed_splice_catalog();
+    let refs = &catalog[..1];
+    let expected_sites = internal_splice_sites(&refs[0]);
+    for reads_len in [2_000, 10_000, 20_000] {
+        let reads = make_terminal_variation_reads(&refs[0], reads_len);
+        // Fixture checks stay outside the measured loop. These reads must
+        // exercise endpoint merging, with no moving internal splice sites.
+        assert!(reads
+            .iter()
+            .all(|read| internal_splice_sites(read) == expected_sites));
+        let endpoint_pairs = reads
+            .iter()
+            .map(|read| (read.tx_start.get(), read.tx_end.get()))
+            .collect::<std::collections::HashSet<_>>();
+        assert!(endpoint_pairs.len() > 100);
+        group.bench_with_input(
+            BenchmarkId::new("fixed_junctions_two_three_prime_clusters", reads_len),
+            &reads,
+            |bench, reads| {
+                bench.iter(|| {
+                    let result = clusterj::clusterj_with_name2_mode(
+                        black_box(reads),
+                        Some(black_box(refs)),
+                        1,
+                        clusterj::DEFAULT_SW_SCORE,
+                        500,
+                        100,
+                        clusterj::Name2Mode::Coverage,
+                    );
+                    assert!(result.unused.is_empty(), "all reads must reach merging");
+                    assert_eq!(result.read_to_isoform.len(), reads.len());
+                    assert_eq!(result.isoforms.len(), 2);
+                    assert!(result
+                        .isoforms
+                        .iter()
+                        .all(|tx| { internal_splice_sites(tx) == expected_sites }));
+                    let short_end = refs[0].tx_end.get() - 160;
+                    assert!(result
+                        .isoforms
+                        .iter()
+                        .any(|tx| { (short_end - 14..=short_end).contains(&tx.tx_end.get()) }));
+                    black_box(result);
+                });
+            },
+        );
+    }
     group.finish();
 }
 
@@ -532,8 +583,8 @@ criterion_group!(
     benches,
     bench_interval_sweep_intersect,
     bench_clusterj_grouping,
-    bench_clusterj_large_single_locus,
-    bench_clusterj_high_diversity_single_locus,
+    bench_clusterj_fixed_catalog_abundance,
+    bench_clusterj_terminal_variation,
     bench_cluster_overlap_synthetic_locus,
     bench_cluster_overlap_batch_sizes
 );

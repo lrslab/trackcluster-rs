@@ -1186,6 +1186,62 @@ fn flow_count_only_rebuilds_missing_aggregate_downsample_state() {
 }
 
 #[test]
+fn flow_unique_assignment_is_gene_local_for_shared_molecules() {
+    let input = fresh_temp_dir("flow_gene_local_unique_input");
+    let reads = input.join("reads.bed");
+    let reference = input.join("reference.bed");
+    let ref_line = |id: &str, gene: &str| {
+        format!(
+        "chr1\t100\t250\t{id}\t100\t+\t0\t0\t0\t2\t50,50,\t0,100,\tnone\tnone\tnone\t-1,-1,\tisoform_anno\t{gene}\tnone\tnone\n"
+    )
+    };
+    fs::write(
+        &reference,
+        ref_line("ref_a", "GENEA") + &ref_line("ref_b", "GENEB"),
+    )
+    .unwrap();
+    fs::write(
+        &reads,
+        "chr1\t100\t250\tr1\t0\t+\t0\t0\t0\t2\t50,50,\t0,100,\n",
+    )
+    .unwrap();
+    let out = fresh_temp_dir("flow_gene_local_unique_output");
+    let output = Command::new(env!("CARGO_BIN_EXE_trackcluster"))
+        .args([
+            "flow",
+            "--prefix",
+            "sample",
+            "--assignment-mode",
+            "unique",
+            "--max-reads-per-gene",
+            "0",
+            "--heartbeat-seconds",
+            "0",
+        ])
+        .arg("-s")
+        .arg(&reads)
+        .arg("-r")
+        .arg(&reference)
+        .arg("-o")
+        .arg(&*out)
+        .output()
+        .unwrap();
+    assert_success(&output, "gene-local unique assignment");
+    assert_eq!(
+        normalized_lines(&out.join("sample_read_to_isoform.unique.tsv")),
+        vec!["r1\tref_a", "r1\tref_b"],
+    );
+    assert_eq!(
+        normalized_lines(&out.join("sample_isoform_count.csv")),
+        vec![
+            "gene,isoform_id,count",
+            "GENEA,ref_a,0.5",
+            "GENEB,ref_b,0.5"
+        ],
+    );
+}
+
+#[test]
 fn flow_rejects_independent_downsampling_of_multi_gene_molecules() {
     let exe = env!("CARGO_BIN_EXE_trackcluster");
     let input_dir = fresh_temp_dir("flow_multi_gene_downsample_input");
@@ -1552,6 +1608,142 @@ fn flow_excludes_failed_genes_and_finishes_partial_outputs_by_default() {
     assert!(!strict_out.join("strict_isoform.bed").exists());
     assert!(!strict_out.join("strict_isoform_count.csv").exists());
     assert!(!strict_out.join("strict_desc.txt").exists());
+}
+
+#[test]
+fn flow_retains_terminal_evidence_and_conserves_final_counts() {
+    let input = fresh_temp_dir("flow_terminal_evidence_input");
+    let reads = input.join("reads.bed");
+    let reference = input.join("reference.bed");
+    let bed = |chrom: &str, name: &str, start: u32, end: u32, score: u32| {
+        format!(
+            "{chrom}\t{start}\t{end}\t{name}\t{score}\t+\t0\t0\t0\t2\t{},{},\t0,{},",
+            200 - start,
+            end - 500,
+            500 - start,
+        )
+    };
+    for (mode, sw_score, supported_count) in [("cluster", "11", 1.0), ("clusterj", "-1", 5.0)] {
+        let mut refs = String::new();
+        let mut records = String::new();
+        let mut expected_reads = std::collections::BTreeSet::new();
+        // Two genes on separate chromosomes exercise real multi-worker dispatch.
+        for chrom in ["chr1", "chr2"] {
+            let ref_end = if mode == "cluster" { 1200 } else { 1000 };
+            refs.push_str(&format!(
+                "{}\tnone\tnone\tnone\t-1,-1,\tisoform_anno\tGENE_{chrom}\tnone\tnone\n",
+                bed(chrom, &format!("ref_{chrom}"), 0, ref_end, 100),
+            ));
+            let terminal_reads = if mode == "cluster" { 1 } else { 5 };
+            for index in 0..terminal_reads {
+                let name = format!("alt_{chrom}_{index}");
+                records.push_str(&format!(
+                    "{}\n",
+                    bed(
+                        chrom,
+                        &name,
+                        100,
+                        800,
+                        if mode == "cluster" { 20 } else { 0 }
+                    ),
+                ));
+                expected_reads.insert(name);
+            }
+            let ordinary: &[(u32, u32)] = if mode == "cluster" {
+                &[(100, 1000), (150, 1100)]
+            } else {
+                &[(100, 830)]
+            };
+            for (index, &(start, end)) in ordinary.iter().enumerate() {
+                let name = format!("ordinary_{chrom}_{index}");
+                records.push_str(&format!("{}\n", bed(chrom, &name, start, end, 0)));
+                expected_reads.insert(name);
+            }
+        }
+        fs::write(&reference, refs).unwrap();
+        fs::write(&reads, records).unwrap();
+        let mut expected_outputs = None;
+        for (batch, threads) in [(0, 1), (2, 1), (500, 2)] {
+            // Inputs are intentionally outside the output root, which flow owns.
+            let out = fresh_temp_dir("flow_terminal_evidence_output");
+            let output = Command::new(env!("CARGO_BIN_EXE_trackcluster"))
+                .args(["flow", "--cluster-mode", mode, "--reads"])
+                .arg(&reads)
+                .arg("--reference")
+                .arg(&reference)
+                .arg("--output-root")
+                .arg(&*out)
+                .args([
+                    "--prefix",
+                    "sample",
+                    "--sw-score",
+                    sw_score,
+                    "--batch-size",
+                    &batch.to_string(),
+                    "--threads",
+                    &threads.to_string(),
+                    "--heartbeat-seconds",
+                    "0",
+                    "--force",
+                ])
+                .output()
+                .unwrap();
+            assert_success(&output, "flow terminal evidence");
+            let isoforms = trackcluster_rs::io::bed::read_bed12(out.join("sample_isoform.bed"))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(isoforms.len(), 4, "mode={mode} batch={batch}");
+            let counts: std::collections::BTreeMap<String, f64> =
+                csv::Reader::from_path(out.join("sample_isoform_count.csv"))
+                    .unwrap()
+                    .records()
+                    .map(|row| {
+                        let row = row.unwrap();
+                        (row[1].to_owned(), row[2].parse().unwrap())
+                    })
+                    .collect();
+            for chrom in ["chr1", "chr2"] {
+                let alt = isoforms
+                    .iter()
+                    .find(|tx| tx.chrom == chrom && tx.tx_end.get() == 800)
+                    .unwrap();
+                assert_eq!(alt.tx_start.get(), 100);
+                // Unique assignment may move an ordinary read from its raw reference
+                // candidate to the closer terminal isoform; protected reads stay represented.
+                assert!(counts[&alt.name] >= supported_count);
+            }
+            assert_eq!(
+                count_sum(&out.join("sample_isoform_count.csv")),
+                expected_reads.len() as f64
+            );
+            let unique = normalized_lines(&out.join("sample_read_to_isoform.unique.tsv"));
+            let assigned: std::collections::BTreeSet<_> = unique
+                .iter()
+                .map(|line| line.split_once('\t').unwrap().0.to_owned())
+                .collect();
+            assert_eq!(assigned, expected_reads);
+            assert_eq!(unique.len(), expected_reads.len());
+            assert!(normalized_lines(&out.join("sample_unused.bed")).is_empty());
+            let artifacts: Vec<_> = [
+                "sample_isoform.bed",
+                "sample_read_to_isoform.tsv",
+                "sample_read_to_isoform.unique.tsv",
+                "sample_isoform_count.csv",
+            ]
+            .map(|name| {
+                let mut lines = normalized_lines(&out.join(name));
+                lines.sort();
+                lines
+            })
+            .into_iter()
+            .collect();
+            assert_eq!(
+                expected_outputs.get_or_insert_with(|| artifacts.clone()),
+                &artifacts
+            );
+        }
+    }
 }
 
 #[test]

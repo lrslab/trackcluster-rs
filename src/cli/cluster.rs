@@ -30,6 +30,10 @@ pub struct Args {
     #[arg(long = "sw-score", default_value_t = crate::cluster::cluster_overlap::DEFAULT_SW_SCORE, allow_hyphen_values = true)]
     pub sw_score: i64,
 
+    /// Allow structurally similar SL-supported reads to merge within this biological 5' distance
+    #[arg(long = "sl-partial-5prime-offset", default_value_t = crate::cluster::clusterj::DEFAULT_SL_PARTIAL_FIVE_PRIME_END_OFFSET, allow_hyphen_values = true, value_parser = crate::config::parse_base_pair_offset)]
+    pub sl_partial_5prime_offset: u32,
+
     /// Overlap-mode pass 1 cutoff
     #[arg(long = "cutoff1", default_value_t = crate::cluster::cluster_overlap::DEFAULT_CUTOFF1, allow_hyphen_values = true, value_parser = crate::config::parse_unit_fraction)]
     pub cutoff1: f64,
@@ -71,12 +75,14 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     let refs: Vec<crate::model::Transcript> = crate::io::bed::read_bed12(&args.reference)?
         .collect::<Result<Vec<_>, crate::io::bed::BedError>>()?;
 
+    let mut junction = crate::flow::config::JunctionConfig::default();
+    junction.sl.partial_five_prime_end_offset = args.sl_partial_5prime_offset;
     let result = crate::flow::config::ClusteringConfig {
         sw_score: args.sw_score,
         batch_size: args.batch_size,
         batch_rounds: args.batch_rounds,
         name2_mode: args.name2_mode,
-        junction: crate::flow::config::JunctionConfig::default(),
+        junction,
         overlap: crate::flow::config::OverlapConfig {
             cutoff1: args.cutoff1,
             cutoff2: args.cutoff2,

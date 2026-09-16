@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- Fix batched `clusterj` terminal retention by freezing SL 5' and same-junction
+  3' support over the complete corrected locus before splitting read batches.
+  Later merges preserve the original endpoint evidence rather than recounting
+  accumulated memberships.
+- Extend overlap-mode SL representative merging to different-length reads
+  whose biological 5' ends are within `--sl-partial-5prime-offset` (default
+  15 bp), after structural similarity checks. Read containers must themselves
+  meet the SL score cutoff and remain live; ordinary or already-dropped
+  containers cannot erase SL evidence in a later round. Preserve existing
+  equal-length representative selection and gene-local unique counting semantics.
+- Coalesce exact same-structure `clusterj` reads before batching, after freezing
+  support, with a deterministic SL-aware representative. Mixed SL/non-SL
+  duplicates no longer change the retained isoform or mapping with input order;
+  ordinary members cannot inflate SL support.
+- Prevent supported same-junction 3' endpoints from being replaced by weakly
+  supported read containers. Preserve original protected 5'/3' coordinate bounds
+  through merges so successive small shifts cannot bypass terminal tolerance.
+- Defer `clusterj` membership expansion until representatives are retained,
+  avoiding repeated large-set copies through intermediate containers while
+  preserving immediate terminal checks and all compatible mapping destinations.
+- Replace the moving-junction high-diversity and random-chain single-locus
+  benchmarks with a fixed four-isoform exon-skipping catalog and a separate
+  fixed-junction terminal-variation workload. Scale each from 2,000 to 20,000
+  reads, with assertions for retained structures and complete read mapping.
+
 ## 0.3.1
 
 _Release date: 2026-08-30._

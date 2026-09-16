@@ -249,7 +249,8 @@ Key flags:
   default: `-1`, no SW/SL 5' signal in either cluster mode). Pass a
   non-negative cutoff such as `11` only when BED score is valid SL/SW 5'
   evidence. In overlap mode, the second pass protects a short read only when
-  its score is at or above the cutoff; with `-1`, ordinary short-read merging
+  its score is at or above the cutoff, subject to the same-5' and equal-length
+  representative merge rules below; with `-1`, ordinary short-read merging
   still runs. The separate direct `trackcluster cluster` command defaults to
   `11` for legacy compatibility.
 - `--batch-size`, `--batch-rounds`: bounds for very large genes; in overlap mode these control iterative pre-merging rounds before the final two-pass overlap clustering
@@ -257,13 +258,14 @@ Key flags:
 - `--platform-preset`: `generic` (default), `rna002`, or `rna004`. Presets seed junction correction, SL 5', and same-junction 3' defaults; explicit option values override the preset.
 - `--junction-correction-offset` (default: `10`; `rna002`: `15`; `rna004`: `10`), `--junction-correction-min-support` (default: `5`): internal junction-site correction controls used by junction-mode clustering.
 - `--sl-partial-5prime-offset` (default: `15`), `--sl-same-junction-5prime-offset` (default: `25`), `--sl-5prime-cluster-offset` (default: `15`), `--sl-5prime-min-support` (default: `2`): junction-mode SL 5' merge controls
+- In overlap mode, `--sl-partial-5prime-offset` also allows structurally similar SL-supported reads of different lengths to merge within this biological 5' distance. Read containers must themselves meet the SL score cutoff and must not already be dropped; reference containers need no SL score. Similar equal-length reads retain their existing representative-selection rule. The resolved offset is recorded in per-gene manifests, including preset overrides.
 - `--same-junction-3prime-offset` (default: `50`), `--3prime-cluster-offset` (default: active junction correction offset), `--3prime-min-support` (default: `5`): junction-mode same-junction 3' terminal retention controls.
 - Junction-mode clustering retains supported same-junction 3' terminal
   clusters as isoforms. The minus-strand 3' end is on the lower-coordinate
   side, but an early stop has a higher `tx_start` than the full-length isoform.
 - `--overlap-cutoff1`, `--overlap-cutoff2`, `--overlap-intron-weight`: overlap-mode controls used when `--cluster-mode cluster`
 - `--prepare-fraction-read`, `--prepare-fraction-ref`: overlap thresholds for gene assignment
-- `--assignment-mode`: final counting mode, `unique` (default) or `fractional`; unique mode expands candidates against the isoform catalog before choosing the closest compatible isoform, including retained 3' early-stop isoforms.
+- `--assignment-mode`: final counting mode, `unique` (default) or `fractional`; flow unique mode expands candidates within each gene folder before choosing the closest compatible isoform, including retained 3' early-stop isoforms. This is deliberately gene-local: a molecule assigned to multiple genes can retain one selected isoform per gene. Final counts divide that molecule across its distinct selected isoforms, preserving total abundance. The `.unique.tsv` filename does not imply global uniqueness across genes; modification aggregation separately requires globally unambiguous assignments.
 - `--unique-assignment-junction-offset` (default: `15`): maximum per-boundary difference for the ordered one-to-one intron matcher used by unique assignment.
 - `--mod-manifest`: optional normalized modification manifest. It requires
   manifest mode and `--assignment-mode unique`; modification aggregation runs
@@ -337,9 +339,11 @@ Junction min support is weighted site support: read sites contribute `1`, refere
 SL information is optional. With the default `--sw-score -1`, all reads are treated as non-SL-supported and ordinary junction correction/truncation merging still runs. When `--sw-score` is non-negative, only reads whose BED score is greater than the cutoff receive SL-cluster protection as alternative 5' isoforms. For no-SL datasets, including human data where BED score is MAPQ or another non-SL value, keep `--sw-score -1`. For SL/SW-scored datasets, pass an explicit cutoff such as `--sw-score 11` together with the appropriate platform preset.
 
 Same-junction 3' terminal clusters with nearby read support are retained as
-isoforms independently of SL evidence. By default, protection requires at
-least `5` reads within the active junction correction offset and a 3' end more
-than `50` bp from the merge target. The rule is strand-aware: on minus-strand
+isoforms independently of SL evidence. By default, at least `5` reads within
+the active junction correction offset protect an original 3' endpoint from
+targets more than `50` bp away, and from read targets without their own minimum
+3' support. Merged evidence keeps its original coordinates, so intermediate
+representatives cannot bypass this limit. The rule is strand-aware: on minus-strand
 transcripts the 3' end is the lower-coordinate side, but a 3' early stop
 truncates that side and therefore has a higher `tx_start` (a higher genomic
 terminal boundary) than the full-length isoform.
@@ -720,6 +724,8 @@ Performance note:
 - `--max-reads-per-locus 0` disables the standalone cap for time, not only memory: a diverse single-exon locus can still run for a long time.
 - SL-supported reads with enough nearby 5' support can be protected as alternative isoforms; singleton likely-degradation reads can still merge into compatible longer/reference tracks.
 - Supported same-junction 3' terminal clusters are retained as isoforms and remain compatible with unique counting, which assigns reads to the closest terminal structure.
+- SL/3' support is computed over the complete corrected locus before batching and remains fixed through all merge rounds, so a terminal cluster cannot lose support just because it crosses a batch boundary.
+- Exact same-structure reads are then coalesced with a stable SL-aware representative. Ordinary members do not add SL support. Protected 3' ends cannot be replaced by read containers without independent 3' support, and original protected 5'/3' coordinates constrain later merges to prevent gradual endpoint drift. See [terminal behavior](behavior/cluster.md#junction-mode-3-terminal-support).
 
 Example:
 ```bash
@@ -740,7 +746,8 @@ Key flags:
 - `--reads/-s`, `--reference/-r`, `--out/-o`
 - `--threads/-t`: number of worker threads
 - `--batch-size`, `--batch-rounds`: optional overlap batching for large loci (`--batch-size 0` disables intermediate batching)
-- `--sw-score`: Smith-Waterman cutoff for SL-supported 5' protection in pass 2 (default: `11`; set to `-1` to treat reads as having no SW 5' signal). In pass 2, a short read is protected only when its score is at or above the cutoff; with `-1`, ordinary short-read merging still runs.
+- `--sw-score`: Smith-Waterman cutoff for SL-supported 5' protection in pass 2 (default: `11`; set to `-1` to treat reads as having no SW 5' signal). Scores at or above the cutoff receive protection, subject to the representative merge rules below; with `-1`, ordinary short-read merging still runs.
+- `--sl-partial-5prime-offset` (default: `15` bp): after passing the structural distance cutoff, SL-supported reads of different lengths may merge when biological 5' ends are within this distance (`tx_start` on plus, `tx_end` on minus). A read container must itself meet the SL score cutoff and remain live; a reference container needs no SL score. Similar equal-length read pairs retain the existing representative-selection rule even outside this window. `0` restricts the new exception to exact 5' ends.
 - `--cutoff1`, `--cutoff2`: overlap pass 1 / pass 2 cutoffs (default: `0.05`, `0.01`)
 - `--intron-weight`: intron contribution to the combined overlap distance (default: `0.5`)
 - `--name2-mode`: `coverage` (default), `full`, or `none`

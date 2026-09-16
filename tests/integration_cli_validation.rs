@@ -32,6 +32,7 @@ fn cluster_rejects_nonfinite_out_of_range_and_zero_values() {
         ("--cutoff2", "1.01", "must be within [0, 1]"),
         ("--intron-weight", "-0.1", "must be nonnegative"),
         ("--intron-weight", "inf", "must be finite"),
+        ("--sl-partial-5prime-offset", "-1", "nonnegative integer"),
     ] {
         let mut args = base.to_vec();
         args.extend([option, value]);

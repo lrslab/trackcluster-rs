@@ -12,6 +12,31 @@ struct Track {
     tx: Transcript,
     source: TrackSource,
     subreads: HashSet<ReadInstance>,
+    // Support for this representative's original endpoints, frozen before
+    // batching. Accumulated membership is not new terminal evidence.
+    terminal_support: TerminalClusterSupport,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct TerminalClusterSupport {
+    three_prime: usize,
+    // Bounds of independently supported original endpoints, not the current
+    // representative's coordinates. Membership transfers cannot move them.
+    protected_five_prime: Option<(u32, u32)>,
+    protected_three_prime: Option<(u32, u32)>,
+}
+
+fn extend_terminal_bounds(target: &mut Option<(u32, u32)>, source: Option<(u32, u32)>) {
+    if let Some((low, high)) = source {
+        *target = Some(match *target {
+            Some((a, b)) => (a.min(low), b.max(high)),
+            None => (low, high),
+        });
+    }
+}
+
+fn terminal_bounds_match(bounds: (u32, u32), position: Option<u32>, offset: u32) -> bool {
+    position.is_some_and(|pos| bounds.0.abs_diff(pos) <= offset && bounds.1.abs_diff(pos) <= offset)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -32,6 +57,7 @@ impl Track {
             tx,
             source: TrackSource::Reference,
             subreads: HashSet::new(),
+            terminal_support: TerminalClusterSupport::default(),
         }
     }
 
@@ -44,6 +70,7 @@ impl Track {
             tx,
             source: TrackSource::Read,
             subreads,
+            terminal_support: TerminalClusterSupport::default(),
         }
     }
 
@@ -53,6 +80,26 @@ impl Track {
 
     fn is_read(&self) -> bool {
         self.source == TrackSource::Read
+    }
+
+    fn absorb(&mut self, source: &Self) {
+        self.subreads.extend(source.subreads.iter().cloned());
+        self.absorb_terminal_evidence(source);
+    }
+
+    fn absorb_terminal_evidence(&mut self, source: &Self) {
+        extend_terminal_bounds(
+            &mut self.terminal_support.protected_five_prime,
+            source.terminal_support.protected_five_prime,
+        );
+        // After a compatible merge, equal exon counts mean SameJunction.
+        // Truncated chains must not donate 3' evidence to a different chain.
+        if self.tx.exons.len() == source.tx.exons.len() {
+            extend_terminal_bounds(
+                &mut self.terminal_support.protected_three_prime,
+                source.terminal_support.protected_three_prime,
+            );
+        }
     }
 }
 
@@ -754,6 +801,7 @@ fn five_prime_ends_match(a: &Transcript, b: &Transcript, offset: u32) -> bool {
     five_prime_end_delta(a, b).is_some_and(|delta| delta <= offset)
 }
 
+#[cfg(test)]
 fn three_prime_end_delta(a: &Transcript, b: &Transcript) -> Option<u32> {
     if a.chrom != b.chrom || a.strand != b.strand {
         return None;
@@ -952,16 +1000,11 @@ fn sl_protected_from_merge(
     short: &Track,
     long: &Track,
     kind: MergeKind,
-    sw_score: i64,
-    sl_cluster_support: usize,
     sl_options: SlMergeOptions,
 ) -> bool {
-    if !is_sl_supported_read(short, sw_score) {
+    let Some(bounds) = short.terminal_support.protected_five_prime else {
         return false;
-    }
-    if sl_cluster_support < sl_options.min_five_prime_cluster_support {
-        return false;
-    }
+    };
 
     let offset = match kind {
         MergeKind::SameJunction => sl_options.same_junction_five_prime_end_offset,
@@ -970,25 +1013,54 @@ fn sl_protected_from_merge(
         | MergeKind::SingleExonSameFivePrime => sl_options.partial_five_prime_end_offset,
     };
 
-    !five_prime_ends_match(&short.tx, &long.tx, offset)
+    !terminal_bounds_match(bounds, five_prime_position(&long.tx), offset)
 }
 
 fn three_prime_protected_from_merge(
     short: &Track,
     long: &Track,
     kind: MergeKind,
-    three_prime_cluster_support: usize,
     three_prime_options: ThreePrimeMergeOptions,
 ) -> bool {
     if kind != MergeKind::SameJunction || short.is_reference() {
         return false;
     }
-    if three_prime_cluster_support < three_prime_options.min_three_prime_cluster_support {
+    let Some(bounds) = short.terminal_support.protected_three_prime else {
         return false;
-    }
+    };
 
-    three_prime_end_delta(&short.tx, &long.tx)
-        .is_some_and(|delta| delta > three_prime_options.same_junction_three_prime_end_offset)
+    (long.is_read()
+        && long.terminal_support.three_prime < three_prime_options.min_three_prime_cluster_support)
+        || !terminal_bounds_match(
+            bounds,
+            three_prime_position(&long.tx),
+            three_prime_options.same_junction_three_prime_end_offset,
+        )
+}
+
+fn freeze_terminal_cluster_support(
+    tracks: &mut [Track],
+    sw_score: i64,
+    sl_options: SlMergeOptions,
+    three_prime_options: ThreePrimeMergeOptions,
+) {
+    let junctions = tracks
+        .iter()
+        .map(|track| junction_positions(&track.tx))
+        .collect::<Vec<_>>();
+    let sl = build_sl_five_prime_cluster_support(tracks, &junctions, sw_score, sl_options);
+    let three_prime = build_three_prime_cluster_support(tracks, &junctions, three_prime_options);
+    for ((track, sl_five_prime), three_prime) in tracks.iter_mut().zip(sl).zip(three_prime) {
+        track.terminal_support = TerminalClusterSupport {
+            three_prime,
+            protected_five_prime: five_prime_position(&track.tx)
+                .filter(|_| sl_five_prime >= sl_options.min_five_prime_cluster_support)
+                .map(|pos| (pos, pos)),
+            protected_three_prime: three_prime_position(&track.tx)
+                .filter(|_| three_prime >= three_prime_options.min_three_prime_cluster_support)
+                .map(|pos| (pos, pos)),
+        };
+    }
 }
 
 fn is_single_exon_same_5prime_in(
@@ -1031,19 +1103,20 @@ fn target_is_preferred_container(
     kind: MergeKind,
     source_exon_len: u32,
     target_exon_len: u32,
-    is_reference: &[bool],
+    tracks: &[Track],
 ) -> bool {
-    if is_reference[source_idx] {
+    if tracks[source_idx].is_reference() {
         return false;
     }
-    if is_reference[target_idx] {
+    if tracks[target_idx].is_reference() {
         return true;
     }
 
     match kind {
         MergeKind::SameJunction => {
             target_exon_len > source_exon_len
-                || (target_exon_len == source_exon_len && target_idx > source_idx)
+                || (target_exon_len == source_exon_len
+                    && preferred_read_order(&tracks[target_idx], &tracks[source_idx]).is_gt())
         }
         MergeKind::FivePrimeTruncation
         | MergeKind::SingleExonContained
@@ -1051,14 +1124,24 @@ fn target_is_preferred_container(
     }
 }
 
+// A total order over output-relevant metadata; input position is not evidence.
+fn preferred_read_order(left: &Track, right: &Track) -> std::cmp::Ordering {
+    left.terminal_support
+        .protected_five_prime
+        .is_some()
+        .cmp(&right.terminal_support.protected_five_prime.is_some())
+        .then_with(|| left.tx.score.cmp(&right.tx.score))
+        .then_with(|| crate::identity::transcript_order(&left.tx, &right.tx))
+        .then_with(|| left.tx.thick_start.cmp(&right.tx.thick_start))
+        .then_with(|| left.tx.thick_end.cmp(&right.tx.thick_end))
+        .then_with(|| left.tx.item_rgb.cmp(&right.tx.item_rgb))
+        .then_with(|| left.tx.extra_fields.cmp(&right.tx.extra_fields))
+}
+
 struct MergeContext<'a> {
     tracks: &'a [Track],
     junctions_cache: &'a [Vec<u32>],
     exon_lens: &'a [u32],
-    is_reference: &'a [bool],
-    sl_cluster_support: &'a [usize],
-    three_prime_cluster_support: &'a [usize],
-    sw_score: i64,
     sl_options: SlMergeOptions,
     three_prime_options: ThreePrimeMergeOptions,
     same_junction_offset: u32,
@@ -1099,19 +1182,16 @@ impl MergeContext<'_> {
             kind,
             self.exon_lens[source_idx],
             self.exon_lens[target_idx],
-            self.is_reference,
+            self.tracks,
         ) && !sl_protected_from_merge(
             &self.tracks[source_idx],
             &self.tracks[target_idx],
             kind,
-            self.sw_score,
-            self.sl_cluster_support[source_idx],
             self.sl_options,
         ) && !three_prime_protected_from_merge(
             &self.tracks[source_idx],
             &self.tracks[target_idx],
             kind,
-            self.three_prime_cluster_support[source_idx],
             self.three_prime_options,
         )
     }
@@ -1335,6 +1415,7 @@ fn build_exact_duplicate_representatives<'a>(
 ) -> Vec<Option<usize>> {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     struct ExactDuplicateKey<'a> {
+        gene: &'a str,
         chrom: &'a str,
         strand: Strand,
         tx_start: u32,
@@ -1350,6 +1431,7 @@ fn build_exact_duplicate_representatives<'a>(
 
         groups
             .entry(ExactDuplicateKey {
+                gene: crate::identity::gene_id(&track.tx),
                 chrom: track.tx.chrom.as_str(),
                 strand: track.tx.strand,
                 tx_start: track.tx.tx_start.get(),
@@ -1366,9 +1448,10 @@ fn build_exact_duplicate_representatives<'a>(
             continue;
         }
 
-        // Same-junction equal-length tie breaking keeps the latest read, so use the
-        // last exact duplicate as the only non-reference target for this group.
-        let representative = *group.last().expect("non-empty group");
+        let representative = *group
+            .iter()
+            .max_by(|&&a, &&b| preferred_read_order(&tracks[a], &tracks[b]))
+            .expect("non-empty group");
         for &idx in group {
             if idx != representative {
                 representatives[idx] = Some(representative);
@@ -1377,6 +1460,23 @@ fn build_exact_duplicate_representatives<'a>(
     }
 
     representatives
+}
+
+// Freeze support before calling this: ordinary duplicate members must never
+// be counted as SL observations merely because their representative is SL.
+fn coalesce_exact_duplicate_reads(
+    tracks: &mut [Track],
+    junctions: &[Vec<u32>],
+    is_reference: &[bool],
+) -> Vec<bool> {
+    let representatives = build_exact_duplicate_representatives(tracks, junctions, is_reference);
+    for (source, target) in representatives.iter().enumerate() {
+        if let Some(target) = target {
+            let (source, target) = get_two_mut(tracks, source, *target);
+            target.absorb(source);
+        }
+    }
+    representatives.iter().map(Option::is_some).collect()
 }
 
 #[cfg(test)]
@@ -1397,28 +1497,42 @@ fn junction_simple_merge_with_options(
     three_prime_options: ThreePrimeMergeOptions,
     same_junction_offset: u32,
 ) -> Vec<usize> {
+    freeze_terminal_cluster_support(tracks, sw_score, sl_options, three_prime_options);
+    junction_simple_merge_with_frozen_support(
+        tracks,
+        sl_options,
+        three_prime_options,
+        same_junction_offset,
+    )
+}
+
+// Every batch, including the final merge, must use support from the complete
+// corrected locus. Track copies retain it; merging memberships never updates it.
+fn junction_simple_merge_with_frozen_support(
+    tracks: &mut [Track],
+    sl_options: SlMergeOptions,
+    three_prime_options: ThreePrimeMergeOptions,
+    same_junction_offset: u32,
+) -> Vec<usize> {
     let junctions_cache: Vec<Vec<u32>> = tracks
         .iter()
         .map(|track| junction_positions(&track.tx))
         .collect();
     let exon_lens: Vec<u32> = tracks.iter().map(|track| exon_len(&track.tx)).collect();
     let is_reference: Vec<bool> = tracks.iter().map(Track::is_reference).collect();
-    let exact_duplicate_representative =
-        build_exact_duplicate_representatives(tracks, &junctions_cache, &is_reference);
-    let target_eligible: Vec<bool> = exact_duplicate_representative
-        .iter()
-        .map(Option::is_none)
-        .collect();
-    let sl_cluster_support =
-        build_sl_five_prime_cluster_support(tracks, &junctions_cache, sw_score, sl_options);
-    let three_prime_cluster_support =
-        build_three_prime_cluster_support(tracks, &junctions_cache, three_prime_options);
+    let mut dropped = coalesce_exact_duplicate_reads(tracks, &junctions_cache, &is_reference);
+    let target_eligible: Vec<bool> = dropped.iter().map(|dropped| !dropped).collect();
 
     let suffix_index = build_junction_suffix_index(&junctions_cache, &target_eligible);
     let length_index = build_junction_length_index(&junctions_cache, &target_eligible);
     let single_exon_index = SingleExonTargetIndex::new(tracks, &junctions_cache, &target_eligible);
+    // Decisions use frozen support and live coordinate bounds, not membership
+    // sizes. Record incoming edges instead of copying large read sets through
+    // every intermediate target. Dropped sources cannot receive later edges.
+    // ponytail: O(E) edge storage per batch; compress ancestry only if dense
+    // unbatched loci make this measured memory cost a bottleneck.
+    let mut membership_sources = vec![Vec::new(); tracks.len()];
 
-    let mut dropped: Vec<bool> = vec![false; tracks.len()];
     for i in 0..tracks.len() {
         if dropped[i] {
             continue;
@@ -1436,10 +1550,6 @@ fn junction_simple_merge_with_options(
                         tracks,
                         junctions_cache: &junctions_cache,
                         exon_lens: &exon_lens,
-                        is_reference: &is_reference,
-                        sl_cluster_support: &sl_cluster_support,
-                        three_prime_cluster_support: &three_prime_cluster_support,
-                        sw_score,
                         sl_options,
                         three_prime_options,
                         same_junction_offset,
@@ -1450,7 +1560,8 @@ fn junction_simple_merge_with_options(
                 if should_merge {
                     dropped[i] = true;
                     let (short, long) = get_two_mut(tracks, i, j);
-                    long.subreads.extend(short.subreads.iter().cloned());
+                    long.absorb_terminal_evidence(short);
+                    membership_sources[j].push(i);
                 }
             }
             continue;
@@ -1485,10 +1596,6 @@ fn junction_simple_merge_with_options(
                     tracks,
                     junctions_cache: &junctions_cache,
                     exon_lens: &exon_lens,
-                    is_reference: &is_reference,
-                    sl_cluster_support: &sl_cluster_support,
-                    three_prime_cluster_support: &three_prime_cluster_support,
-                    sw_score,
                     sl_options,
                     three_prime_options,
                     same_junction_offset,
@@ -1499,7 +1606,8 @@ fn junction_simple_merge_with_options(
             if should_merge {
                 dropped[i] = true;
                 let (short, long) = get_two_mut(tracks, i, j);
-                long.subreads.extend(short.subreads.iter().cloned());
+                long.absorb_terminal_evidence(short);
+                membership_sources[j].push(i);
             }
         }
     }
@@ -1508,6 +1616,27 @@ fn junction_simple_merge_with_options(
     for (idx, _track) in tracks.iter().enumerate() {
         if !dropped[idx] || is_reference[idx] {
             keep_vec.push(idx);
+        }
+    }
+    let mut visited = vec![usize::MAX; tracks.len()];
+    for &target in &keep_vec {
+        if membership_sources[target].is_empty() {
+            continue;
+        }
+        // A retained root cannot be an ancestor of another retained root:
+        // reads with outgoing edges are dropped, and references never merge.
+        // Target indices are distinct visit stamps, avoiding an O(N) reset
+        // for every retained root while preserving per-root traversal.
+        visited[target] = target;
+        let mut pending = membership_sources[target].clone();
+        while let Some(source) = pending.pop() {
+            if std::mem::replace(&mut visited[source], target) == target {
+                continue;
+            }
+            debug_assert!(dropped[source] && !is_reference[source]);
+            pending.extend(membership_sources[source].iter().copied());
+            let (source, target) = get_two_mut(tracks, source, target);
+            target.subreads.extend(source.subreads.iter().cloned());
         }
     }
     keep_vec
@@ -1525,19 +1654,15 @@ fn junction_simple_merge_naive_with_options(
     sl_options: SlMergeOptions,
     same_junction_offset: u32,
 ) -> Vec<usize> {
+    let three_prime_options = ThreePrimeMergeOptions::default();
+    freeze_terminal_cluster_support(tracks, sw_score, sl_options, three_prime_options);
     let junctions_cache: Vec<Vec<u32>> = tracks
         .iter()
         .map(|track| junction_positions(&track.tx))
         .collect();
     let exon_lens: Vec<u32> = tracks.iter().map(|track| exon_len(&track.tx)).collect();
     let is_reference: Vec<bool> = tracks.iter().map(Track::is_reference).collect();
-    let sl_cluster_support =
-        build_sl_five_prime_cluster_support(tracks, &junctions_cache, sw_score, sl_options);
-    let three_prime_options = ThreePrimeMergeOptions::default();
-    let three_prime_cluster_support =
-        build_three_prime_cluster_support(tracks, &junctions_cache, three_prime_options);
-
-    let mut dropped: Vec<bool> = vec![false; tracks.len()];
+    let mut dropped = coalesce_exact_duplicate_reads(tracks, &junctions_cache, &is_reference);
     for i in 0..tracks.len() {
         if dropped[i] {
             continue;
@@ -1556,10 +1681,6 @@ fn junction_simple_merge_naive_with_options(
                     tracks,
                     junctions_cache: &junctions_cache,
                     exon_lens: &exon_lens,
-                    is_reference: &is_reference,
-                    sl_cluster_support: &sl_cluster_support,
-                    three_prime_cluster_support: &three_prime_cluster_support,
-                    sw_score,
                     sl_options,
                     three_prime_options,
                     same_junction_offset,
@@ -1570,7 +1691,7 @@ fn junction_simple_merge_naive_with_options(
             if should_merge {
                 dropped[i] = true;
                 let (short, long) = get_two_mut(tracks, i, j);
-                long.subreads.extend(short.subreads.iter().cloned());
+                long.absorb(short);
             }
         }
     }
@@ -1618,7 +1739,7 @@ fn merge_tracks_by_name(tracks: Vec<Track>) -> Vec<Track> {
             crate::identity::novel_isoform_id(&track.tx),
         );
         if let Some(&idx) = index_by_source_name_and_structure.get(&key) {
-            out[idx].subreads.extend(track.subreads);
+            out[idx].absorb(&track);
         } else {
             index_by_source_name_and_structure.insert(key, out.len());
             out.push(track);
@@ -1643,14 +1764,12 @@ fn split_reference_and_read_tracks(tracks: Vec<Track>) -> (Vec<Track>, Vec<Track
 
 fn merge_one_batch(
     mut tracks: Vec<Track>,
-    sw_score: i64,
     sl_options: SlMergeOptions,
     three_prime_options: ThreePrimeMergeOptions,
     same_junction_offset: u32,
 ) -> Vec<Track> {
-    let keep_indices = junction_simple_merge_with_options(
+    let keep_indices = junction_simple_merge_with_frozen_support(
         &mut tracks,
-        sw_score,
         sl_options,
         three_prime_options,
         same_junction_offset,
@@ -1662,7 +1781,6 @@ fn merge_read_batches(
     ref_tracks: &[Track],
     read_tracks: Vec<Track>,
     batch_size: usize,
-    sw_score: i64,
     sl_options: SlMergeOptions,
     three_prime_options: ThreePrimeMergeOptions,
     same_junction_offset: u32,
@@ -1676,13 +1794,7 @@ fn merge_read_batches(
         batch.extend(chunk.iter().cloned());
 
         let before_len = batch.len();
-        let merged = merge_one_batch(
-            batch,
-            sw_score,
-            sl_options,
-            three_prime_options,
-            same_junction_offset,
-        );
+        let merged = merge_one_batch(batch, sl_options, three_prime_options, same_junction_offset);
         if merged.len() < before_len {
             changed = true;
         }
@@ -1706,6 +1818,19 @@ fn batch_junction_simple_merge(
     let max_rounds = max_rounds.max(1);
 
     let mut tracks = tracks;
+    freeze_terminal_cluster_support(&mut tracks, sw_score, sl_options, three_prime_options);
+    let junctions = tracks
+        .iter()
+        .map(|track| junction_positions(&track.tx))
+        .collect::<Vec<_>>();
+    let is_reference = tracks.iter().map(Track::is_reference).collect::<Vec<_>>();
+    let duplicates = coalesce_exact_duplicate_reads(&mut tracks, &junctions, &is_reference);
+    let keep = duplicates
+        .iter()
+        .enumerate()
+        .filter_map(|(i, dropped)| (!dropped).then_some(i))
+        .collect();
+    let mut tracks = select_tracks_by_keep_indices(tracks, keep);
     let mut rounds = 0usize;
     let mut previous_len = tracks.len();
 
@@ -1720,7 +1845,6 @@ fn batch_junction_simple_merge(
             combined.extend(reads);
             return merge_one_batch(
                 combined,
-                sw_score,
                 sl_options,
                 three_prime_options,
                 same_junction_offset,
@@ -1731,7 +1855,6 @@ fn batch_junction_simple_merge(
             &refs,
             reads,
             batch_size,
-            sw_score,
             sl_options,
             three_prime_options,
             same_junction_offset,
@@ -1751,7 +1874,6 @@ fn batch_junction_simple_merge(
     combined.extend(reads);
     merge_one_batch(
         combined,
-        sw_score,
         sl_options,
         three_prime_options,
         same_junction_offset,
@@ -2829,8 +2951,62 @@ mod tests {
 
         assert_eq!(keep_indexed, keep_naive);
         assert_eq!(tracks.len(), naive_tracks.len());
-        for (indexed, naive) in tracks.iter().zip(naive_tracks.iter()) {
-            assert_eq!(indexed.subreads, naive.subreads);
+        // Dropped intermediates defer membership materialization; retained
+        // tracks must still match the eager-union oracle exactly.
+        for idx in keep_indexed {
+            assert_eq!(tracks[idx].subreads, naive_tracks[idx].subreads);
+        }
+    }
+
+    #[test]
+    fn deferred_memberships_preserve_diamond_paths_and_multiple_roots() {
+        for strand in [Strand::Plus, Strand::Minus] {
+            for single_exon in [false, true] {
+                let mut tracks = [(100, 800), (80, 830), (60, 850), (0, 1000), (20, 980)]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, (start, end))| {
+                        let exons = if single_exon {
+                            vec![(start, end)]
+                        } else {
+                            vec![(start, 200), (500, end)]
+                        };
+                        let tx = mirrored_terminal_test_tx(
+                            if i < 2 { "shared_name" } else { "other" },
+                            strand,
+                            &exons,
+                            if i >= 3 {
+                                "isoform_anno"
+                            } else {
+                                "nanopore_read"
+                            },
+                            0,
+                        );
+                        if i >= 3 {
+                            Track::reference(tx)
+                        } else {
+                            Track::read(tx, i)
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let mut eager = tracks.clone();
+                let expected_keep = junction_simple_merge_naive(&mut eager, -1);
+                let keep = junction_simple_merge(&mut tracks, -1);
+                assert_eq!(keep, vec![3, 4]);
+                assert_eq!(keep, expected_keep);
+                for i in keep {
+                    assert_eq!(tracks[i].subreads, eager[i].subreads);
+                    assert_eq!(tracks[i].subreads.len(), 3);
+                    assert_eq!(
+                        tracks[i]
+                            .subreads
+                            .iter()
+                            .filter(|r| r.name == "shared_name")
+                            .count(),
+                        2
+                    );
+                }
+            }
         }
     }
 
@@ -3049,10 +3225,13 @@ mod tests {
 
             let keep_indexed = junction_simple_merge(&mut tracks, 11);
 
-            prop_assert_eq!(keep_indexed, keep_naive);
+            prop_assert_eq!(&keep_indexed, &keep_naive);
             prop_assert_eq!(tracks.len(), naive_tracks.len());
-            for (indexed, naive) in tracks.iter().zip(naive_tracks.iter()) {
+            for idx in keep_indexed {
+                let (indexed, naive) = (&tracks[idx], &naive_tracks[idx]);
                 prop_assert_eq!(&indexed.subreads, &naive.subreads);
+                prop_assert_eq!(indexed.terminal_support.protected_five_prime, naive.terminal_support.protected_five_prime);
+                prop_assert_eq!(indexed.terminal_support.protected_three_prime, naive.terminal_support.protected_three_prime);
             }
         }
     }
@@ -3620,6 +3799,519 @@ mod tests {
         let early_stop_reads = decoded_subreads(early_stop_tx);
         assert!(early_stop_reads.contains("early_stop_b"));
         assert!(early_stop_reads.contains("early_stop_e"));
+    }
+
+    fn mirrored_terminal_test_tx(
+        name: &str,
+        strand: Strand,
+        exons: &[(u32, u32)],
+        ttype: &str,
+        score: u32,
+    ) -> Transcript {
+        let mirrored;
+        let exons = if strand == Strand::Minus {
+            mirrored = exons
+                .iter()
+                .rev()
+                .map(|&(start, end)| (2000 - end, 2000 - start))
+                .collect::<Vec<_>>();
+            &mirrored
+        } else {
+            exons
+        };
+        make_tx(name, strand, exons, ttype, score)
+    }
+
+    #[test]
+    fn terminal_evidence_same_structure_sl_is_order_independent() {
+        for strand in [Strand::Plus, Strand::Minus] {
+            let reference = mirrored_terminal_test_tx(
+                "ref",
+                strand,
+                &[(0, 200), (500, 1000)],
+                "isoform_anno",
+                100,
+            );
+            let reads = [12, 12, 0]
+                .into_iter()
+                .enumerate()
+                .map(|(i, score)| {
+                    mirrored_terminal_test_tx(
+                        &format!("read_{i}"),
+                        strand,
+                        &[(100, 200), (500, 1000)],
+                        "nanopore_read",
+                        score,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let expected_id = crate::identity::novel_isoform_id(&reads[0]);
+            let mut expected = None;
+            for order in [
+                [0, 1, 2],
+                [0, 2, 1],
+                [1, 0, 2],
+                [1, 2, 0],
+                [2, 0, 1],
+                [2, 1, 0],
+            ] {
+                let permuted = order.map(|i| reads[i].clone());
+                for batch in [0, 1, 2, 3, 500] {
+                    let actual = clusterj(
+                        &permuted,
+                        Some(std::slice::from_ref(&reference)),
+                        1,
+                        11,
+                        batch,
+                        100,
+                    );
+                    assert_eq!(
+                        actual.isoforms.len(),
+                        2,
+                        "{strand:?} {order:?} batch={batch}"
+                    );
+                    assert_eq!(
+                        actual.read_to_isoform,
+                        reads
+                            .iter()
+                            .map(|r| (r.name.clone(), expected_id.clone()))
+                            .collect::<Vec<_>>()
+                    );
+                    assert!(actual.unused.is_empty());
+                    if let Some(ref isoforms) = expected {
+                        assert_eq!(&actual.isoforms, isoforms);
+                    } else {
+                        expected = Some(actual.isoforms);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_evidence_single_sl_is_not_upgraded_by_ordinary_duplicates() {
+        let reference = make_tx(
+            "ref",
+            Strand::Plus,
+            &[(0, 200), (500, 1000)],
+            "isoform_anno",
+            100,
+        );
+        let reads = (0..8)
+            .map(|i| {
+                make_tx(
+                    &format!("read_{i}"),
+                    Strand::Plus,
+                    &[(100, 200), (500, 1000)],
+                    "nanopore_read",
+                    if i == 0 { 12 } else { 0 },
+                )
+            })
+            .collect::<Vec<_>>();
+        for batch in [0, 1, 3, 500] {
+            let actual = clusterj(
+                &reads,
+                Some(std::slice::from_ref(&reference)),
+                1,
+                11,
+                batch,
+                100,
+            );
+            assert_eq!(actual.isoforms.len(), 1);
+            assert_eq!(actual.read_to_isoform.len(), reads.len());
+            assert!(actual
+                .read_to_isoform
+                .iter()
+                .all(|(_, target)| target == "ref"));
+            assert!(actual.unused.is_empty());
+        }
+    }
+
+    #[test]
+    fn terminal_evidence_three_prime_cannot_escape_through_singleton() {
+        for strand in [Strand::Plus, Strand::Minus] {
+            let reference = mirrored_terminal_test_tx(
+                "ref",
+                strand,
+                &[(0, 200), (500, 1000)],
+                "isoform_anno",
+                100,
+            );
+            let mut reads = (0..5)
+                .map(|i| {
+                    mirrored_terminal_test_tx(
+                        &format!("alt_{i}"),
+                        strand,
+                        &[(100, 200), (500, 800)],
+                        "nanopore_read",
+                        0,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let expected_id = crate::identity::novel_isoform_id(&reads[0]);
+            for singleton in [false, true] {
+                if singleton {
+                    reads.push(mirrored_terminal_test_tx(
+                        "singleton",
+                        strand,
+                        &[(100, 200), (500, 830)],
+                        "nanopore_read",
+                        0,
+                    ));
+                }
+                for batch in [0, 1, 2, 3, 500] {
+                    let actual = clusterj(
+                        &reads,
+                        Some(std::slice::from_ref(&reference)),
+                        1,
+                        -1,
+                        batch,
+                        100,
+                    );
+                    assert_eq!(
+                        actual.isoforms.len(),
+                        2,
+                        "{strand:?} singleton={singleton} batch={batch}"
+                    );
+                    for i in 0..5 {
+                        assert_eq!(mapped_isoform_id(&actual, &format!("alt_{i}")), expected_id);
+                    }
+                    assert!(actual.unused.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_evidence_three_prime_cannot_drift_through_supported_containers() {
+        for strand in [Strand::Plus, Strand::Minus] {
+            let reference = mirrored_terminal_test_tx(
+                "ref",
+                strand,
+                &[(0, 200), (500, 920)],
+                "isoform_anno",
+                100,
+            );
+            let reads = [800, 840, 880]
+                .into_iter()
+                .flat_map(|end| {
+                    (0..5).map(move |i| {
+                        mirrored_terminal_test_tx(
+                            &format!("end_{end}_{i}"),
+                            strand,
+                            &[(100, 200), (500, end)],
+                            "nanopore_read",
+                            0,
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            for batch in [0, 1, 2, 5, 500] {
+                let actual = clusterj(
+                    &reads,
+                    Some(std::slice::from_ref(&reference)),
+                    1,
+                    -1,
+                    batch,
+                    100,
+                );
+                assert!(actual.unused.is_empty());
+                for read in &reads {
+                    for (_, target) in actual
+                        .read_to_isoform
+                        .iter()
+                        .filter(|(name, _)| name == &read.name)
+                    {
+                        let tx = actual
+                            .isoforms
+                            .iter()
+                            .find(|tx| &tx.name == target)
+                            .unwrap();
+                        assert!(
+                            three_prime_end_delta(read, tx).unwrap() <= 50,
+                            "{} escaped to {} {strand:?} batch={batch}",
+                            read.name,
+                            target
+                        );
+                    }
+                }
+                assert!(actual.isoforms.len() > 1);
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_evidence_sl_cannot_drift_or_disappear_in_ordinary_container() {
+        for strand in [Strand::Plus, Strand::Minus] {
+            let reference = mirrored_terminal_test_tx(
+                "ref",
+                strand,
+                &[(0, 200), (500, 1000)],
+                "isoform_anno",
+                100,
+            );
+            // All endpoints have the same independently supported 3' end;
+            // only the SL 5' protection can stop this gradual shift.
+            let reads = [60, 40, 20]
+                .into_iter()
+                .flat_map(|start| {
+                    (0..2).map(move |i| {
+                        mirrored_terminal_test_tx(
+                            &format!("start_{start}_{i}"),
+                            strand,
+                            &[(start, 200), (500, 1000)],
+                            "nanopore_read",
+                            12,
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            for batch in [0, 1, 2, 500] {
+                let actual = clusterj(
+                    &reads,
+                    Some(std::slice::from_ref(&reference)),
+                    1,
+                    11,
+                    batch,
+                    100,
+                );
+                for read in &reads {
+                    let targets = actual
+                        .read_to_isoform
+                        .iter()
+                        .filter(|(name, _)| name == &read.name)
+                        .collect::<Vec<_>>();
+                    assert!(!targets.is_empty());
+                    for (_, target) in targets {
+                        let tx = actual
+                            .isoforms
+                            .iter()
+                            .find(|tx| &tx.name == target)
+                            .unwrap();
+                        assert!(five_prime_end_delta(read, tx).unwrap() <= 25);
+                    }
+                }
+                assert!(actual.unused.is_empty());
+            }
+
+            let mut reads = (0..2)
+                .map(|i| {
+                    mirrored_terminal_test_tx(
+                        &format!("sl_{i}"),
+                        strand,
+                        &[(100, 200), (500, 800)],
+                        "nanopore_read",
+                        12,
+                    )
+                })
+                .collect::<Vec<_>>();
+            reads.push(mirrored_terminal_test_tx(
+                "ordinary",
+                strand,
+                &[(80, 200), (500, 830)],
+                "nanopore_read",
+                0,
+            ));
+            for batch in [0, 1, 2, 500] {
+                let actual = clusterj(
+                    &reads,
+                    Some(std::slice::from_ref(&reference)),
+                    1,
+                    11,
+                    batch,
+                    100,
+                );
+                for read in &reads[..2] {
+                    let target = mapped_isoform_id(&actual, &read.name);
+                    let tx = actual.isoforms.iter().find(|tx| tx.name == target).unwrap();
+                    assert!(five_prime_end_delta(read, tx).unwrap() <= 25);
+                }
+                assert!(actual.unused.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_evidence_coalescing_respects_identity_and_raw_metadata() {
+        let tx = make_tx(
+            "same_name",
+            Strand::Plus,
+            &[(100, 200), (500, 800)],
+            "nanopore_read",
+            12,
+        );
+        let mut other_metadata = tx.clone();
+        other_metadata.item_rgb = "255,0,0".into();
+        let mut other_gene = tx.clone();
+        other_gene.metadata_mut().set_gene_id("other_gene");
+        let mut expected = None;
+        for reverse in [false, true] {
+            let mut tracks = vec![
+                Track::read(tx.clone(), 0),
+                Track::read(other_metadata.clone(), 1),
+                Track::read(other_gene.clone(), 2),
+                Track::reference(tx.clone()),
+            ];
+            if reverse {
+                tracks.reverse();
+            }
+            freeze_terminal_cluster_support(
+                &mut tracks,
+                11,
+                SlMergeOptions::default(),
+                ThreePrimeMergeOptions::default(),
+            );
+            let junctions = tracks
+                .iter()
+                .map(|track| junction_positions(&track.tx))
+                .collect::<Vec<_>>();
+            let refs = tracks.iter().map(Track::is_reference).collect::<Vec<_>>();
+            let dropped = coalesce_exact_duplicate_reads(&mut tracks, &junctions, &refs);
+            let mut kept = tracks
+                .into_iter()
+                .zip(dropped)
+                .filter_map(|(track, dropped)| (!dropped).then_some(track))
+                .collect::<Vec<_>>();
+            assert_eq!(kept.len(), 3);
+            assert_eq!(kept.iter().filter(|track| track.is_reference()).count(), 1);
+            assert_eq!(
+                kept.iter().map(|track| track.subreads.len()).sum::<usize>(),
+                3
+            );
+            kept.sort_by(preferred_read_order);
+            let serialized = kept.into_iter().map(|track| track.tx).collect::<Vec<_>>();
+            if let Some(ref expected) = expected {
+                assert_eq!(&serialized, expected);
+            } else {
+                expected = Some(serialized);
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_evidence_truncated_chain_does_not_donate_three_prime_support() {
+        let mut tracks = (0..5)
+            .map(|i| {
+                make_track(
+                    &format!("partial_{i}"),
+                    Strand::Plus,
+                    &[(300, 400), (500, 800)],
+                    "nanopore_read",
+                    0,
+                )
+            })
+            .collect::<Vec<_>>();
+        tracks.push(make_track(
+            "long",
+            Strand::Plus,
+            &[(0, 200), (300, 400), (500, 1000)],
+            "nanopore_read",
+            0,
+        ));
+        freeze_terminal_cluster_support(
+            &mut tracks,
+            -1,
+            SlMergeOptions::default(),
+            ThreePrimeMergeOptions::default(),
+        );
+        assert!(tracks[0].terminal_support.protected_three_prime.is_some());
+        let keep = junction_simple_merge_with_frozen_support(
+            &mut tracks,
+            SlMergeOptions::default(),
+            ThreePrimeMergeOptions::default(),
+            0,
+        );
+        assert_eq!(keep, vec![5]);
+        assert_eq!(tracks[5].subreads.len(), 6);
+        assert_eq!(tracks[5].terminal_support.three_prime, 1);
+        assert!(tracks[5].terminal_support.protected_three_prime.is_none());
+    }
+
+    #[test]
+    fn batching_preserves_locus_wide_terminal_support() {
+        for strand in [Strand::Plus, Strand::Minus] {
+            // The 3' cluster straddles the default batch boundary as 2 + 3
+            // reads. SL support also straddles a boundary when batches have
+            // one read. Both must be based on the complete corrected locus.
+            for (label, full_count, alt_count, alt_end, sw_score, alt_score) in [
+                ("three_prime", 498, 5, 800, -1, 0),
+                ("sl", 499, 2, 1000, 11, 12),
+            ] {
+                let refs = vec![mirrored_terminal_test_tx(
+                    "ref",
+                    strand,
+                    &[(0, 200), (500, 1000)],
+                    "isoform_anno",
+                    100,
+                )];
+                let mut reads = (0..full_count)
+                    .map(|index| {
+                        mirrored_terminal_test_tx(
+                            &format!("full_{index}"),
+                            strand,
+                            &[(0, 200), (500, 1000)],
+                            "nanopore_read",
+                            0,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                reads.extend((0..alt_count).map(|index| {
+                    mirrored_terminal_test_tx(
+                        &format!("alt_{index}"),
+                        strand,
+                        &[(100, 200), (500, alt_end)],
+                        "nanopore_read",
+                        alt_score,
+                    )
+                }));
+                let expected = clusterj_with_name2_mode(
+                    &reads,
+                    Some(&refs),
+                    1,
+                    sw_score,
+                    0,
+                    100,
+                    Name2Mode::Full,
+                );
+                assert_eq!(expected.isoforms.len(), 2, "{label} {strand:?}");
+                assert_eq!(expected.read_to_isoform.len(), reads.len());
+                assert!(expected.unused.is_empty());
+                let alt_id = mapped_isoform_id(&expected, "alt_0");
+                assert_ne!(alt_id, "ref");
+                for index in 0..alt_count {
+                    assert_eq!(
+                        mapped_isoform_id(&expected, &format!("alt_{index}")),
+                        alt_id
+                    );
+                }
+
+                for reverse in [false, true] {
+                    if reverse {
+                        reads.reverse();
+                    }
+                    for batch_size in [1, 499, 500, 501] {
+                        let actual = clusterj_with_name2_mode(
+                            &reads,
+                            Some(&refs),
+                            1,
+                            sw_score,
+                            batch_size,
+                            100,
+                            Name2Mode::Full,
+                        );
+                        assert_eq!(
+                            actual.isoforms, expected.isoforms,
+                            "{label} {strand:?} batch={batch_size} reverse={reverse}"
+                        );
+                        assert_eq!(
+                            actual.read_to_isoform, expected.read_to_isoform,
+                            "{label} {strand:?} batch={batch_size} reverse={reverse}"
+                        );
+                        assert!(actual.unused.is_empty());
+                    }
+                }
+            }
+        }
     }
 
     #[test]

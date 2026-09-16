@@ -160,7 +160,7 @@ pub struct ClusteringConfig {
     pub batch_rounds: usize,
     /// Encoding used for BED `name2` output.
     pub name2_mode: Name2Mode,
-    /// Junction-mode configuration.
+    /// Junction-mode configuration; the partial SL 5' offset is shared with overlap mode.
     pub junction: JunctionConfig,
     /// Overlap-mode configuration.
     pub overlap: OverlapConfig,
@@ -195,6 +195,7 @@ impl ClusteringConfig {
             cutoff2: self.overlap.cutoff2,
             intron_weight: self.overlap.intron_weight,
             sw_score: self.sw_score,
+            sl_five_prime_merge_offset: self.junction.sl.partial_five_prime_end_offset,
             name2_mode: self.name2_mode,
             batch_size: self.batch_size,
             batch_rounds: self.batch_rounds,

@@ -33,6 +33,230 @@ fn bed_names(path: &Path) -> Vec<String> {
         .collect()
 }
 
+fn terminal_bed(name: &str, start: u32, end: u32, score: u32, reverse: bool) -> String {
+    let (start, end, sizes, starts, strand) = if reverse {
+        (
+            2000 - end,
+            2000 - start,
+            format!("{},{}", end - 500, 200 - start),
+            format!("0,{}", end - 200),
+            '-',
+        )
+    } else {
+        (
+            start,
+            end,
+            format!("{},{}", 200 - start, end - 500),
+            format!("0,{}", 500 - start),
+            '+',
+        )
+    };
+    format!("chr1\t{start}\t{end}\t{name}\t{score}\t{strand}\t0\t0\t0\t2\t{sizes},\t{starts},\n")
+}
+
+#[test]
+fn clusterj_cli_mixed_score_duplicates_are_order_and_batch_invariant() {
+    let root = fresh_temp_dir("clusterj_mixed_score_duplicates");
+    let reads = root.join("reads.bed");
+    let reference = root.join("reference.bed");
+    fs::write(&reference, terminal_bed("ref", 0, 1000, 100, false)).unwrap();
+    let records = [
+        terminal_bed("sl1", 100, 1000, 12, false),
+        terminal_bed("sl2", 100, 1000, 12, false),
+        terminal_bed("ordinary", 100, 1000, 0, false),
+    ];
+    let mut expected = None;
+    for order in [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ] {
+        fs::write(&reads, order.map(|index| records[index].as_str()).concat()).unwrap();
+        for batch in [0, 1, 500] {
+            let out = root.join("isoforms.bed");
+            let output = Command::new(env!("CARGO_BIN_EXE_trackcluster"))
+                .args(["clusterj", "--reads"])
+                .arg(&reads)
+                .arg("--reference")
+                .arg(&reference)
+                .arg("--out")
+                .arg(&out)
+                .args(["--sw-score", "11", "--batch-size", &batch.to_string()])
+                .output()
+                .unwrap();
+            assert_success(&output, "clusterj mixed-score duplicates");
+            let isoforms = trackcluster_rs::io::bed::read_bed12(&out)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(isoforms.len(), 2, "order={order:?} batch={batch}");
+            let alt = isoforms.iter().find(|tx| tx.tx_start.get() == 100).unwrap();
+            assert_eq!(alt.tx_end.get(), 1000);
+            assert_eq!(alt.score, 12);
+            let mut mapping = normalized_lines(&out.with_extension("read_to_isoform.tsv"));
+            mapping.sort();
+            assert_eq!(
+                mapping,
+                ["ordinary", "sl1", "sl2"].map(|name| format!("{name}\t{}", alt.name))
+            );
+            assert!(normalized_lines(&out.with_extension("unused.bed")).is_empty());
+            let mut bed = normalized_lines(&out);
+            bed.sort();
+            let result = (bed, mapping);
+            assert_eq!(expected.get_or_insert_with(|| result.clone()), &result);
+        }
+    }
+}
+
+#[test]
+fn clusterj_cli_retains_supported_three_prime_end_with_a_singleton_intermediate() {
+    let root = fresh_temp_dir("clusterj_three_prime_intermediate");
+    let reads = root.join("reads.bed");
+    let reference = root.join("reference.bed");
+    fs::write(&reference, terminal_bed("ref", 0, 1000, 100, false)).unwrap();
+    let supported: String = (0..5)
+        .map(|index| terminal_bed(&format!("alt{index}"), 100, 800, 0, false))
+        .collect();
+    for bridge in [false, true] {
+        let mut input = supported.clone();
+        if bridge {
+            input.push_str(&terminal_bed("singleton", 100, 830, 0, false));
+        }
+        fs::write(&reads, input).unwrap();
+        for batch in [0, 2, 500] {
+            let out = root.join("isoforms.bed");
+            let output = Command::new(env!("CARGO_BIN_EXE_trackcluster"))
+                .args(["clusterj", "--reads"])
+                .arg(&reads)
+                .arg("--reference")
+                .arg(&reference)
+                .arg("--out")
+                .arg(&out)
+                .args(["--batch-size", &batch.to_string()])
+                .output()
+                .unwrap();
+            assert_success(&output, "clusterj 3prime singleton intermediate");
+            let isoforms = trackcluster_rs::io::bed::read_bed12(&out)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(isoforms.len(), 2, "bridge={bridge} batch={batch}");
+            let alt = isoforms.iter().find(|tx| tx.tx_end.get() == 800).unwrap();
+            assert_eq!(alt.tx_start.get(), 100);
+            let mapping = normalized_lines(&out.with_extension("read_to_isoform.tsv"));
+            for index in 0..5 {
+                let pairs: Vec<_> = mapping
+                    .iter()
+                    .filter(|line| line.starts_with(&format!("alt{index}\t")))
+                    .collect();
+                assert_eq!(pairs, [&format!("alt{index}\t{}", alt.name)]);
+            }
+            if bridge {
+                assert!(mapping.contains(&"singleton\tref".to_owned()));
+            }
+            assert!(normalized_lines(&out.with_extension("unused.bed")).is_empty());
+        }
+    }
+}
+
+#[test]
+fn clusterj_cli_terminal_evidence_crosses_production_batches_on_both_strands() {
+    let root = fresh_temp_dir("clusterj_terminal_production_batches");
+    let reads = root.join("reads.bed");
+    let reference = root.join("reference.bed");
+    let mut refs = String::new();
+    let mut input = String::new();
+    let mut read_names = std::collections::BTreeSet::new();
+    for reverse in [false, true] {
+        let label = if reverse { "minus" } else { "plus" };
+        refs.push_str(&terminal_bed(
+            &format!("ref_{label}"),
+            0,
+            1000,
+            100,
+            reverse,
+        ));
+        // Distinct structures keep this larger than a batch after exact-duplicate coalescing.
+        for index in 0..502 {
+            let name = format!("full_{label}_{index}");
+            input.push_str(&terminal_bed(
+                &name,
+                index % 100,
+                995 + index / 100,
+                0,
+                reverse,
+            ));
+            read_names.insert(name);
+            if index >= 497 {
+                let name = format!("alt_{label}_{index}");
+                input.push_str(&terminal_bed(&name, 100, 800, 0, reverse));
+                read_names.insert(name);
+            }
+        }
+        let name = format!("singleton_{label}");
+        input.push_str(&terminal_bed(&name, 100, 830, 0, reverse));
+        read_names.insert(name);
+    }
+    fs::write(&reference, refs).unwrap();
+    fs::write(&reads, input).unwrap();
+    let mut expected = None;
+    for batch in [499, 500, 501] {
+        for threads in [1, 2] {
+            let out = root.join("isoforms.bed");
+            let output = Command::new(env!("CARGO_BIN_EXE_trackcluster"))
+                .args(["clusterj", "--reads"])
+                .arg(&reads)
+                .arg("--reference")
+                .arg(&reference)
+                .arg("--out")
+                .arg(&out)
+                .args([
+                    "--batch-size",
+                    &batch.to_string(),
+                    "--threads",
+                    &threads.to_string(),
+                ])
+                .output()
+                .unwrap();
+            assert_success(&output, "clusterj production terminal batches");
+            let isoforms = trackcluster_rs::io::bed::read_bed12(&out)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(isoforms.len(), 4, "batch={batch} threads={threads}");
+            let mut mapping = normalized_lines(&out.with_extension("read_to_isoform.tsv"));
+            mapping.sort();
+            let represented: std::collections::BTreeSet<_> = mapping
+                .iter()
+                .map(|line| line.split_once('\t').unwrap().0.to_owned())
+                .collect();
+            assert_eq!(represented, read_names);
+            for (label, start, end) in [("plus", 100, 800), ("minus", 1200, 1900)] {
+                let alt = isoforms
+                    .iter()
+                    .find(|tx| (tx.tx_start.get(), tx.tx_end.get()) == (start, end))
+                    .unwrap();
+                for index in 497..502 {
+                    let name = format!("alt_{label}_{index}");
+                    let targets: Vec<_> = mapping
+                        .iter()
+                        .filter(|line| line.starts_with(&format!("{name}\t")))
+                        .collect();
+                    assert_eq!(targets, [&format!("{name}\t{}", alt.name)]);
+                }
+            }
+            assert!(normalized_lines(&out.with_extension("unused.bed")).is_empty());
+            let mut bed = normalized_lines(&out);
+            bed.sort();
+            let result = (bed, mapping);
+            assert_eq!(expected.get_or_insert_with(|| result.clone()), &result);
+        }
+    }
+}
+
 #[test]
 fn clusterj_matches_golden_outputs() {
     let exe = env!("CARGO_BIN_EXE_trackcluster");
