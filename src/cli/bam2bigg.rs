@@ -34,7 +34,7 @@ pub struct Args {
     )]
     pub out: PathBuf,
 
-    /// Minimum MAPQ retained
+    /// Minimum MAPQ retained (filter only; output BED score is 0 without SL evidence)
     #[arg(
         short = 's',
         long = "score",

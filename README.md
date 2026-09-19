@@ -107,6 +107,7 @@ trackcluster validate-bed -i examples/minimal.bed
 
 # Convert your own genome-aligned BAM to TrackCluster BED12+8. The default MAPQ cutoff is 30.
 # (A BAM is not bundled with the tiny text examples.)
+# Output BED score is 0 because no SL evidence is imported. MAPQ only filters records.
 trackcluster bam2bigg --bamfile alignments.bam --out reads.bed
 
 # Convert the packaged GFF3 model to a deterministic reference BED12+8 catalog.

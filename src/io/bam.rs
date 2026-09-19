@@ -1,4 +1,7 @@
 //! Pure-Rust conversion of spliced BAM alignments into TrackCluster transcripts.
+//!
+//! MAPQ filters alignments; it is not an SL score. Since this converter does not
+//! extract SL evidence, converted transcripts use the no-SL BED score of zero.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -413,11 +416,6 @@ fn record_to_transcript(
     } else {
         Strand::Plus
     };
-    let score = record
-        .mapping_quality()
-        .map(u8::from)
-        .map(u32::from)
-        .unwrap_or(0);
     let exon_frames = format!(
         "{},",
         std::iter::repeat_n("-1", exons.len())
@@ -438,7 +436,8 @@ fn record_to_transcript(
         name.clone(),
         exons,
         Bed12Attrs {
-            score,
+            // No SL evidence is imported here. MAPQ only filters records in scan_bam.
+            score: 0,
             thick_start: Coord::new(0),
             thick_end: Coord::new(0),
             item_rgb: item_rgb.to_owned(),

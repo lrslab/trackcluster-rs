@@ -96,7 +96,8 @@ Flags and defaults:
 
 - `--bamfile/-b` (required; alias `--input`): input BAM.
 - `--out/-o` (alias `--output`, default `bigg.bed`): output BED12+8 text.
-- `--score/-s` (alias `--min-mapq`, default `30`): minimum retained MAPQ.
+- `--score/-s` (alias `--min-mapq`, default `30`): minimum retained MAPQ;
+  this filters alignments and does not set the output BED score.
 - `--group/-g`: sample/group value written to extra field index `6`. If
   omitted, the BAM filename stem is used; an empty label becomes `none`.
 - `--include-secondary`: retain records carrying flag `0x100` (excluded by
@@ -108,7 +109,7 @@ Flags and defaults:
   all-or-nothing record conversion.
 
 Unmapped records are always skipped. Missing MAPQ is treated as zero for
-filtering and for the BED score. For each retained alignment, only CIGAR `N`
+filtering. For each retained alignment, only CIGAR `N`
 starts a new exon: reference-consuming matches, mismatches, and deletions stay
 inside the current block, while insertions and clipping do not consume the
 reference. Every emitted block must contain at least one `M`, `=`, or `X`;
@@ -119,10 +120,21 @@ later records. Reverse-complement flag `0x10` sets the minus strand. Multiple
 retained records with the same query name remain separate BED alignment
 instances; downstream counting applies the molecule-ID policy.
 
-The BED score is the record MAPQ. The converter writes `name2=none`,
+The BED score is `0` because the converter has no SL evidence. MAPQ is used
+only for filtering and remains in the source BAM. The converter writes `name2=none`,
 `type=nanopore_read`, `geneName=none`, the selected sample/group, no CDS, and
 one `-1` exon frame per block. See [Converter-produced BED12+8](FORMATS.md#converter-produced-bed128)
 for the complete field contract.
+
+This conversion neither computes SW scores nor imports SLRanger `SL_score`.
+Enabling `--sw-score 11` does not detect SL sequences; converted reads with
+score `0` remain without SL protection at that cutoff. Original softclip and
+endpoint sequence evidence is not retained in BED. See the
+[prediction SL evidence contract](design/prediction_sl_evidence_contract.md).
+
+Older converter output used MAPQ as the BED score. Regenerate those BED files
+from BAM to obtain score `0`; if reusing that old output, disable its score-based
+SL interpretation with `--sw-score -1`.
 
 On success, stderr reports total decoded records, emitted records, filtering
 counts, and the invalid-record count. Each invalid-reason class prints only its
@@ -752,6 +764,11 @@ Key flags:
 - `--intron-weight`: intron contribution to the combined overlap distance (default: `0.5`)
 - `--name2-mode`: `coverage` (default), `full`, or `none`
 - `--invalid-read-policy`: `skip` (default) excludes only the invalid read track; `fail` restores strict parsing
+
+Reads without SL evidence have BED score `0`, including current `bam2bigg`
+output, so the default cutoff of `11` does not grant them SL protection.
+For older converter output or other BED files that store MAPQ as score,
+explicitly pass `--sw-score -1`; `cluster` cannot validate the score's source.
 
 Behavior summary:
 - Pass 1 uses the `ratio` distance (`1 - overlap / union_len`) with `--cutoff1`.

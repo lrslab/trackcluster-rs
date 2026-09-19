@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Fix `bam2bigg` writing MAPQ into BED score: converted reads now use score `0`
+  because the converter does not import SL evidence. `--score`/`--min-mapq`
+  still filter by MAPQ. High MAPQ alone no longer protects alternative 5' ends
+  when clustering these reads with `--sw-score 11`. Regenerate older
+  MAPQ-scored converter output from BAM, or use `--sw-score -1` for those files.
 - Fix batched `clusterj` terminal retention by freezing SL 5' and same-junction
   3' support over the complete corrected locus before splitting read batches.
   Later merges preserve the original endpoint evidence rather than recounting

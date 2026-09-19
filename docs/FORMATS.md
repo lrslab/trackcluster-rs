@@ -61,10 +61,10 @@ extension columns in this order:
 
 The standard BED fields differ as follows:
 
-- `bam2bigg` uses the BAM query name, MAPQ as BED score, flag-derived strand,
+- `bam2bigg` uses the BAM query name, BED score `0` (no SL evidence), flag-derived strand,
   strand color (`250,128,114` for `+`, `64,224,208` for `-`), and CIGAR-derived
   blocks. CIGAR `N` alone splits blocks. `thickStart` and `thickEnd` are both
-  zero.
+  zero. MAPQ is used only for filtering and is not written to BED score.
 - `gff2bigg` uses the annotation transcript identity, score `100`, resolved
   exon strand, `itemRgb=0`, and exon-derived blocks. GFF/GTF coordinates
   `[start,end]` become BED `[start-1,end)`. CDS/UTR/phase are not transferred,

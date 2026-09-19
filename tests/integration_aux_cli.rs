@@ -18,7 +18,7 @@ use noodles_sam::{
     header::record::value::{map::ReferenceSequence, Map},
 };
 
-use common::TestDir;
+use common::{assert_success, TestDir};
 
 fn temp_dir(label: &str) -> TestDir {
     TestDir::new(&format!("aux-cli-{label}"))
@@ -497,7 +497,7 @@ fn bam2bigg_cli_converts_spliced_bam_and_filters_low_mapq() {
         .unwrap();
     assert_eq!(imported.len(), 1);
     assert_eq!(imported[0].name, "retained");
-    assert_eq!(imported[0].score, 60);
+    assert_eq!(imported[0].score, 0, "MAPQ is not an SL score");
     assert_eq!(imported[0].item_rgb, "250,128,114");
     assert_eq!(imported[0].extra_fields[6], "sample-A");
     assert_eq!(
@@ -508,6 +508,129 @@ fn bam2bigg_cli_converts_spliced_bam_and_filters_low_mapq() {
             .collect::<Vec<_>>(),
         vec![(100, 110), (130, 140)]
     );
+
+    // The legacy --score flag and its alias filter MAPQ, not the emitted score.
+    for flag in ["--score", "--min-mapq"] {
+        let output = Command::new(executable)
+            .args(["bam2bigg", "--bamfile"])
+            .arg(&bam)
+            .arg("--out")
+            .arg(&bed)
+            .args([flag, "0"])
+            .output()
+            .unwrap();
+        assert_success(&output, "bam2bigg without MAPQ filtering");
+        let unfiltered = trackcluster_rs::io::bed::read_bed12(&bed)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(unfiltered.len(), 2);
+        assert!(unfiltered.iter().all(|tx| tx.score == 0));
+    }
+}
+
+#[test]
+fn bam2bigg_high_mapq_without_sl_does_not_protect_alternative_five_prime_ends() {
+    let root = temp_dir("bam2bigg-no-sl");
+    let executable = env!("CARGO_BIN_EXE_trackcluster");
+    let bam = root.join("reads.bam");
+    let bed = root.join("reads.bed");
+    let reference = root.join("reference.bed");
+    let header = noodles_sam::Header::builder()
+        .add_reference_sequence(
+            "chr1".to_owned(),
+            Map::<ReferenceSequence>::new(NonZeroUsize::new(2000).unwrap()),
+        )
+        .build();
+    let mut writer = noodles_bam::io::Writer::new(fs::File::create(&bam).unwrap());
+    writer.write_header(&header).unwrap();
+    let mut expected_mapping = Vec::new();
+    for (strand, start1, left, right, flags) in [
+        ("plus", 101, 100, 500, Flags::empty()),
+        ("minus", 1001, 500, 100, Flags::REVERSE_COMPLEMENTED),
+    ] {
+        for mapq in [60, 254] {
+            let name = format!("read_{strand}_{mapq}");
+            let cigar = vec![
+                CigarOp::new(CigarKind::SoftClip, 5),
+                CigarOp::new(CigarKind::Match, left),
+                CigarOp::new(CigarKind::Skip, 300),
+                CigarOp::new(CigarKind::Match, right),
+                CigarOp::new(CigarKind::SoftClip, 7),
+            ]
+            .into_iter()
+            .collect();
+            let mut record = bam_record(&name, start1, cigar, mapq);
+            *record.flags_mut() = flags;
+            writer.write_alignment_record(&header, &record).unwrap();
+            expected_mapping.push(format!("{name}\tref_{strand}"));
+        }
+    }
+    writer.try_finish().unwrap();
+    expected_mapping.sort();
+    fs::write(
+        &reference,
+        concat!(
+            "chr1\t0\t1000\tref_plus\t100\t+\t0\t0\t0\t2\t200,500,\t0,500,\n",
+            "chr1\t1000\t2000\tref_minus\t100\t-\t0\t0\t0\t2\t500,200,\t0,800,\n",
+        ),
+    )
+    .unwrap();
+    let output = Command::new(executable)
+        .args(["bam2bigg", "--bamfile"])
+        .arg(&bam)
+        .arg("--out")
+        .arg(&bed)
+        .args(["--group", "none"])
+        .output()
+        .unwrap();
+    assert_success(&output, "bam2bigg high MAPQ without SL evidence");
+    let converted = trackcluster_rs::io::bed::read_bed12(&bed)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let in_memory = trackcluster_rs::io::bam::read_bam(&bam, &Default::default()).unwrap();
+    assert_eq!(in_memory.transcripts, converted);
+    assert_eq!(converted.len(), 4);
+
+    for mode in ["clusterj", "cluster"] {
+        for sw_score in [None, Some("11")] {
+            let out = root.join("isoform.bed");
+            let mut command = Command::new(executable);
+            command
+                .args([mode, "--reads"])
+                .arg(&bed)
+                .arg("--reference")
+                .arg(&reference)
+                .arg("--out")
+                .arg(&out);
+            if let Some(cutoff) = sw_score {
+                command.args(["--sw-score", cutoff]);
+            }
+            let output = command.output().unwrap();
+            assert_success(&output, "cluster BAM reads without SL evidence");
+            let isoforms = trackcluster_rs::io::bed::read_bed12(&out)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(isoforms.len(), 2, "{mode} sw_score={sw_score:?}");
+            assert!(isoforms.iter().all(|tx| {
+                (tx.name == "ref_plus" && tx.tx_start.get() == 0 && tx.tx_end.get() == 1000)
+                    || (tx.name == "ref_minus"
+                        && tx.tx_start.get() == 1000
+                        && tx.tx_end.get() == 2000)
+            }));
+            let mapping = fs::read_to_string(out.with_extension("read_to_isoform.tsv")).unwrap();
+            let mut mapping: Vec<_> = mapping.lines().collect();
+            mapping.sort();
+            assert_eq!(mapping, expected_mapping);
+            assert!(fs::read_to_string(out.with_extension("unused.bed"))
+                .unwrap()
+                .trim()
+                .is_empty());
+        }
+    }
+    assert!(converted.iter().all(|tx| tx.score == 0));
 }
 
 #[test]

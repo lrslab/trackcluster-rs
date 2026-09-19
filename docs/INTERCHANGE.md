@@ -11,15 +11,28 @@ genome-aligned BAM directly to TrackCluster bigGenePred-compatible BED12+8
 text. `--out` defaults to `bigg.bed`; `--score`/`--min-mapq` defaults to `30`.
 Unmapped records are skipped, and secondary (`0x100`) and supplementary
 (`0x800`) records are excluded unless `--include-secondary` or
-`--include-supplementary` is passed. Records without MAPQ have MAPQ zero.
+`--include-supplementary` is passed. Missing MAPQ is treated as zero for filtering.
 
 BAM's one-based alignment start is converted to BED's zero-based coordinate.
 Only CIGAR `N` splits exon blocks. Other reference-consuming operations,
 including deletions, remain within an exon; insertions and clipping do not
 consume reference coordinates. A block containing only deletions is rejected,
 as is a span beyond the reference length declared in the BAM header. Flag
-`0x10` determines the strand. The emitted BED score is MAPQ, and
+`0x10` determines the strand. The emitted BED score is `0` (no SL evidence), and
 forward/reverse records receive item RGB values `250,128,114`/`64,224,208`.
+
+MAPQ only controls the alignment filter; `--score`/`--min-mapq` does not set
+the output BED score. Per-record MAPQ remains in the source BAM.
+`bam2bigg` does not compute a Smith-Waterman score or import SLRanger's
+`SL_score`. Its `Transcript`/BED output preserves aligned exon boundaries but
+does not retain the original CIGAR, softclip lengths, or clipped sequence and
+quality evidence. A converted read's score `0` supplies no SL support at the
+legacy cutoff of `11`. The new prediction-module
+[SL evidence contract](design/prediction_sl_evidence_contract.md) requires
+separate typed MAPQ, SLRanger, and SW values with their evidence provenance.
+
+Older converter output incorrectly used MAPQ as BED score. Regenerate that
+output from BAM, or use `--sw-score -1` while reusing those older BED files.
 
 `--group/-g` supplies extra field index `6`; without it, the BAM filename stem
 is used. The remaining TrackCluster metadata identifies the row as
