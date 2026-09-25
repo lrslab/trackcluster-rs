@@ -58,7 +58,7 @@ jobs:
           set -euo pipefail
           archive="trackcluster-${{ github.ref_name }}-${{ matrix.target }}"
           stage="target/release-stage/$archive"
-          mkdir -p "$stage/docs/behavior" "$stage/scripts"
+          mkdir -p "$stage/docs/behavior" "$stage/docs/figures" "$stage/scripts"
           cp "target/${{ matrix.target }}/release/trackcluster" "$stage/"
           cp "target/${{ matrix.target }}/release/clusterj_batch" "$stage/"
           cp README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "$stage/"
@@ -71,6 +71,12 @@ jobs:
             docs/RUST_API.md \
             "$stage/docs/"
           cp docs/behavior/cluster.md docs/behavior/desc.md "$stage/docs/behavior/"
+          cp \
+            docs/figures/trackcluster_rs_fig1.svg \
+            docs/figures/trackcluster_rs_fig1_preview.png \
+            docs/figures/trackcluster_rs_fig1_600dpi.png \
+            docs/figures/trackcluster_rs_fig1_caption.md \
+            "$stage/docs/figures/"
           cp scripts/run_full_flow_rust.sh "$stage/scripts/"
           cp -R examples "$stage/"
           python3 - "$stage" <<'PY'
@@ -118,6 +124,10 @@ jobs:
             docs/RUST_API.md
             docs/behavior/cluster.md
             docs/behavior/desc.md
+            docs/figures/trackcluster_rs_fig1.svg
+            docs/figures/trackcluster_rs_fig1_preview.png
+            docs/figures/trackcluster_rs_fig1_600dpi.png
+            docs/figures/trackcluster_rs_fig1_caption.md
             scripts/run_full_flow_rust.sh
             examples/README.md
             examples/annotation.gff3

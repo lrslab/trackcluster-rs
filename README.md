@@ -1,47 +1,91 @@
-# TrackCluster (Rust rewrite)
+# TrackCluster-RS
 
-Pure-Rust rewrite of the TrackCluster long-read isoform clustering/counting pipeline.
+**Discover, quantify and interpret transcript isoforms from long reads.**
 
-Goals:
-- No runtime dependency on `bedtools` (native sort/intersect/cluster primitives).
-- CLI parity with the legacy Python `trackrun.py` surface (in-progress).
+TrackCluster-RS is a reference-guided, pure-Rust pipeline that turns aligned
+long RNA/cDNA reads into a shared isoform catalog, per-sample expression and
+isoform usage, and optional RNA modification summaries. It connects transcript
+structure, abundance and modification evidence through traceable read-to-isoform
+assignments.
 
-## Toolchain
-Source checkouts pin Rust `1.90.0` via `rust-toolchain.toml` to avoid a known
-`EXDEV` artifact-write failure seen with newer toolchains in this environment.
+[Quickstart](#quickstart) · [Install](#install) · [RNA modifications](#isoform-level-rna-modifications) · [CLI reference](docs/CLI.md) · [Pipeline tutorial](docs/PIPELINE.md)
 
-## Status
-Implemented subcommands:
-- `flow`: one-command end-to-end pipeline (recommended)
-- `preparedir`: split reads into per-gene folders (and write `<prefix>_gene.txt`, `<prefix>_dedup.bed`, `<prefix>_novel.bed`)
-- `clusterj`: junction-chain clustering (fast mode; SL-aware 5' merge controls; optimized truncation collapsing for large loci)
-- `cluster`: overlap-based clustering (slower, more permissive)
-- `count`: isoform expression counting
-- `count-multi`: per-sample (and optional per-group) isoform usage from pooled isoforms
-- `desc`: novel isoform description/classification vs reference
-- `addgene`: assign gene names to reads by overlap with reference
-- `validate-bed`: strict BED12/bigGenePred input validation, with explicit lenient repair reports
-- `bam2bigg`: convert genome-aligned BAM records to TrackCluster bigGenePred-compatible BED12+8
-- `gff2bigg`: convert GFF3 or GTF exon annotations to a TrackCluster reference catalog
-- `export`: write transcript catalogs as GTF, GFF3, or a SQANTI3 input-audit table
-- `mod-import-m6anet`: normalize m6Anet RNA002 per-read probabilities to genomic sites
-- `mod-import-dorado`: normalize one MM/ML modification code from a genome-aligned modBAM
-- `mod-subsample`: generate synchronized technical coverage partitions and ready-to-run manifests
-- `mod-aggregate`: join normalized read-site observations to unique isoform assignments
-- `mod-site-summary`: reduce complete isoform/site tables to a per-site QC inventory
-- `mod-contrast`: compute descriptive isoform, condition, and interaction effect sizes
+## Method highlights
 
-Extra binary:
-- `clusterj_batch`: run `clusterj` per gene folder in parallel (manual junction-mode batched runner; overlap-mode batching is exposed through `trackcluster flow --cluster-mode cluster`)
+- **Correct splice junctions before clustering.** Junction mode combines read
+  and reference support to correct nearby low-support splice sites, retain
+  supported non-reference sites through correction, and validate reconstructed
+  exon structures. Support thresholds and correction distances are configurable.
+- **Use terminal evidence to resolve isoforms.** Compatible truncated reads can
+  collapse into longer representatives while independently supported terminal
+  variants are retained. Optional spliced-leader (SL) evidence protects 5′ starts;
+  same-junction 3′ support protects alternative ends. Terminal support is fixed
+  before batching so splitting reads across batches does not erase it.
+- **Discover together, quantify by sample.** Pool reads once to build a shared
+  catalog, then quantify each sample against that catalog. The default unique
+  assignment selects one compatible isoform per assigned molecule and records
+  the exact mapping used for counts and within-gene usage.
+- **Connect RNA modifications to transcript structure.** Normalize external
+  Dorado or m6Anet read-level calls and join them to the same final assignments
+  used for expression. Keep unknown calls and structurally absent sites distinct
+  from unmodified observations, with explicit callable denominators and QC.
+
+For practical use, `flow` runs preparation, per-gene clustering, counting and
+classification in one command. Native Rust interval operations remove the
+runtime `bedtools` dependency; per-gene parallelism, deterministic sampling and
+hash-verified reuse support repeated analyses. BAM and GTF/GFF3 adapters connect
+the workflow to standard alignment and annotation files.
+
+TrackCluster-RS builds on the [original TrackCluster](https://github.com/Runsheng/trackcluster).
+The current implementation and extensions are documented in the
+[changelog](CHANGELOG.md) and [clustering behavior](docs/behavior/cluster.md).
+
+## Workflow
+
+[![TrackCluster-RS workflow showing junction correction, terminal-aware clustering, transcript classification, multi-sample quantification and optional RNA modification analysis](docs/figures/trackcluster_rs_fig1_preview.png)](docs/figures/trackcluster_rs_fig1.svg)
+
+**a**, shared catalog and read assignments; **b**, junction correction and
+terminal evidence; **c**, structural classification; **d**, sample-level counts
+and usage; **e**, optional isoform-level modification analysis. Tracks and matrix
+intensities are schematic.
+[Vector SVG](docs/figures/trackcluster_rs_fig1.svg) ·
+[600 dpi PNG](docs/figures/trackcluster_rs_fig1_600dpi.png) ·
+[Full figure legend](docs/figures/trackcluster_rs_fig1_caption.md)
+
+Start with **genome-aligned reads** and a **reference transcript annotation**.
+Reads can be imported from BAM or supplied as BED12/bigGenePred-compatible
+tracks; annotations can be converted from GTF/GFF3. Alignment and modification
+calling are performed upstream. Discovery currently operates in loci with a
+reference anchor; reads in unmatched loci are reported as unused.
 
 ## Install
 
-### Pre-built binaries (recommended)
-Download a tarball for your platform from the
-[latest GitHub release](https://github.com/lrslab/trackcluster-rs/releases/latest):
+### Pre-built binaries
+
+Download and unpack the archive for your platform from the
+[latest release](https://github.com/lrslab/trackcluster-rs/releases/latest).
+
+| Platform | Archive target |
+| --- | --- |
+| Linux x86_64 | `x86_64-unknown-linux-musl` (static) |
+| Linux ARM64 | `aarch64-unknown-linux-gnu` (glibc 2.31+) |
+| macOS Apple Silicon | `aarch64-apple-darwin` |
+
+From the unpacked directory containing `trackcluster`, add the binaries to your
+current shell and check the installation:
 
 ```bash
-# Example: Linux x86_64
+export PATH="$PWD:$PATH"
+trackcluster --help
+```
+
+Release bundles include documentation and the tiny `examples/` inputs used
+below. These examples are also available in a source checkout.
+
+<details>
+<summary>Linux x86_64: download and verify from the command line</summary>
+
+```bash
 REPO=lrslab/trackcluster-rs
 TAG="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | sed -n 's/.*"tag_name": "\([^"]*\)".*/\1/p' | head -n1)"
 ARCHIVE="trackcluster-${TAG}-x86_64-unknown-linux-musl"
@@ -54,236 +98,247 @@ if command -v sha256sum >/dev/null 2>&1; then
 else
   shasum -a 256 -c "${ARCHIVE}.sha256"
 fi
-# Supply-chain verification when GitHub CLI is installed:
 if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
   gh attestation verify "${ARCHIVE}.tar.gz" --repo "${REPO}"
 fi
 tar xzf "${ARCHIVE}.tar.gz"
-# Current archives may be flat; newer self-contained archives use one top-level directory.
+# Accept both older flat archives and archives with a top-level directory.
 if [ -d "${ARCHIVE}" ]; then cd "${ARCHIVE}"; fi
-./trackcluster --help
-# Make the unpacked binaries available to the quickstart commands below.
 export PATH="$PWD:$PATH"
+trackcluster --help
 ```
 
-Available targets: Linux x86_64 (musl static), Linux ARM64 (glibc 2.31+), macOS Apple Silicon.
+</details>
 
 ### From source
-```bash
-cargo build --release
-./target/release/trackcluster --help
-```
 
-### Install binaries into `~/.cargo/bin`
+With Rust installed, run these commands from a source checkout:
+
 ```bash
 cargo install --path . --locked --bins
 trackcluster --help
-clusterj_batch --help
 ```
 
-## Quickstart (tiny examples)
+This installs `trackcluster` and the manual `clusterj_batch` runner into
+`~/.cargo/bin`. To build locally instead, use `cargo build --release --locked`
+and run `./target/release/trackcluster`.
+
+## Quickstart
+
+Run the examples from the unpacked release directory or repository root, with
+`trackcluster` on `PATH`. Use a dedicated output directory and keep all input
+files outside it. The bundled examples are synthetic and demonstrate command
+wiring rather than biological performance.
+
+### One sample: discover, count and classify
+
 ```bash
-# One-line flow: prepare per-gene inputs, run per-gene clustering, merge outputs, count, and desc
-trackcluster flow -s examples/reads.bed -r examples/ref.bed -o out --prefix sample
-# Genes above 5,000 reads are deterministically subsampled by default so loci such as
-# mitochondrial cox1 cannot dominate runtime. Set `--max-reads-per-gene 0` to disable it.
-# For a tighter targeted cap: `--downsample-gene cox1 --max-reads-per-gene 2000`.
-# Independent per-gene downsampling is rejected when one molecule belongs to multiple genes;
-# disable the cap or exclude every affected gene from downsampling in that case.
-# Malformed or empty-ID read tracks are skipped individually by default and recorded in
-# `<prefix>_rejected_reads.tsv` / `<gene-path-key>/rejected_reads.tsv`.
-# Add `--invalid-read-policy fail` to restore strict read-track parsing.
-# Gene-local failures are logged and excluded while verified genes continue through merge/count/desc.
-# Add `--strict-gene-errors` to stop before downstream outputs when any gene fails.
-
-# If per-gene clustering already finished, rerun only merge/count/desc outputs
-trackcluster flow --count-only -r examples/ref.bed -o out --prefix sample
-
-# Count from an existing output folder; unique assignment stays inside each gene folder
-trackcluster count -r examples/ref.bed -o out --prefix sample
-
-# Validate a BED12/bigGenePred file
-trackcluster validate-bed -i examples/minimal.bed
-
-# Convert your own genome-aligned BAM to TrackCluster BED12+8. The default MAPQ cutoff is 30.
-# (A BAM is not bundled with the tiny text examples.)
-# Output BED score is 0 because no SL evidence is imported. MAPQ only filters records.
-trackcluster bam2bigg --bamfile alignments.bam --out reads.bed
-
-# Convert the packaged GFF3 model to a deterministic reference BED12+8 catalog.
-trackcluster gff2bigg --gff examples/annotation.gff3 --out reference.bed
-
-# Junction-mode clustering (writes isoform.bed + mapping + unused)
-trackcluster clusterj -s examples/reads.bed -r examples/ref.bed -o isoform.bed
-# Platform presets:
-#   --platform-preset rna002  # junction offset 15; SL 5' offsets 20/25/20; 3' cluster offset 15
-#   --platform-preset rna004  # conservative defaults: junction offset 10; SL 5' offsets 15/25/15; 3' cluster offset 10
-# Junction-mode defaults treat reads as no-SL (`--sw-score -1`). Pass
-# `--sw-score 11` only when BED score is valid SL/SW 5' evidence.
-# SL 5' merge behavior can be tuned with --sl-partial-5prime-offset,
-# --sl-same-junction-5prime-offset, --sl-5prime-cluster-offset, and
-# --sl-5prime-min-support.
-# Same-junction 3' retention can be tuned with --same-junction-3prime-offset,
-# --3prime-cluster-offset, and --3prime-min-support.
-# SL evidence is optional. Reads without SL information use the normal junction
-# correction and 5' truncation collapse path, but are not SL-protected isoforms.
-# Supported same-junction 3' terminal clusters are retained as isoforms. On the
-# minus strand the 3' end is tx_start; an early stop has a higher tx_start than
-# the corresponding full-length isoform.
-
-# Overlap-mode clustering (legacy-style two-round exon/intron overlap mode)
-trackcluster cluster -s examples/reads.bed -r examples/ref.bed -o isoform.bed
-
-# Full flow in overlap mode
-trackcluster flow --cluster-mode cluster -s examples/reads.bed -r examples/ref.bed -o out --prefix sample
-# Flow keeps its shared no-SL default (`--sw-score -1`) in either clustering mode.
-# Pass `--sw-score 11` to opt into legacy score-based protection in overlap mode.
-
-# Legacy low-level count from a standalone isoform BED. Default unique mode also
-# writes isoform_count.provenance.tsv; fractional mode does not.
-trackcluster count -s examples/reads.bed -r examples/ref.bed -i isoform.bed --read-to-isoform isoform.read_to_isoform.tsv --out isoform_count.csv
-
-# Describe/classify isoforms vs reference (writes <prefix>_*.txt)
-trackcluster desc --isoform isoform.bed --reference examples/ref.bed -o desc_out
+trackcluster flow \
+  --reads examples/reads.bed \
+  --reference examples/ref.bed \
+  --output-root out/single \
+  --prefix sample
 ```
 
-## Multi-sample pooled usage
-Use a manifest TSV to pool reads for clustering once, then quantify per-sample isoform usage.
+### Multiple samples: discover once, quantify separately
 
-Example manifest (`samples.tsv`):
+```bash
+trackcluster flow \
+  --manifest examples/samples.tsv \
+  --reference examples/ref.bed \
+  --output-root out/pooled \
+  --prefix pooled
+```
+
+A manifest records sample identity, optional group and read-track path:
+
 ```tsv
 sample	group	reads
-S1	control	/path/S1.reads.bed
-S2	treated	/path/S2.reads.bed
+S1	control	S1.reads.bed
+S2	treated	S2.reads.bed
 ```
 
-Run full pooled flow:
+Relative read paths are resolved against the manifest directory. The run builds
+one catalog and writes per-sample counts, within-gene isoform usage and group
+summaries. Add `--emit-pooled-reads` to retain the pooled read tracks.
+
+### Your data: BAM and GTF/GFF3 to isoforms
+
+Replace the input filenames with your genome-aligned BAM and matching annotation:
+
 ```bash
-trackcluster flow --manifest examples/samples.tsv -r examples/ref.bed -o out --prefix pooled
+trackcluster bam2bigg --bamfile alignments.bam --out reads.bed
+trackcluster gff2bigg --gff annotation.gtf --out reference.bed
+trackcluster flow \
+  --reads reads.bed --reference reference.bed \
+  --output-root out/study --prefix study --threads 8
 ```
 
-Add `--emit-pooled-reads` if you also want `<prefix>_pooled_reads.bed` written.
+`bam2bigg` defaults to MAPQ ≥ 30 and excludes secondary and supplementary
+alignments. It emits score 0 because it does not import SL evidence; MAPQ is
+an alignment filter. See [format adapters](docs/INTERCHANGE.md) for import rules.
 
-If clustering already completed and you only need to regenerate merged count/description outputs, use `--count-only`. Include `--manifest` when you want the multi-sample usage tables regenerated too:
+### Main outputs
+
+For the examples above, start with these files:
+
+| File | What it provides |
+| --- | --- |
+| `out/single/sample_isoform.bed` | Known and novel transcript structures |
+| `out/single/sample_isoform_count.csv` | Counts with columns `gene,isoform_id,count` |
+| `out/single/sample_read_to_isoform.unique.tsv` | Exact selected assignments used for unique-mode counts |
+| `out/single/sample_class12.txt` | Legacy structural classification: 11 event labels plus reference |
+| `out/single/sample_unused.bed` | Reads not retained in the catalog mapping |
+| `out/pooled/pooled.isoform_counts.matrix.tsv` | Isoform-by-sample count matrix |
+| `out/pooled/pooled.isoform_usage.long.tsv` | Per-sample within-gene isoform usage |
+| `out/pooled/pooled.isoform_usage.group.tsv` | Usage summaries for supplied groups |
+
+Raw clustering memberships remain in `*_read_to_isoform.tsv`; the `.unique.tsv`
+file records the selected assignments actually used for counting. Novel isoforms
+have deterministic structural IDs. Aggregate pooled counts are derived from the
+same per-sample matrix. See [file formats](docs/FORMATS.md) for provenance tables,
+identity rules and exact schemas.
+
+Export the resulting catalog for downstream tools:
+
 ```bash
-trackcluster flow --count-only --manifest examples/samples.tsv -r examples/ref.bed -o out --prefix pooled
+trackcluster export \
+  --input out/single/sample_isoform.bed \
+  --gtf out/single/sample_isoform.gtf \
+  --gff3 out/single/sample_isoform.gff3
 ```
-
-Or run per-sample quantification from an existing pooled isoform BED:
-```bash
-trackcluster count-multi --manifest examples/samples.tsv -r examples/ref.bed -i out/pooled_isoform.bed -o out/pooled
-```
-
-Tip: with default `--name2-mode coverage` (or `none`), use `--read-to-isoform out/pooled_read_to_isoform.tsv` (or keep the TSV next to the isoform BED for auto-discovery).
-
-For overlap-mode pooled clustering, add `--cluster-mode cluster` to the `flow` command above.
-
-`count-multi` writes:
-- `out/pooled.isoform_count.csv`
-- `out/pooled.isoform_usage.long.tsv`
-- `out/pooled.isoform_counts.matrix.tsv`
-- `out/pooled.isoform_usage.group.tsv` (when at least one sample has a non-empty `group`)
-- `out/pooled.unique_assignment.provenance.tsv` (default unique mode)
-
-In unique assignment mode, `flow` also writes `<prefix>_read_to_isoform.unique.tsv`, the exact read-to-isoform mapping used for final counts, plus `<prefix>_unique_assignment.provenance.tsv` with the effective `--unique-assignment-junction-offset` and one-to-one/no-collapse matching policy. The raw merged `<prefix>_read_to_isoform.tsv` remains the unselected mapping from per-gene clustering.
-
-The aggregate `out/pooled.isoform_count.csv` is derived from the per-sample matrix: each isoform count is the sum of that isoform's sample columns. In `flow --manifest`, the main `<prefix>_isoform_count.csv` is synchronized from the same aggregate count, so total and per-sample counts use the same assignment result.
 
 ## Isoform-level RNA modifications
 
-Modification callers are normalized before they are joined to TrackCluster's
-final unique read-to-isoform assignments. This keeps caller/model/chemistry
-provenance separate and prevents missing observations from being interpreted as
-unmodified calls.
+The optional modification workflow connects external read-level calls to
+transcript structure using the **same final unique assignments as expression
+counting**. It reports sample/isoform/site counts, modified fractions, Wilson
+intervals, coverage QC and descriptive isoform/condition effect sizes.
+
+Normalize caller output with `mod-import-dorado` or `mod-import-m6anet`, then
+create a modification manifest linking each sample to its observations, assay
+metadata and coverage BAM. The [import commands](docs/CLI.md) and
+[modification tutorial](docs/PIPELINE.md) describe the required provenance and
+manifest fields. For a study with those inputs prepared:
 
 ```bash
-# Normalize caller output. See docs/CLI.md for all required provenance options.
-trackcluster mod-import-dorado --sample S1 --assay-id dorado_rna004_m6a \
-  --bam S1.aligned.bam --mod-code A+a --model-id rna004_m6a_model \
-  --candidate-rule all-target-canonical-bases \
-  --source-emission-threshold 0.05 --out S1.mod
-# For a motif-restricted model, use --candidate-rule DRACH; only matching
-# read-sequence candidates enter the denominator.
-
-# Aggregate against the exact mapping used for unique-mode expression counts.
-trackcluster mod-aggregate --manifest samples.tsv \
-  --isoforms out/pooled_isoform.bed \
-  --read-to-isoform out/pooled_read_to_isoform.unique.tsv \
+trackcluster flow \
+  --manifest samples.tsv \
+  --reference reference.bed \
+  --output-root out/mod-study --prefix study \
   --mod-manifest mod_samples.tsv \
-  --reference-fasta genome.fa \
-  --analysis-threshold dorado_rna004_m6a=0.5 \
-  --eligibility-profile strict --out out/pooled
-
-# Optional technical coverage test: split one parent sample by molecule.
-trackcluster mod-subsample --manifest samples.tsv \
-  --read-to-isoform out/pooled_read_to_isoform.unique.tsv \
-  --mod-manifest mod_samples.tsv --source-sample S1 \
-  --replicates 4 --reads-per-sample 5000 --mode disjoint \
-  --out-dir out/S1_low_inputs
+  --mod-reference-fasta genome.fa \
+  --mod-analysis-threshold dorado_rna004_m6a=0.5 \
+  --mod-eligibility-profile strict
 ```
 
-`flow --manifest ... --mod-manifest ...` can run the aggregation as an optional
-post-processing step. V1 reports read-derived counts, fractions, Wilson
-intervals, and explicit effect-only contrasts; it does not treat reads as
-biological replicates, and contrast p/q values are `NA`. Exact schemas,
-denominator rules, and m6Anet examples are documented in
-[`docs/FORMATS.md`](docs/FORMATS.md) and [`docs/CLI.md`](docs/CLI.md).
-Pinned public-data and realistic-simulation checks are described in
-[`docs/MODIFICATION_VALIDATION.md`](docs/MODIFICATION_VALIDATION.md).
-`mod-subsample` pseudo-samples are technical coverage partitions only; their
-groups are intentionally blank and they must not be used as biological
-replicates.
+The assay ID and threshold above are examples; use the ID in your modification
+manifest and a threshold appropriate to that assay. `mod-aggregate` can also
+join calls to an existing catalog and its final unique mapping.
 
-The default modification eligibility profile is `exploratory`. Use `strict`
-for comparison-ready screening: it requires exact coverage BAMs, an indexed
-reference FASTA, Dorado version/model/threshold provenance verified within one
-coherent source `@PG` record, and configurable minimum covering/callable counts
-plus candidate/covering and callable/covering rates.
-Flow-integrated modification results are committed as hash-verified generations
-and are current only while `<prefix>.mod.current.json` exists and validates.
+Modified fractions use callable molecules as the denominator. Unknown calls,
+missing observations and structural absence are tracked explicitly; callers,
+models and chemistries remain in separate compatible assay strata. The default
+eligibility profile is `exploratory`; `strict` adds exact BAM coverage, an indexed
+reference FASTA, source-provenance checks and configurable coverage/callability
+gates. Flow-managed results are current only when `*.mod.current.json` validates.
 
-New catalogs use deterministic `tc_novel_v1:` structural IDs for novel
-isoforms and a percent-encoded `tc_name2_v1:` payload in `--name2-mode full`.
-Count CSVs have columns `gene,isoform_id,count` and use standard CSV escaping.
-Repeated read labels are treated as one abundance molecule; conflicting
-structures for one label are rejected in unique-assignment mode. See
-[`docs/FORMATS.md`](docs/FORMATS.md) for the identity and migration contract.
+Contrasts currently report **effect sizes only** (`p_value` and `q_value` are
+`NA`). Technical partitions from `mod-subsample` are not biological replicates.
+See [modification validation](docs/MODIFICATION_VALIDATION.md) for tested
+boundaries, biological limitations and memory considerations.
 
-Within the 0.2.0 format contract, rejected-read reporting does not otherwise
-change BED, isoform, count, or description/classification schemas and rules.
-Skipped reads do not contribute biological evidence, so result contents can
-change when an input contains rejected tracks. I/O, reference, configuration,
-and algorithm errors are not downgraded by `--invalid-read-policy skip`.
+## Practical controls
 
-## Docs
-- [Changelog](CHANGELOG.md)
-- [Pipeline tutorial](docs/PIPELINE.md)
-- [CLI reference](docs/CLI.md)
-- [File formats](docs/FORMATS.md)
-- [Modification validation](docs/MODIFICATION_VALIDATION.md)
-- [Interchange formats](docs/INTERCHANGE.md)
-- [Rust API policy](docs/RUST_API.md)
-- [Clustering behavior](docs/behavior/cluster.md)
-- [Description/classification behavior](docs/behavior/desc.md)
+| Decision | Default and how to change it |
+| --- | --- |
+| Clustering mode | Junction mode (`clusterj`); use `--cluster-mode cluster` for two-pass exon/intron overlap clustering. |
+| Junction correction | Weighted support ≥ 5 and a 10 bp window; configure `--junction-correction-min-support` and `--junction-correction-offset`, or use the `rna002`/`rna004` platform presets. |
+| SL evidence | Off in `flow` (`--sw-score -1`); enable only when BED scores contain valid SL/SW evidence. |
+| Very deep genes | Deterministic cap of 5,000 reads per gene; set `--max-reads-per-gene 0` to use all reads. Flow scales abundance outputs after sampling; independently sampled genes sharing molecules are rejected. |
+| Read assignment | `unique`; `--assignment-mode fractional` provides split-count compatibility. Modification aggregation requires unique assignments. |
+| Malformed read tracks | Skipped and logged in `*_rejected_reads.tsv`; use `--invalid-read-policy fail` for strict parsing. |
+| Gene-local failures | Logged while verified genes continue; use `--strict-gene-errors` to stop before downstream outputs when any gene fails. |
 
-## Development (source checkout only)
+Review the rejected-read reports and batch summary after a run. Junction
+correction and terminal-retention parameters control different decisions; wider
+correction windows can merge nearby biological splice sites. Detailed defaults
+and strand-aware rules are in [clustering behavior](docs/behavior/cluster.md).
+Standalone `clusterj` uses a per-locus cap and does not scale later counts;
+`flow` is the recommended entry point for abundance analyses.
 
-These commands require the repository's source and test fixtures; they are not
-included as runnable inputs in pre-built binary archives.
+Rerunning `flow` reuses gene results only when input, option, tool and output
+hashes validate. To regenerate merged counts and descriptions from completed
+gene outputs:
 
 ```bash
-cargo test --all --all-features
+trackcluster flow --count-only \
+  --reference examples/ref.bed --output-root out/single --prefix sample
 ```
 
-Junction-cluster and count golden fixtures:
+For a pooled run, also supply the original `--manifest` to regenerate the
+sample/group tables. The [pipeline tutorial](docs/PIPELINE.md) covers recounting,
+manual batching, rejected reads and resuming completed work.
+
+## Command guide
+
+| Task | Commands |
+| --- | --- |
+| Complete workflow | `flow` |
+| Import, validate and export | `bam2bigg`, `gff2bigg`, `validate-bed`, `export` |
+| Prepare and cluster | `preparedir`, `clusterj`, `cluster`, `clusterj_batch` (separate binary) |
+| Quantify and interpret | `count`, `count-multi`, `desc`, `addgene` |
+| Import modification calls | `mod-import-dorado`, `mod-import-m6anet` |
+| Summarize modifications and technical coverage | `mod-aggregate`, `mod-site-summary`, `mod-contrast`, `mod-subsample` |
+
+Use `trackcluster <command> --help` or the [CLI reference](docs/CLI.md) for exact
+options. `clusterj_batch --help` documents the separate manual junction-mode
+runner; `flow` supports both clustering modes internally.
+
+## Documentation and validation
+
+| Need | Documentation |
+| --- | --- |
+| Run a complete analysis | [Pipeline tutorial](docs/PIPELINE.md) |
+| Look up parameters | [CLI reference](docs/CLI.md) |
+| Read outputs or audit assignments | [File formats](docs/FORMATS.md) |
+| Import or export annotation files | [Interchange formats](docs/INTERCHANGE.md) |
+| Understand clustering and event labels | [Clustering](docs/behavior/cluster.md), [classification](docs/behavior/desc.md) |
+| Assess modification evidence | [Modification validation](docs/MODIFICATION_VALIDATION.md) |
+| Use the Rust library | [Rust API policy](docs/RUST_API.md) |
+| Check version changes | [Changelog](CHANGELOG.md) |
+
+Validation includes frozen legacy/scientific-truth fixtures, realistic
+multi-sample modification simulations and opt-in public caller-data checks.
+The [performance policy](https://github.com/lrslab/trackcluster-rs/blob/main/docs/PERFORMANCE.md)
+describes the synthetic benchmark workloads and the limits of their
+interpretation.
+
+## Citation and lineage
+
+TrackCluster was introduced in:
+
+Li R, Ren X, Ding Q, Bi Y, Xie D, Zhao Z. **Direct full-length RNA sequencing
+reveals unexpected transcriptome complexity during Caenorhabditis elegans
+development.** *Genome Research* 30, 287-298 (2020).
+[doi:10.1101/gr.251512.119](https://doi.org/10.1101/gr.251512.119)
+
+For analyses with this implementation, cite the original method and record the
+TrackCluster-RS version/commit and relevant parameters. The Rust CLI extends the
+original workflow; legacy CLI parity remains in progress, and current output
+contracts are documented in [file formats](docs/FORMATS.md).
+
+## Development
+
+Source checkouts pin Rust `1.90.0` through `rust-toolchain.toml`. Tests and
+golden-fixture regeneration require a source checkout:
+
 ```bash
-# Regenerate the clusterj and count goldens from the current Rust implementation
+cargo test --locked --all --all-features
+# Regenerate clustering/counting goldens only when intentionally updating them.
 bash tests/generate_goldens.sh
 ```
 
 ## License
-Licensed under either of:
-- MIT license (`LICENSE-MIT`)
-- Apache License, Version 2.0 (`LICENSE-APACHE`)
 
-at your option.
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.

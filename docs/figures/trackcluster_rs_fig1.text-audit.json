@@ -1,0 +1,674 @@
+[
+  {
+    "text": "TrackCluster-RS",
+    "x": 32.0,
+    "y": 43.0,
+    "width": 250.75,
+    "font_px": 32.0
+  },
+  {
+    "text": "Isoform discovery, quantification and RNA modification analysis",
+    "x": 32.0,
+    "y": 77.0,
+    "width": 646.85,
+    "font_px": 23.0
+  },
+  {
+    "text": "a",
+    "x": 32.0,
+    "y": 133.0,
+    "width": 16.13,
+    "font_px": 29.0
+  },
+  {
+    "text": "From long reads to an isoform-resolved transcriptome",
+    "x": 63.0,
+    "y": 132.0,
+    "width": 594.28,
+    "font_px": 23.0
+  },
+  {
+    "text": "Long-read inputs",
+    "x": 52.0,
+    "y": 181.0,
+    "width": 171.49,
+    "font_px": 21.0
+  },
+  {
+    "text": "Pool & cluster by gene",
+    "x": 351.0,
+    "y": 181.0,
+    "width": 226.39,
+    "font_px": 21.0
+  },
+  {
+    "text": "Shared isoform catalog",
+    "x": 678.0,
+    "y": 181.0,
+    "width": 233.39,
+    "font_px": 21.0
+  },
+  {
+    "text": "Biological outputs",
+    "x": 1000.0,
+    "y": 181.0,
+    "width": 183.16,
+    "font_px": 21.0
+  },
+  {
+    "text": "Aligned reads (BAM / BED)",
+    "x": 52.0,
+    "y": 208.0,
+    "width": 218.08,
+    "font_px": 18.0
+  },
+  {
+    "text": "S1",
+    "x": 52.0,
+    "y": 250.0,
+    "width": 19.57,
+    "font_px": 16.0
+  },
+  {
+    "text": "S2",
+    "x": 52.0,
+    "y": 290.0,
+    "width": 19.57,
+    "font_px": 16.0
+  },
+  {
+    "text": "One or multiple samples",
+    "x": 52.0,
+    "y": 324.0,
+    "width": 194.08,
+    "font_px": 18.0
+  },
+  {
+    "text": "Reference: GTF / GFF3 / BED",
+    "x": 52.0,
+    "y": 386.0,
+    "width": 242.06,
+    "font_px": 18.0
+  },
+  {
+    "text": "Gene 1",
+    "x": 380.48,
+    "y": 218.0,
+    "width": 59.04,
+    "font_px": 18.0
+  },
+  {
+    "text": "Gene 2",
+    "x": 523.48,
+    "y": 218.0,
+    "width": 59.04,
+    "font_px": 18.0
+  },
+  {
+    "text": "Junction chains (default)",
+    "x": 351.0,
+    "y": 338.0,
+    "width": 224.85,
+    "font_px": 19.0
+  },
+  {
+    "text": "or exon / intron overlap",
+    "x": 351.0,
+    "y": 363.0,
+    "width": 184.1,
+    "font_px": 18.0
+  },
+  {
+    "text": "Parallel processing in Rust",
+    "x": 351.0,
+    "y": 388.0,
+    "width": 213.1,
+    "font_px": 18.0
+  },
+  {
+    "text": "I1",
+    "x": 678.0,
+    "y": 236.0,
+    "width": 14.18,
+    "font_px": 17.0
+  },
+  {
+    "text": "I2",
+    "x": 678.0,
+    "y": 266.0,
+    "width": 14.18,
+    "font_px": 17.0
+  },
+  {
+    "text": "I3",
+    "x": 678.0,
+    "y": 296.0,
+    "width": 14.18,
+    "font_px": 17.0
+  },
+  {
+    "text": "Known + novel structures",
+    "x": 678.0,
+    "y": 323.0,
+    "width": 202.61,
+    "font_px": 18.0
+  },
+  {
+    "text": "Unique read-to-isoform map",
+    "x": 684.69,
+    "y": 383.0,
+    "width": 227.62,
+    "font_px": 17.0
+  },
+  {
+    "text": "Structures",
+    "x": 1090.0,
+    "y": 233.0,
+    "width": 86.59,
+    "font_px": 19.0
+  },
+  {
+    "text": "Counts &",
+    "x": 1070.0,
+    "y": 291.0,
+    "width": 78.15,
+    "font_px": 19.0
+  },
+  {
+    "text": "isoform usage",
+    "x": 1070.0,
+    "y": 314.0,
+    "width": 119.33,
+    "font_px": 19.0
+  },
+  {
+    "text": "RNA",
+    "x": 1080.0,
+    "y": 360.0,
+    "width": 40.12,
+    "font_px": 19.0
+  },
+  {
+    "text": "modifications*",
+    "x": 1080.0,
+    "y": 383.0,
+    "width": 118.28,
+    "font_px": 19.0
+  },
+  {
+    "text": "b",
+    "x": 32.0,
+    "y": 454.0,
+    "width": 17.71,
+    "font_px": 29.0
+  },
+  {
+    "text": "Junction correction and end-aware clustering",
+    "x": 63.0,
+    "y": 453.0,
+    "width": 498.43,
+    "font_px": 23.0
+  },
+  {
+    "text": "1",
+    "x": 59.27,
+    "y": 498.0,
+    "width": 9.45,
+    "font_px": 17.0
+  },
+  {
+    "text": "Correct splice",
+    "x": 85.0,
+    "y": 494.0,
+    "width": 126.72,
+    "font_px": 19.0
+  },
+  {
+    "text": "junctions",
+    "x": 85.0,
+    "y": 517.0,
+    "width": 84.44,
+    "font_px": 19.0
+  },
+  {
+    "text": "2",
+    "x": 312.27,
+    "y": 498.0,
+    "width": 9.45,
+    "font_px": 17.0
+  },
+  {
+    "text": "Collapse compatible",
+    "x": 338.0,
+    "y": 494.0,
+    "width": 184.77,
+    "font_px": 19.0
+  },
+  {
+    "text": "5′ fragments",
+    "x": 338.0,
+    "y": 517.0,
+    "width": 112.26,
+    "font_px": 19.0
+  },
+  {
+    "text": "3",
+    "x": 565.27,
+    "y": 498.0,
+    "width": 9.45,
+    "font_px": 17.0
+  },
+  {
+    "text": "Retain supported",
+    "x": 591.0,
+    "y": 494.0,
+    "width": 156.23,
+    "font_px": 19.0
+  },
+  {
+    "text": "terminal variants",
+    "x": 591.0,
+    "y": 517.0,
+    "width": 152.06,
+    "font_px": 19.0
+  },
+  {
+    "text": "Read + reference support",
+    "x": 53.0,
+    "y": 668.0,
+    "width": 193.26,
+    "font_px": 17.0
+  },
+  {
+    "text": "One representative + members",
+    "x": 307.0,
+    "y": 677.0,
+    "width": 227.9,
+    "font_px": 16.5
+  },
+  {
+    "text": "Distinct supported endpoints",
+    "x": 560.0,
+    "y": 677.0,
+    "width": 214.52,
+    "font_px": 17.0
+  },
+  {
+    "text": "5′ protection with optional SL evidence",
+    "x": 52.0,
+    "y": 730.0,
+    "width": 342.61,
+    "font_px": 18.5
+  },
+  {
+    "text": "3′ protection within a splice chain",
+    "x": 418.0,
+    "y": 730.0,
+    "width": 295.35,
+    "font_px": 18.5
+  },
+  {
+    "text": "Optional SL evidence protects supported",
+    "x": 52.0,
+    "y": 868.0,
+    "width": 307.14,
+    "font_px": 17.0
+  },
+  {
+    "text": "alternative starts; SL is off by default.",
+    "x": 52.0,
+    "y": 891.0,
+    "width": 278.75,
+    "font_px": 17.0
+  },
+  {
+    "text": "Repeated support protects alternative ends.",
+    "x": 418.0,
+    "y": 868.0,
+    "width": 329.81,
+    "font_px": 17.0
+  },
+  {
+    "text": "Support is fixed before batching.",
+    "x": 418.0,
+    "y": 891.0,
+    "width": 243.82,
+    "font_px": 17.0
+  },
+  {
+    "text": "Alternative mode: two-pass exon / intron overlap clustering",
+    "x": 52.0,
+    "y": 928.0,
+    "width": 467.24,
+    "font_px": 18.0
+  },
+  {
+    "text": "c",
+    "x": 812.0,
+    "y": 454.0,
+    "width": 16.13,
+    "font_px": 29.0
+  },
+  {
+    "text": "Interpret transcript structures",
+    "x": 843.0,
+    "y": 453.0,
+    "width": 324.64,
+    "font_px": 23.0
+  },
+  {
+    "text": "Reference",
+    "x": 836.0,
+    "y": 496.0,
+    "width": 78.43,
+    "font_px": 17.0
+  },
+  {
+    "text": "Query isoform",
+    "x": 985.0,
+    "y": 496.0,
+    "width": 106.75,
+    "font_px": 17.0
+  },
+  {
+    "text": "Terminal exon gain / loss",
+    "x": 814.0,
+    "y": 529.0,
+    "width": 205.65,
+    "font_px": 18.5
+  },
+  {
+    "text": "UTR extension / truncation",
+    "x": 814.0,
+    "y": 600.0,
+    "width": 219.02,
+    "font_px": 18.5
+  },
+  {
+    "text": "Exon inclusion / skipping",
+    "x": 814.0,
+    "y": 671.0,
+    "width": 202.59,
+    "font_px": 18.5
+  },
+  {
+    "text": "Intron retention",
+    "x": 814.0,
+    "y": 742.0,
+    "width": 124.44,
+    "font_px": 18.5
+  },
+  {
+    "text": "Alternative splice site",
+    "x": 814.0,
+    "y": 813.0,
+    "width": 173.77,
+    "font_px": 18.5
+  },
+  {
+    "text": "Gene fusion",
+    "x": 814.0,
+    "y": 887.0,
+    "width": 99.76,
+    "font_px": 18.5
+  },
+  {
+    "text": "11 event labels + annotated reference",
+    "x": 814.0,
+    "y": 958.0,
+    "width": 285.9,
+    "font_px": 17.0
+  },
+  {
+    "text": "d",
+    "x": 32.0,
+    "y": 1007.0,
+    "width": 17.71,
+    "font_px": 29.0
+  },
+  {
+    "text": "Quantify across samples",
+    "x": 63.0,
+    "y": 1006.0,
+    "width": 272.28,
+    "font_px": 23.0
+  },
+  {
+    "text": "One shared catalog, separate sample counts",
+    "x": 52.0,
+    "y": 1047.0,
+    "width": 378.12,
+    "font_px": 19.0
+  },
+  {
+    "text": "I1",
+    "x": 53.0,
+    "y": 1151.0,
+    "width": 15.01,
+    "font_px": 18.0
+  },
+  {
+    "text": "I2",
+    "x": 53.0,
+    "y": 1199.0,
+    "width": 15.01,
+    "font_px": 18.0
+  },
+  {
+    "text": "I3",
+    "x": 53.0,
+    "y": 1247.0,
+    "width": 15.01,
+    "font_px": 18.0
+  },
+  {
+    "text": "A1",
+    "x": 317.99,
+    "y": 1113.0,
+    "width": 22.02,
+    "font_px": 18.0
+  },
+  {
+    "text": "A2",
+    "x": 366.99,
+    "y": 1113.0,
+    "width": 22.02,
+    "font_px": 18.0
+  },
+  {
+    "text": "B1",
+    "x": 415.99,
+    "y": 1113.0,
+    "width": 22.02,
+    "font_px": 18.0
+  },
+  {
+    "text": "B2",
+    "x": 464.99,
+    "y": 1113.0,
+    "width": 22.02,
+    "font_px": 18.0
+  },
+  {
+    "text": "Condition A",
+    "x": 312.64,
+    "y": 1081.0,
+    "width": 82.72,
+    "font_px": 16.0
+  },
+  {
+    "text": "Condition B",
+    "x": 410.64,
+    "y": 1081.0,
+    "width": 82.72,
+    "font_px": 16.0
+  },
+  {
+    "text": "Isoform × sample count matrix",
+    "x": 308.0,
+    "y": 1283.0,
+    "width": 228.16,
+    "font_px": 17.0
+  },
+  {
+    "text": "Counts → within-gene usage → group summaries",
+    "x": 99.41,
+    "y": 1321.0,
+    "width": 398.19,
+    "font_px": 18.0
+  },
+  {
+    "text": "Each assigned molecule contributes to one isoform.",
+    "x": 52.0,
+    "y": 1361.0,
+    "width": 389.32,
+    "font_px": 17.0
+  },
+  {
+    "text": "e",
+    "x": 617.0,
+    "y": 1007.0,
+    "width": 16.13,
+    "font_px": 29.0
+  },
+  {
+    "text": "Resolve RNA modifications by isoform*",
+    "x": 648.0,
+    "y": 1006.0,
+    "width": 433.25,
+    "font_px": 23.0
+  },
+  {
+    "text": "Dorado modBAM / m6Anet calls",
+    "x": 636.0,
+    "y": 1048.0,
+    "width": 288.21,
+    "font_px": 19.0
+  },
+  {
+    "text": "Normalize sites",
+    "x": 1073.0,
+    "y": 1048.0,
+    "width": 123.03,
+    "font_px": 18.0
+  },
+  {
+    "text": "Join unique assignments; retain per-read call states",
+    "x": 636.0,
+    "y": 1076.0,
+    "width": 399.8,
+    "font_px": 17.5
+  },
+  {
+    "text": "Site 1",
+    "x": 815.26,
+    "y": 1110.0,
+    "width": 43.47,
+    "font_px": 17.0
+  },
+  {
+    "text": "Site 2",
+    "x": 953.26,
+    "y": 1110.0,
+    "width": 43.47,
+    "font_px": 17.0
+  },
+  {
+    "text": "Site 3",
+    "x": 1098.26,
+    "y": 1110.0,
+    "width": 43.47,
+    "font_px": 17.0
+  },
+  {
+    "text": "I1",
+    "x": 638.0,
+    "y": 1146.0,
+    "width": 15.01,
+    "font_px": 18.0
+  },
+  {
+    "text": "I2",
+    "x": 638.0,
+    "y": 1192.0,
+    "width": 15.01,
+    "font_px": 18.0
+  },
+  {
+    "text": "I3",
+    "x": 638.0,
+    "y": 1238.0,
+    "width": 15.01,
+    "font_px": 18.0
+  },
+  {
+    "text": "?",
+    "x": 833.33,
+    "y": 1228.3,
+    "width": 7.33,
+    "font_px": 12.0
+  },
+  {
+    "text": "Modified",
+    "x": 658.0,
+    "y": 1280.0,
+    "width": 60.48,
+    "font_px": 16.0
+  },
+  {
+    "text": "Unmodified",
+    "x": 770.0,
+    "y": 1280.0,
+    "width": 80.93,
+    "font_px": 16.0
+  },
+  {
+    "text": "?",
+    "x": 884.33,
+    "y": 1279.0,
+    "width": 7.33,
+    "font_px": 12.0
+  },
+  {
+    "text": "Unknown",
+    "x": 902.0,
+    "y": 1280.0,
+    "width": 66.7,
+    "font_px": 16.0
+  },
+  {
+    "text": "Site absent",
+    "x": 1036.0,
+    "y": 1280.0,
+    "width": 80.05,
+    "font_px": 16.0
+  },
+  {
+    "text": "Modified fraction = modified / callable molecules",
+    "x": 731.65,
+    "y": 1321.0,
+    "width": 382.69,
+    "font_px": 18.0
+  },
+  {
+    "text": "Coverage QC · Wilson intervals · effect-size contrasts",
+    "x": 636.0,
+    "y": 1361.0,
+    "width": 404.35,
+    "font_px": 17.0
+  },
+  {
+    "text": "Schematic examples; tracks and matrix intensities are illustrative.",
+    "x": 32.0,
+    "y": 1398.0,
+    "width": 461.51,
+    "font_px": 16.0
+  },
+  {
+    "text": "* Optional modification analysis; contrasts are descriptive.",
+    "x": 818.92,
+    "y": 1398.0,
+    "width": 409.08,
+    "font_px": 16.0
+  }
+]

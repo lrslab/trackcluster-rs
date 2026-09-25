@@ -28,7 +28,7 @@ the output BED score. Per-record MAPQ remains in the source BAM.
 does not retain the original CIGAR, softclip lengths, or clipped sequence and
 quality evidence. A converted read's score `0` supplies no SL support at the
 legacy cutoff of `11`. The new prediction-module
-[SL evidence contract](design/prediction_sl_evidence_contract.md) requires
+[SL evidence contract](https://github.com/lrslab/trackcluster-rs/blob/main/docs/design/prediction_sl_evidence_contract.md) requires
 separate typed MAPQ, SLRanger, and SW values with their evidence provenance.
 
 Older converter output incorrectly used MAPQ as BED score. Regenerate that

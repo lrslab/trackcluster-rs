@@ -1,0 +1,23 @@
+{
+  "revision": 1,
+  "status": "Restored as preferred main figure",
+  "panels": 5,
+  "pdf_pages": 1,
+  "page_mm": [
+    183,
+    204.8
+  ],
+  "text_collision_candidates": [],
+  "svg_xml_valid": true,
+  "raster_dimensions": [
+    4323,
+    4838
+  ],
+  "raster_dpi": [
+    599.9988,
+    599.9988
+  ],
+  "restored_files_byte_identical": true,
+  "alternative_version": "docs/figures/archive/v2_junction_expanded",
+  "visual_review": "Restored assets are byte-identical to the previously inspected five-panel version."
+}

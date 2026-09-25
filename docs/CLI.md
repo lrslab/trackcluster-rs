@@ -130,7 +130,7 @@ This conversion neither computes SW scores nor imports SLRanger `SL_score`.
 Enabling `--sw-score 11` does not detect SL sequences; converted reads with
 score `0` remain without SL protection at that cutoff. Original softclip and
 endpoint sequence evidence is not retained in BED. See the
-[prediction SL evidence contract](design/prediction_sl_evidence_contract.md).
+[prediction SL evidence contract](https://github.com/lrslab/trackcluster-rs/blob/main/docs/design/prediction_sl_evidence_contract.md).
 
 Older converter output used MAPQ as the BED score. Regenerate those BED files
 from BAM to obtain score `0`; if reusing that old output, disable its score-based
