@@ -4,11 +4,11 @@
 
 TrackCluster-RS is a reference-guided, pure-Rust pipeline that turns aligned
 long RNA/cDNA reads into a shared isoform catalog, per-sample expression and
-isoform usage, and optional RNA modification summaries. It connects transcript
-structure, abundance and modification evidence through traceable read-to-isoform
+isoform usage, and optional RNA modification and poly(A) tail summaries. It connects transcript
+structure, abundance, modification and tail-length evidence through traceable read-to-isoform
 assignments.
 
-[Quickstart](#quickstart) · [Install](#install) · [Direct counting](docs/COUNTING.md) · [RNA modifications](#isoform-level-rna-modifications) · [CLI reference](docs/CLI.md) · [Pipeline tutorial](docs/PIPELINE.md)
+[Quickstart](#quickstart) · [Install](#install) · [Direct counting](docs/COUNTING.md) · [RNA modifications](#isoform-level-rna-modifications) · [Poly(A) tails](docs/POLYA.md) · [CLI reference](docs/CLI.md) · [Pipeline tutorial](docs/PIPELINE.md)
 
 ## Method highlights
 
@@ -29,6 +29,9 @@ assignments.
   Dorado or m6Anet read-level calls and join them to the same final assignments
   used for expression. Keep unknown calls and structurally absent sites distinct
   from unmodified observations, with explicit callable denominators and QC.
+- **Compare poly(A) tails across isoforms.** Join Dorado `pt:i` read estimates
+  to final unique assignments and report per-sample means, medians, quartiles
+  and the number of valid tails. Failed estimates remain missing data.
 
 For practical use, `flow` runs preparation, per-gene clustering, counting and
 classification in one command. Native Rust interval operations remove the
@@ -323,6 +326,7 @@ manual batching, rejected reads and resuming completed work.
 | Import, validate and export | `bam2bigg`, `gff2bigg`, `validate-bed`, `export` |
 | Prepare and cluster | `preparedir`, `clusterj`, `cluster`, `clusterj_batch` (separate binary) |
 | Quantify and interpret | `count`, `count-multi`, `desc`, `addgene` |
+| Summarize Dorado poly(A) tail lengths | `polya-aggregate`; `flow --polya-bam` or `--polya-manifest` |
 | Import modification calls | `mod-import-dorado`, `mod-import-m6anet` |
 | Summarize modifications and technical coverage | `mod-aggregate`, `mod-site-summary`, `mod-contrast`, `mod-subsample` |
 

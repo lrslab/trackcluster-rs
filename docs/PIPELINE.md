@@ -197,6 +197,25 @@ all valid.
 The direct single-gene `clusterj` and `cluster` commands use the same policy. With
 `--out isoform.bed`, their diagnostic is `isoform.rejected_reads.tsv`.
 
+### Optional isoform-level poly(A) summaries
+
+For reads basecalled with Dorado `--estimate-poly-a`, add
+`--polya-bam sample.dorado.bam --polya-sample S1` to single-sample flow, or
+`--polya-manifest polya.tsv` to manifest flow. The poly(A) manifest has required
+`sample,bam` columns and optional `group`; paths are relative to the manifest.
+It must cover exactly the samples in the reads manifest, whose group labels
+are inherited. Final assignments must be globally unambiguous.
+
+The optional stage writes `<prefix>.isoform_polya.tsv` with per-sample valid
+tail counts, mean, median, quartiles, range and sample standard deviation,
+plus `.read_polya.tsv` and `.polya_qc.tsv` audit tables. Dorado `pt:i:-1` and
+`pt:i:0` are failures and never enter length statistics. These statistics use
+actual assigned molecules without downsampling count scaling.
+
+Use `polya-aggregate` to summarize an existing discovery or fixed-catalog
+assignment independently. The [poly(A) guide](POLYA.md) includes full commands
+and missing-data rules.
+
 ### Optional isoform-level modification post-processing
 
 Modification import is intentionally separate from isoform discovery. First

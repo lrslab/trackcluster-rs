@@ -120,6 +120,18 @@ pub struct Args {
     )]
     pub unique_assignment_junction_offset: u32,
 
+    /// Dorado BAM with pt:i tags for poly(A) summaries in single-sample --reads mode.
+    #[arg(long = "polya-bam", conflicts_with_all = ["polya_manifest", "manifest"])]
+    pub polya_bam: Option<PathBuf>,
+
+    /// Sample label for --polya-bam; defaults to the BAM file stem.
+    #[arg(long = "polya-sample", requires = "polya_bam")]
+    pub polya_sample: Option<String>,
+
+    /// TSV with sample, bam, optional group for poly(A) summaries after unique assignment.
+    #[arg(long = "polya-manifest", requires = "manifest")]
+    pub polya_manifest: Option<PathBuf>,
+
     /// Optional normalized modification manifest processed after unique assignment.
     #[arg(long = "mod-manifest")]
     pub mod_manifest: Option<PathBuf>,
@@ -345,8 +357,11 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     {
         anyhow::bail!("flow: modification analysis options require --mod-manifest");
     }
+    let polya_prefix = args.output_root.join(&args.prefix);
+    let polya_inputs = crate::cli::polya_aggregate::prepare_flow(&args)?;
     let junction = args.junction_config();
     let flow_manifest = args.manifest.clone();
+    let polya_manifest = args.polya_manifest.clone();
     let mod_manifest = args.mod_manifest.clone();
     let mod_contrasts = args.mod_contrasts.clone();
     let mod_thresholds =
@@ -410,6 +425,24 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         emit_pooled_reads: args.emit_pooled_reads,
         count_only: args.count_only,
     })?;
+
+    // Replaced counts/catalogs cannot retain poly(A) summaries from an older run.
+    for suffix in crate::polya::OUTPUT_SUFFIXES {
+        remove_stale_optional_output(&polya_prefix, suffix)?;
+    }
+    if let Some((inputs, mode)) = polya_inputs {
+        crate::cli::polya_aggregate::run_with_inputs(
+            &inputs,
+            mode,
+            &result.isoform_bed,
+            result
+                .unique_read_to_isoform_tsv
+                .as_deref()
+                .expect("validated unique assignment mode"),
+            &polya_prefix,
+            polya_manifest.as_deref(),
+        )?;
+    }
 
     if let Some(mod_manifest) = mod_manifest.as_deref() {
         let sample_manifest = flow_manifest

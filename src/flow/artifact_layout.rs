@@ -42,6 +42,9 @@ const PREFIX_TOP_LEVEL_SUFFIXES: &[&str] = &[
     ".isoform_counts.matrix.tsv",
     ".isoform_usage.group.tsv",
     ".unique_assignment.provenance.tsv",
+    ".isoform_polya.tsv",
+    ".read_polya.tsv",
+    ".polya_qc.tsv",
 ];
 
 /// Keep biological gene directories disjoint from every top-level pipeline artifact.

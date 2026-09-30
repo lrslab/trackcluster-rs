@@ -440,6 +440,53 @@ Emitted only in unique assignment mode. The table records the effective
 policy used to generate the count tables. Fractional mode removes a stale
 unique-mode provenance file when the same output prefix is rerun successfully.
 
+## Isoform-level poly(A) formats
+
+`polya-aggregate` and optional flow poly(A) processing consume Dorado BAM
+`pt:i` tags and a two-column, headerless, globally unique read-to-isoform
+mapping. Positive estimates are lengths in nucleotides; `-1` (anchor not
+found) and `0` (estimation failed) are missing lengths.
+
+The poly(A) manifest is TSV with required `sample,bam` and optional `group`
+columns. BAM paths are relative to the manifest. Manifest-mode mapping IDs
+are `sample::original_read_id`; single-BAM mode uses exact BAM query names.
+
+`*.isoform_polya.tsv` has one row for each sample/catalog isoform, including
+unexpressed isoforms, with columns in this order:
+
+```text
+sample group gene isoform_id
+assigned_reads observed_reads polya_reads missing_bam_reads missing_pt_reads
+anchor_not_found_reads estimation_failed_reads polya_fraction
+polya_mean_nt polya_median_nt polya_q25_nt polya_q75_nt
+polya_min_nt polya_max_nt polya_stddev_nt
+```
+
+`polya_reads` counts positive estimates. `observed_reads` counts assigned
+reads present among primary BAM records, regardless of estimate success.
+The four failure/missing counts plus `polya_reads` sum to `assigned_reads`.
+`polya_fraction` is `polya_reads / assigned_reads`. Length summaries exclude
+all failed/missing estimates. Quantiles interpolate at `(n - 1) * p`; standard
+deviation uses `n - 1`. Missing statistics and zero-denominator fractions are
+`NA`; standard deviation is also `NA` with one positive estimate.
+
+`*.read_polya.tsv` columns are
+`sample,group,gene,isoform_id,read_id,dorado_pt,polya_length_nt,status`.
+`dorado_pt` preserves the raw positive, `-1`, or `0` value, or `NA` when
+unavailable. `polya_length_nt` contains only positive estimates; otherwise
+it is `NA`. Status is one of `estimated`, `anchor_not_found`,
+`estimation_failed`, `missing_pt_tag`, or `missing_bam_read`.
+
+`*.polya_qc.tsv` starts with
+`sample,group,bam,dorado_versions,bam_records,primary_records,skipped_secondary,skipped_supplementary,unassigned_primary_records,duplicate_assigned_primary_records,primary_records_with_pt`,
+then the eight count/fraction columns above, and `read_join_rate`.
+Versions are taken from available Dorado `@PG` header records, or `NA`.
+`read_join_rate = observed_reads / assigned_reads`; unassigned BAM records do
+not enter its denominator. Secondary/supplementary records are excluded,
+and agreeing repeated assigned primary records count once. Conflicting
+estimates fail validation. Counts are actual molecules, without downsampling
+scaling. See [the poly(A) guide](POLYA.md) for commands and interpretation.
+
 ## Isoform-level modification formats
 
 The modification boundary is a normalized genomic read/site observation table.

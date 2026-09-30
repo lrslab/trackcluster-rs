@@ -195,7 +195,7 @@ pub enum Commands {
     /// Cluster long reads against a reference catalog by transcript overlap.
     Cluster(cluster::Args),
     /// Run preparation, per-gene clustering, merging, counting, and annotation.
-    Flow(flow::Args),
+    Flow(Box<flow::Args>),
     /// Count one sample against a fixed catalog or clustered isoforms.
     Count(count::Args),
     /// Count multiple samples against a fixed catalog or clustered isoforms.
@@ -245,7 +245,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::ValidateBed(args) => validate_bed::run(args),
         Commands::Clusterj(args) => clusterj::run(args),
         Commands::Cluster(args) => cluster::run(args),
-        Commands::Flow(args) => flow::run(args),
+        Commands::Flow(args) => flow::run(*args),
         Commands::Count(args) => count::run(args),
         Commands::CountMulti(args) => count_multi::run(args),
         Commands::AddGene(args) => addgene::run(args),

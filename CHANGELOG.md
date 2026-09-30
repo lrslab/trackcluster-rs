@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add Dorado poly(A) tail-length summaries with `polya-aggregate` and optional
+  `flow --polya-bam` / `--polya-manifest`. Join primary BAM `pt:i` estimates to
+  globally unique final read assignments, deduplicate repeated primary records,
+  and report per-sample isoform means, medians, quartiles, ranges and sample
+  standard deviations. Audit failed/missing estimates and read joins separately;
+  Dorado's `-1` and `0` sentinels never enter tail-length statistics.
 - Add `count` / `count-multi --assign-against-catalog` for direct counting
   against supplied isoforms without discovery, downsampling or prior mappings.
   Assign each input molecule to one nearest same-locus isoform by splice

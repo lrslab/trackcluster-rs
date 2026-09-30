@@ -247,7 +247,7 @@ Run the full pipeline as a single command:
 3) merge per-gene outputs into `<prefix>_isoform.bed` and `<prefix>_unused.bed`
 4) `count` and `desc` on the merged isoforms
 5) when `--manifest` is used: run per-sample `count-multi` outputs from the pooled isoforms
-6) optionally aggregate normalized modification observations using the final unique mapping
+6) optionally aggregate Dorado poly(A) tail estimates and normalized modification observations using the final unique mapping
 
 Key flags:
 - `--cluster-mode`: `clusterj` (default) or `cluster` (overlap/intersection mode)
@@ -279,6 +279,12 @@ Key flags:
 - `--prepare-fraction-read`, `--prepare-fraction-ref`: overlap thresholds for gene assignment
 - `--assignment-mode`: final counting mode, `unique` (default) or `fractional`; flow unique mode expands candidates within each gene folder before choosing the closest compatible isoform, including retained 3' early-stop isoforms. This is deliberately gene-local: a molecule assigned to multiple genes can retain one selected isoform per gene. Final counts divide that molecule across its distinct selected isoforms, preserving total abundance. The `.unique.tsv` filename does not imply global uniqueness across genes; modification aggregation separately requires globally unambiguous assignments.
 - `--unique-assignment-junction-offset` (default: `15`): maximum per-boundary difference for the ordered one-to-one intron matcher used by unique assignment.
+- `--polya-bam`: Dorado BAM carrying `pt:i` tags for single-sample flow.
+  `--polya-sample` supplies the output sample label (default: BAM stem).
+- `--polya-manifest`: TSV with `sample,bam` and optional `group`, for pooled
+  flow. It must contain exactly the samples in `--manifest`; groups come from
+  that reads manifest. Poly(A) summaries require unique assignment and reject
+  reads assigned to multiple distinct isoforms. See [poly(A) workflow](POLYA.md).
 - `--mod-manifest`: optional normalized modification manifest. It requires
   manifest mode and `--assignment-mode unique`; modification aggregation runs
   only after clustering/count artifacts have been published.
@@ -332,6 +338,8 @@ Outputs (under `--output-root`):
 - `<prefix>.isoform_usage.long.tsv` (manifest mode only)
 - `<prefix>.isoform_counts.matrix.tsv` (manifest mode only)
 - `<prefix>.isoform_usage.group.tsv` (manifest mode only; when at least one sample has a non-empty `group`)
+- `<prefix>.isoform_polya.tsv`, `<prefix>.read_polya.tsv`, and
+  `<prefix>.polya_qc.tsv` (when poly(A) input is supplied)
 - `<prefix>.mod_join_qc.tsv`, `<prefix>.mod_site_join_qc.tsv`,
   `<prefix>.isoform_mod_sites.tsv`, and `<prefix>.isoform_mod_design.tsv`
   (manifest mode + `--mod-manifest`)
@@ -423,6 +431,36 @@ trackcluster flow \
 ```
 
 `--count-only` expects completed per-gene output folders under `--output-root`. It uses the prefix-scoped `<prefix>_gene.txt` and `<prefix>_gene_paths.tsv` metadata when present. For a standalone `clusterj_batch` tree that has no prefix-scoped metadata, it uses the versioned `clusterj_batch_gene_paths.tsv` (or `cluster_batch_gene_paths.tsv` for overlap mode); it never infers the active gene set from stale directories. Per-gene directories and filenames use encoded path keys, while reports retain the biological gene ID. Gene IDs are limited to 4096 UTF-8 bytes and reject path separators, absolute paths, `.`/`..`, and control characters. Before publishing any merged output, count-only verifies every selected gene's `run.json`, prepared-input hashes, cluster mode and tool identity, and all output hashes, sizes, and record counts. Missing, legacy, modified, or incomplete per-gene results fail the command; rerun the producing flow or batch command to rebuild them. In unique assignment mode, it selects reads directly from each verified gene folder using the key-based nano BED, per-gene isoform BED, and read-to-isoform TSV. Add `--manifest samples.tsv` to a count-only rerun when you need manifest-mode `*.isoform_usage.*` outputs regenerated.
+
+### `trackcluster polya-aggregate`
+
+Summarize Dorado's per-read `pt:i` tail lengths against an existing isoform
+catalog and a globally unique final read-to-isoform mapping:
+
+```bash
+trackcluster polya-aggregate \
+  --bam sample.dorado.bam --sample S1 \
+  --isoforms out/sample_isoform.bed \
+  --read-to-isoform out/sample_read_to_isoform.unique.tsv \
+  --out out/sample
+```
+
+Single-sample `--bam` mode uses exact BAM query names and accepts an optional
+`--group`. Alternatively, `--polya-manifest polya.tsv` reads `sample,bam` and
+optional `group` columns; pooled mapping IDs must be `sample::original_read_id`.
+BAM paths are relative to the manifest. `--out` (alias `--out-prefix`) emits
+`.isoform_polya.tsv`, `.read_polya.tsv`, and `.polya_qc.tsv`.
+
+Positive `pt:i` estimates contribute once per assigned molecule. Dorado `-1`
+and `0`, missing tags, and assigned reads absent from the BAM are audited
+separately and excluded from length statistics. The isoform table contains
+valid-read counts, mean, median, quartiles, range and sample standard deviation;
+zero-read catalog isoforms have `NA` lengths. Primary unmapped records are
+allowed; secondary and supplementary alignments are ignored. Conflicting
+primary estimates, noninteger tags and ambiguous mappings fail validation.
+
+See [poly(A) workflow](POLYA.md) for pooled and flow examples and
+[formats](FORMATS.md#isoform-level-polya-formats) for column definitions.
 
 ### `trackcluster mod-import-m6anet`
 Normalize m6Anet RNA002 read probabilities and project exact transcript
