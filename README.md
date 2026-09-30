@@ -8,7 +8,7 @@ isoform usage, and optional RNA modification summaries. It connects transcript
 structure, abundance and modification evidence through traceable read-to-isoform
 assignments.
 
-[Quickstart](#quickstart) · [Install](#install) · [RNA modifications](#isoform-level-rna-modifications) · [CLI reference](docs/CLI.md) · [Pipeline tutorial](docs/PIPELINE.md)
+[Quickstart](#quickstart) · [Install](#install) · [Direct counting](docs/COUNTING.md) · [RNA modifications](#isoform-level-rna-modifications) · [CLI reference](docs/CLI.md) · [Pipeline tutorial](docs/PIPELINE.md)
 
 ## Method highlights
 
@@ -162,6 +162,41 @@ Relative read paths are resolved against the manifest directory. The run builds
 one catalog and writes per-sample counts, within-gene isoform usage and group
 summaries. Add `--emit-pooled-reads` to retain the pooled read tracks.
 
+### Given isoforms: count directly without discovery
+
+Use a reference or external BED12/bigGenePred catalog as `--isoform`:
+
+```bash
+trackcluster count \
+  --reads examples/reads.bed --isoform examples/ref.bed \
+  --assign-against-catalog --out out/quant.csv
+
+trackcluster count-multi \
+  --manifest examples/samples.tsv --isoform examples/ref.bed \
+  --assign-against-catalog --out out/quant_multi
+```
+
+Every input molecule with a same-chromosome, same-strand, exonic-overlap
+candidate is assigned once, using splice-structure differences followed by
+terminal distance; existing gene annotations constrain the candidates when
+both sides have them. This mode uses the supplied catalog unchanged, retains
+zero-count isoforms and needs no discovery mapping or separate `--reference`.
+It writes the selected `*.read_to_isoform.tsv`, `*.unassigned_reads.tsv` with
+reasons, and `*.assignment_stats.tsv` alongside counts. Multi-sample mode also
+writes the count matrix and usage tables.
+
+For these bundled inputs, the single-sample result is:
+
+```csv
+gene,isoform_id,count
+GENEA,ref_a,1
+GENEA,ref_b,0
+```
+
+The [direct-counting tutorial](docs/COUNTING.md) walks through the input records,
+both commands, expected outputs, BAM/GTF conversion and assignment rules.
+`count --out` is a CSV filename; `count-multi --out` is an output prefix.
+
 ### Your data: BAM and GTF/GFF3 to isoforms
 
 Replace the input filenames with your genome-aligned BAM and matching annotation:
@@ -180,7 +215,7 @@ an alignment filter. See [format adapters](docs/INTERCHANGE.md) for import rules
 
 ### Main outputs
 
-For the examples above, start with these files:
+For the discovery examples above, start with these files:
 
 | File | What it provides |
 | --- | --- |

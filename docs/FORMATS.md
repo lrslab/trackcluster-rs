@@ -128,7 +128,19 @@ compatibility. That legacy form cannot represent a comma inside a read ID;
 re-emit the catalog or use the mapping TSV to migrate such data. All newly
 written full payloads use `tc_name2_v1`.
 
-When read IDs are omitted from `name2`, use the `*_read_to_isoform.tsv` mapping written by `clusterj`/`cluster`/`flow`. For ordinary recounts, prefer `trackcluster count --output-root <out> --prefix <prefix>`; it reads each gene folder directly, so unique assignment and retained-intron checks stay gene-local. The legacy standalone BED mode can still take `--read-to-isoform` (or auto-discover it next to the isoform BED), but its unique assignment scope is the supplied merged input. Counting defaults to unique best assignment: it expands compatible candidates against the isoform catalog, then selects the closest isoform per read before counting. Pass `--assignment-mode fractional` for compatibility with split multi-mapped counts from the mapping file.
+For recounting discovery results when read IDs are omitted from `name2`, use
+the `*_read_to_isoform.tsv` mapping written by `clusterj`/`cluster`/`flow`.
+Prefer `trackcluster count --output-root <out> --prefix <prefix>` for per-gene
+outputs; it keeps unique assignment and retained-intron checks gene-local.
+The legacy standalone BED mode can take `--read-to-isoform` or auto-discover a
+neighboring mapping, with the supplied merged input as its scope. These recount
+modes default to selecting one closest compatible candidate per read; use
+`--assignment-mode fractional` to split a molecule across mapped candidates.
+
+For a supplied catalog and fresh read assignment, use `count` or `count-multi`
+with `--assign-against-catalog`. That mode reads all input molecules, ignores
+`name2` and old mappings, and writes a new selected mapping. See
+[direct counting](COUNTING.md) and the output contracts below.
 
 Mapping files contain exactly two raw TSV fields, `read_id` and `isoform_id`,
 without a header. Leading and trailing spaces are significant identity bytes and
@@ -136,6 +148,116 @@ round-trip unchanged; empty fields, tabs within a field, and embedded line
 breaks are invalid.
 
 In `flow` unique assignment mode, `<prefix>_read_to_isoform.tsv` remains the raw merged mapping from per-gene clustering. The selected mapping actually used for final counts is written separately as `<prefix>_read_to_isoform.unique.tsv`; use that file when auditing or reproducing unique-mode counts. `<prefix>_unique_assignment.provenance.tsv` records the effective junction tolerance, ordered one-to-one matcher, and explicit no-collapse policy for microfeatures.
+
+## Fixed-catalog counting outputs
+
+These files are written when `--assign-against-catalog` is passed to `count`
+or `count-multi`. The catalog remains an input; no new isoform BED or discovery
+memberships are produced.
+
+| Output | `count --out sample.csv` | `count-multi --out sample` |
+| --- | --- | --- |
+| Counts | `sample.csv` | `sample.isoform_count.csv` |
+| Selected mapping | `sample.read_to_isoform.tsv` | `sample.read_to_isoform.tsv` |
+| Unassigned reads | `sample.unassigned_reads.tsv` | `sample.unassigned_reads.tsv` |
+| Accounting | `sample.assignment_stats.tsv` | `sample.assignment_stats.tsv` |
+| Assignment policy | `sample.provenance.tsv` | `sample.unique_assignment.provenance.tsv` |
+| Sample count matrix | — | `sample.isoform_counts.matrix.tsv` |
+| Sample usage | — | `sample.isoform_usage.long.tsv` |
+| Group usage | — | `sample.isoform_usage.group.tsv` (if any group is specified) |
+
+Single-sample reports replace the last extension of `--out`; multi-sample
+reports append suffixes to the complete prefix. Use distinct destinations for
+separate runs. Input/output file aliases are rejected.
+
+### Counts and usage tables
+
+Count CSV has the header `gene,isoform_id,count`. Each catalog isoform has one
+row, including zero counts. `gene` comes from the catalog's gene metadata or
+is `none` if absent. Direct assignment counts distinct molecules without
+fractional splitting or downsampling scaling. Aggregate counts equal the sum
+of sample matrix columns for each isoform.
+
+The matrix header is `gene`, `isoform_id`, then sample names in manifest
+order. It retains zero-count isoforms and empty-sample columns. Rows are
+sorted by gene and isoform ID.
+
+The long usage table has columns `gene`, `isoform_id`, `sample`, optional
+`group`, `count`, `proportion`, `gene_total`. The `group` column is present
+when any manifest row specifies a group; ungrouped samples have an empty
+value. Only nonzero counts are emitted. `gene_total` sums assigned counts
+within the sample and gene, and `proportion = count / gene_total`.
+
+The group table has columns `gene`, `isoform_id`, `group`, `count`,
+`proportion`, `gene_total`. It sums sample counts within each non-empty group
+and recomputes proportions from the group totals. Samples without a group
+are excluded from this table. Only nonzero group counts are emitted.
+
+### Selected mapping and unassigned reads
+
+The selected mapping has two raw TSV fields, `read_id` and `isoform_id`, with
+**no header**. There is exactly one row per assigned molecule, sorted by read
+ID. In fixed-catalog mode, `*.read_to_isoform.tsv` is already the unique mapping
+used for counts; there is no separate `*.unique.tsv` mapping.
+
+The unassigned report is a headered TSV:
+
+```tsv
+read_id	gene	reason
+```
+
+Its `gene` is the read's existing annotation, or `none`; it is not an inferred
+catalog gene. Each unassigned molecule appears once, sorted by read ID. Both
+reports use `sample::original_read_id` in manifest mode. Header-only unassigned
+reports mean all input molecules were assigned (or the read inputs were empty).
+
+| `reason` | First candidate filter that leaves no candidates |
+| --- | --- |
+| `no_candidate_locus` | No catalog span overlaps on the read's chromosome |
+| `strand_mismatch` | Span-overlapping catalog records all have a different strand |
+| `gene_mismatch` | Same-strand, span-overlapping records all have incompatible annotated gene sets |
+| `no_exon_overlap` | Eligible spans overlap, but no read exon overlaps a candidate exon |
+
+Splice differences alone are not an unassigned reason in this mode; they are
+ranked to choose a nearest candidate. Parsing/identity errors fail the run and
+are not recorded as unassigned molecules.
+
+### Assignment statistics
+
+`*.assignment_stats.tsv` has columns `metric` and `count`:
+
+| `metric` | Meaning |
+| --- | --- |
+| `input_records` | Parsed read BED records, including identical duplicates |
+| `total_reads` | Distinct molecule IDs; sample-prefixed in manifest mode |
+| `assigned_reads` | Molecules with one selected isoform |
+| `unassigned_reads` | Molecules without a candidate |
+
+`assigned_reads + unassigned_reads = total_reads`, and `input_records` can
+exceed `total_reads` when identical alignments repeat. Summing the count CSV,
+or all sample cells in the matrix, gives `assigned_reads`.
+
+### Assignment provenance
+
+The provenance TSV is a headerless key/value table. With the default junction
+tolerance it contains:
+
+```tsv
+format_version	1
+assignment_mode	unique
+unique_assignment_junction_offset	15
+intron_matcher	ordered_one_to_one_max_cardinality_min_delta
+microfeature_collapse	false
+assignment_source	fixed_catalog
+read_scope	all_input_reads
+candidate_policy	same_chrom_strand_gene_exon_overlap
+splice_conflicts	rank_not_reject
+tie_break	isoform_id
+```
+
+`unique_assignment_junction_offset` records the effective value supplied on
+the command line. See the [assignment rules](CLI.md#fixed-catalog-assignment-rules)
+for scoring and candidate eligibility.
 
 ## Stable identity contract
 

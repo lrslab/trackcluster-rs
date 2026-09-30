@@ -4,6 +4,8 @@ use std::path::Path;
 
 use crate::model::{Coord, Interval, Strand, Transcript};
 
+/// Quantify every input read against a fixed isoform catalog without discovery.
+pub mod catalog;
 pub mod multi;
 
 pub const DEFAULT_UNIQUE_ASSIGNMENT_JUNCTION_OFFSET: u32 = 15;

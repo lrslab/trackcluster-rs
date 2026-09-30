@@ -16,21 +16,33 @@ pub struct Args {
     #[arg(long = "cluster-mode", default_value_t = crate::flow::full::ClusterMode::Clusterj)]
     pub cluster_mode: crate::flow::full::ClusterMode,
 
-    /// Reads BED (legacy isoform-BED mode)
+    /// Reads BED (standalone isoform-BED mode)
     #[arg(short = 's', long = "reads")]
     pub reads: Option<PathBuf>,
 
-    /// Reference BED
-    #[arg(short = 'r', long = "reference")]
-    pub reference: PathBuf,
+    /// Reference BED (optional with --assign-against-catalog)
+    #[arg(
+        short = 'r',
+        long = "reference",
+        required_unless_present = "assign_against_catalog"
+    )]
+    pub reference: Option<PathBuf>,
 
-    /// Isoform BED (legacy low-level mode)
+    /// Isoform BED (clustered isoforms or a fixed catalog)
     #[arg(short = 'i', long = "isoform")]
     pub isoform: Option<PathBuf>,
 
     /// Optional read-to-isoform TSV mapping (legacy low-level mode)
     #[arg(long = "read-to-isoform")]
     pub read_to_isoform: Option<PathBuf>,
+
+    /// Skip discovery and assign every input read to its nearest catalog isoform
+    #[arg(
+        long = "assign-against-catalog",
+        requires_all = ["reads", "isoform"],
+        conflicts_with_all = ["read_to_isoform", "output_root", "prefix"]
+    )]
+    pub assign_against_catalog: bool,
 
     /// How reads with multiple isoform candidates are counted: fractional or unique
     #[arg(long = "assignment-mode", default_value_t = crate::count::AssignmentMode::Unique)]
@@ -43,7 +55,7 @@ pub struct Args {
     )]
     pub unique_assignment_junction_offset: u32,
 
-    /// Output CSV for legacy isoform-BED mode
+    /// Output CSV for standalone isoform-BED mode
     #[arg(long = "out")]
     pub out: Option<PathBuf>,
 }
@@ -95,7 +107,9 @@ do not combine it with --reads, --isoform, --read-to-isoform, or --out"
         cluster_mode: args.cluster_mode,
         reads: None,
         manifest: None,
-        reference: args.reference,
+        reference: args
+            .reference
+            .context("count: --output-root requires --reference")?,
         output_root,
         prefix,
         prepare: crate::flow::config::PrepareConfig::default(),
@@ -140,6 +154,10 @@ do not combine it with --reads, --isoform, --read-to-isoform, or --out"
 }
 
 fn run_legacy_isoform_count(args: Args) -> anyhow::Result<()> {
+    let reference = args
+        .reference
+        .as_deref()
+        .context("count: --reference is required unless --assign-against-catalog is used")?;
     let unique_assignment_options = crate::count::UniqueAssignmentOptions {
         junction_offset: args.unique_assignment_junction_offset,
     };
@@ -164,7 +182,7 @@ fn run_legacy_isoform_count(args: Args) -> anyhow::Result<()> {
         .or_else(|| guess_mapping_path(isoform_path));
     let mut inputs = vec![
         ("reads input", reads_path.as_path()),
-        ("reference input", args.reference.as_path()),
+        ("reference input", reference),
         ("isoform input", isoform_path.as_path()),
     ];
     if let Some(path) = mapping_path.as_deref() {
@@ -204,14 +222,13 @@ fn run_legacy_isoform_count(args: Args) -> anyhow::Result<()> {
             anyhow::bail!(
                 "count: no --read-to-isoform provided and no mapping file found next to {:?}; \
 this isoform BED does not embed read IDs (likely from --name2-mode coverage|none). \
-Provide --read-to-isoform or re-run clustering with --name2-mode full.",
+Provide --read-to-isoform, re-run clustering with --name2-mode full, or use --assign-against-catalog to assign all reads directly.",
                 isoform_path
             );
         }
 
-        let refs: Vec<crate::model::Transcript> = crate::io::bed::read_bed12(&args.reference)?
-            .collect::<Result<Vec<_>, crate::io::bed::BedError>>(
-        )?;
+        let refs: Vec<crate::model::Transcript> = crate::io::bed::read_bed12(reference)?
+            .collect::<Result<Vec<_>, crate::io::bed::BedError>>()?;
         if args.assignment_mode == crate::count::AssignmentMode::Unique {
             let reads: Vec<crate::model::Transcript> = crate::io::bed::read_bed12(reads_path)
                 .with_context(|| format!("open reads {:?}", reads_path))?
@@ -248,7 +265,58 @@ Provide --read-to-isoform or re-run clustering with --name2-mode full.",
     Ok(())
 }
 
+fn run_catalog_count(args: Args) -> anyhow::Result<()> {
+    use crate::count::catalog::{assign_reads_to_catalog, CatalogOutputPaths};
+
+    anyhow::ensure!(
+        args.assignment_mode == crate::count::AssignmentMode::Unique,
+        "count: --assign-against-catalog requires --assignment-mode unique"
+    );
+    let reads_path = args
+        .reads
+        .as_deref()
+        .context("count: --assign-against-catalog requires --reads")?;
+    let isoform_path = args
+        .isoform
+        .as_deref()
+        .context("count: --assign-against-catalog requires --isoform")?;
+    let out = args
+        .out
+        .as_deref()
+        .unwrap_or_else(|| Path::new("isoform_count.csv"));
+    let reports = CatalogOutputPaths::for_count(out);
+    let mut inputs = vec![("reads input", reads_path), ("isoform input", isoform_path)];
+    if let Some(reference) = args.reference.as_deref() {
+        inputs.push(("reference input", reference));
+    }
+    let mut outputs = vec![("count CSV output", out)];
+    outputs.extend(reports.labeled_paths());
+    super::ensure_distinct_inputs_and_outputs(&inputs, &outputs)?;
+
+    let reads = crate::io::bed::read_bed12(reads_path)?
+        .collect::<Result<Vec<_>, crate::io::bed::BedError>>()?;
+    let isoforms = crate::io::bed::read_bed12(isoform_path)?
+        .collect::<Result<Vec<_>, crate::io::bed::BedError>>()?;
+    let options = crate::count::UniqueAssignmentOptions {
+        junction_offset: args.unique_assignment_junction_offset,
+    };
+    let assignment = assign_reads_to_catalog(&reads, &isoforms, options)?;
+    let counts = crate::count::count_by_read_to_isoform(&isoforms, &assignment.read_to_isoform)?;
+    crate::flow::artifact_manifest::atomic_write_with(out, |writer| {
+        crate::count::write_counts_csv_to_writer(writer, &counts).map_err(Into::into)
+    })?;
+    reports.write(&assignment, options)?;
+    eprintln!(
+        "count: fixed_catalog isoforms={} assigned={} unassigned={} count={out:?} mapping={:?} unassigned_reads={:?}",
+        isoforms.len(), assignment.read_to_isoform.len(), assignment.unassigned_reads.len(), reports.mapping, reports.unassigned
+    );
+    Ok(())
+}
+
 pub fn run(args: Args) -> anyhow::Result<()> {
+    if args.assign_against_catalog {
+        return run_catalog_count(args);
+    }
     if let Some(output_root) = args.output_root.clone() {
         return run_output_root_count(args, output_root);
     }

@@ -554,6 +554,14 @@ pub fn read_tagged_sample_reads(sample_rows: &[SampleRow]) -> anyhow::Result<Vec
             .with_context(|| format!("open reads {:?}", row.reads))?
             .collect::<Result<Vec<_>, crate::io::bed::BedError>>()
             .with_context(|| format!("parse reads {:?}", row.reads))?;
+        // Validate before tagging: an empty ID must not become the non-empty
+        // `sample::` and escape validation when it has no catalog candidate.
+        crate::identity::validate_read_ids(&sample_reads).with_context(|| {
+            format!(
+                "validate reads for sample {:?} in {:?}",
+                row.sample, row.reads
+            )
+        })?;
         for read in &mut sample_reads {
             read.name = tagged_read_name(&row.sample, &read.name);
         }

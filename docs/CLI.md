@@ -785,8 +785,82 @@ trackcluster cluster \
 ```
 
 ### `trackcluster count`
-Compute isoform counts from an existing `flow`/`clusterj-batch` output directory.
-This is the recommended mode because unique assignment is rerun inside each
+Compute isoform counts directly against a fixed catalog, or recount an existing
+`flow`/`clusterj-batch` output directory.
+
+See the [direct-counting tutorial](COUNTING.md) for runnable bundled examples,
+input preparation and expected results, and the
+[output schemas](FORMATS.md#fixed-catalog-counting-outputs) for report fields.
+
+To skip isoform discovery entirely, supply reads and the catalog:
+
+```bash
+trackcluster count \
+  --reads reads.bed \
+  --isoform catalog.bed \
+  --assign-against-catalog \
+  --out out/count.csv
+```
+
+`--assign-against-catalog` reads every molecule directly from `--reads`.
+`--isoform` may be a reference catalog, an external BED12/bigGenePred file or a
+previously discovered/filtered catalog. `--reference` is optional and is not
+used for assignment in this mode. No new isoforms are discovered, no reads are
+downsampled, and all catalog IDs are retained in the count CSV, including zeros.
+Existing neighboring mappings and embedded `name2` memberships are ignored.
+This mode requires `--assignment-mode unique` (the default) and cannot be
+combined with `--read-to-isoform`, `--output-root` or `--prefix`.
+
+`--out` is the standalone count CSV filename (default `isoform_count.csv`).
+Use its full spelling: `-o` means `--output-root` for `count` and cannot be used
+as a shorthand for this output file. For single-sample reports, only the last
+extension is replaced: `--out quant.v1.csv` writes
+`quant.v1.read_to_isoform.tsv`, `quant.v1.assignment_stats.tsv`, and the other
+reports with the same `quant.v1` stem.
+
+For `--out out/count.csv`, it writes:
+
+- `out/count.csv`: `gene,isoform_id,count`.
+- `out/count.read_to_isoform.tsv`: selected pairs, without a header, usable by existing mapping consumers.
+- `out/count.unassigned_reads.tsv`: `read_id`, `gene`, `reason`.
+- `out/count.assignment_stats.tsv`: `metric`, `count`; input records, distinct reads, assigned reads and unassigned reads.
+- `out/count.provenance.tsv`: effective junction tolerance and fixed-catalog policy.
+
+#### Fixed-catalog assignment rules
+
+1. Candidates overlap the read's genomic span on the same chromosome and
+   strand, including exact matching of unknown strand (`.`). At least one
+   exonic base must overlap. When both read and isoform have gene metadata,
+   their gene sets must intersect (`GENEA||GENEB` is supported). Missing gene
+   metadata leaves the search restricted by locus, strand and exon overlap.
+2. Rank candidates lexicographically by fewer unmatched read introns, fewer
+   unmatched catalog introns covered by the read, smaller sum of absolute
+   start/end distances, smaller exonic symmetric difference within the read's
+   span, and smaller exon-count difference within that span. Intron matching
+   uses `--unique-assignment-junction-offset` (default `15` bp at each boundary)
+   and ordered one-to-one matching; input coordinates are not modified.
+3. Break remaining ties by lexicographically smallest isoform ID. Reference
+   status, catalog support and old read memberships confer no preference.
+
+Splice differences are penalties, not rejection criteria: every read with a
+candidate gets exactly one assignment globally, including reads with extra
+junctions and single-exon fragments of internal exons. This is nearest-catalog
+quantification; a selected pair does not assert a perfect structural match.
+Reads without candidates are reported with `no_candidate_locus`,
+`strand_mismatch`, `gene_mismatch` or `no_exon_overlap`, according to the first
+candidate filter that removes all candidates. Thus assigned plus unassigned
+reads equals the number of distinct input read IDs.
+
+Identical duplicate read alignments count once; conflicting alignments with
+the same ID fail before outputs are published. Catalog IDs must be non-empty
+and globally unique, and an empty catalog is rejected. Empty read files are
+allowed and produce zero counts. Plain BED12 catalogs without gene metadata
+use `none` in the gene column; use annotated bigGenePred catalogs for meaningful
+within-gene usage tables.
+
+#### Recount completed discovery outputs
+
+For an existing discovery run, `--output-root` reruns unique assignment inside each
 `<gene-path-key>/` folder using `<gene-path-key>_nano.bed`, the key-named
 per-gene isoform BED, and `<gene-path-key>_read_to_isoform.tsv` before merged
 counts are written.
@@ -843,14 +917,19 @@ duplicate mapping rows are idempotent, while unique assignment rejects
 conflicting structures bearing the same label.
 
 ### `trackcluster count-multi`
-Compute per-sample isoform counts/proportions from pooled isoforms using a sample manifest.
+Compute per-sample isoform counts/proportions from a fixed or pooled isoform catalog using a sample manifest.
+
+The [multi-sample tutorial](COUNTING.md#multiple-samples) includes a complete
+manifest example and expected count matrix. In this command `--out/-o` is a
+prefix; suffixes are appended without removing extensions or dots.
 
 Input:
 - `--manifest`: TSV with required columns `sample`, `reads`; optional `group`
-- `--reference/-r`: reference BED
-- `--isoform/-i`: pooled isoform BED (typically from `flow --manifest` or pooled `clusterj`)
-- `--read-to-isoform`: optional mapping TSV (recommended; required when isoform `name2` does not embed read IDs; auto-discovered when next to the isoform BED)
-- `--assignment-mode`: `unique` (default; expand candidates against the isoform catalog and assign each read to the closest compatible isoform using read/isoform structure) or `fractional` (split multi-mapped reads across mapped candidates)
+- `--reference/-r`: reference BED (optional and unused with `--assign-against-catalog`)
+- `--isoform/-i`: fixed catalog or pooled isoform BED (typically from `flow --manifest` or pooled `clusterj`)
+- `--assign-against-catalog`: assign every manifest read directly against `--isoform`, without discovery or an old mapping; requires `unique` and conflicts with `--read-to-isoform`
+- `--read-to-isoform`: mapping TSV for recount mode (recommended; required when isoform `name2` does not embed read IDs; auto-discovered when next to the isoform BED); not used with `--assign-against-catalog`
+- `--assignment-mode`: `unique` (default) or `fractional`; recount mode selects the closest compatible isoform for unique counting and splits mapped candidates for fractional counting. Fixed-catalog mode requires `unique` and uses the rules above.
 - `--unique-assignment-junction-offset` (default: `15`): unique-assignment intron tolerance in bp
 - `--out/-o`: output prefix
 
@@ -860,6 +939,24 @@ Outputs (`--out <prefix>`):
 - `<prefix>.isoform_counts.matrix.tsv`
 - `<prefix>.isoform_usage.group.tsv` (when at least one sample has a non-empty `group`)
 - `<prefix>.unique_assignment.provenance.tsv` (unique mode)
+- `<prefix>.read_to_isoform.tsv`, `<prefix>.unassigned_reads.tsv`, `<prefix>.assignment_stats.tsv` (with `--assign-against-catalog`)
+
+Direct counting without discovery:
+
+```bash
+trackcluster count-multi \
+  --manifest samples.tsv \
+  --isoform catalog.bed \
+  --assign-against-catalog \
+  --out out/quant
+```
+
+The [fixed-catalog rules](#fixed-catalog-assignment-rules) apply to every sample.
+Reads are identified as `sample::read` in mapping and unassigned outputs, so
+identical read names in different samples remain distinct molecules. Empty
+samples retain their zero-valued matrix columns. Reports cover all samples;
+`input_records` includes identical duplicates while `total_reads` counts each
+distinct tagged molecule once.
 
 Aggregate count semantics:
 - `count` is exactly the sum of the sample columns in `<prefix>.isoform_counts.matrix.tsv` for the same isoform.

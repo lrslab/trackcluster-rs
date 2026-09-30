@@ -7,8 +7,8 @@ Commands:
   clusterj           Cluster long reads against a reference catalog by splice-junction structure
   cluster            Cluster long reads against a reference catalog by transcript overlap
   flow               Run preparation, per-gene clustering, merging, counting, and annotation
-  count              Count one sample against clustered isoforms
-  count-multi        Count multiple samples from a manifest against clustered isoforms
+  count              Count one sample against a fixed catalog or clustered isoforms
+  count-multi        Count multiple samples against a fixed catalog or clustered isoforms
   addgene            Assign gene annotations to reads by overlap with reference transcripts
   preparedir         Build per-gene input directories from reads and a reference catalog
   desc               Classify clustered isoforms relative to reference transcripts

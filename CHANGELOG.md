@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add `count` / `count-multi --assign-against-catalog` for direct counting
+  against supplied isoforms without discovery, downsampling or prior mappings.
+  Assign each input molecule to one nearest same-locus isoform by splice
+  differences and terminal distance, preserve zero-count catalog records, and
+  emit selected mappings, unassigned reasons, totals and assignment provenance.
+  A separate `--reference` is optional in this mode.
 - Fix `bam2bigg` writing MAPQ into BED score: converted reads now use score `0`
   because the converter does not import SL evidence. `--score`/`--min-mapq`
   still filter by MAPQ. High MAPQ alone no longer protects alternative 5' ends

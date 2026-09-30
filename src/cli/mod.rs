@@ -14,6 +14,7 @@ pub mod mod_import_dorado;
 pub mod mod_import_m6anet;
 pub mod mod_site_summary;
 pub mod mod_subsample;
+pub mod polya_aggregate;
 pub mod preparedir;
 pub mod validate_bed;
 
@@ -195,9 +196,9 @@ pub enum Commands {
     Cluster(cluster::Args),
     /// Run preparation, per-gene clustering, merging, counting, and annotation.
     Flow(flow::Args),
-    /// Count one sample against clustered isoforms.
+    /// Count one sample against a fixed catalog or clustered isoforms.
     Count(count::Args),
-    /// Count multiple samples from a manifest against clustered isoforms.
+    /// Count multiple samples against a fixed catalog or clustered isoforms.
     #[command(name = "count-multi")]
     CountMulti(count_multi::Args),
     /// Assign gene annotations to reads by overlap with reference transcripts.
@@ -234,6 +235,9 @@ pub enum Commands {
     /// Split one high-coverage sample into synchronized low-coverage pseudo-sample inputs.
     #[command(name = "mod-subsample")]
     ModSubsample(mod_subsample::Args),
+    /// Summarize Dorado poly(A) tail lengths by final unique isoform assignment.
+    #[command(name = "polya-aggregate")]
+    PolyaAggregate(polya_aggregate::Args),
 }
 
 pub fn run(cli: Cli) -> anyhow::Result<()> {
@@ -256,6 +260,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::ModImportDorado(args) => mod_import_dorado::run(args),
         Commands::ModContrast(args) => mod_contrast::run(args),
         Commands::ModSubsample(args) => mod_subsample::run(args),
+        Commands::PolyaAggregate(args) => polya_aggregate::run(args),
     }
 }
 
@@ -626,7 +631,7 @@ mod tests {
 
         match cli.command {
             Commands::Count(args) => {
-                assert_eq!(args.reference, PathBuf::from("ref.bed"));
+                assert_eq!(args.reference, Some(PathBuf::from("ref.bed")));
                 assert_eq!(args.output_root, Some(PathBuf::from("outdir")));
                 assert_eq!(args.prefix, Some("sample".to_owned()));
                 assert_eq!(args.cluster_mode, crate::flow::full::ClusterMode::Cluster);
@@ -658,7 +663,7 @@ mod tests {
         match cli.command {
             Commands::CountMulti(args) => {
                 assert_eq!(args.manifest, PathBuf::from("samples.tsv"));
-                assert_eq!(args.reference, PathBuf::from("ref.bed"));
+                assert_eq!(args.reference, Some(PathBuf::from("ref.bed")));
                 assert_eq!(args.isoform, PathBuf::from("isoform.bed"));
                 assert_eq!(args.out_prefix, PathBuf::from("out/prefix"));
                 assert_eq!(args.assignment_mode, crate::count::AssignmentMode::Unique);

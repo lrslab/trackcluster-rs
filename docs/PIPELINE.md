@@ -2,6 +2,11 @@
 
 This document walks through the **end-to-end** Rust workflow, step by step, with examples.
 
+If the isoforms are already given, run `count` or `count-multi` with
+`--assign-against-catalog` directly. The [direct-counting tutorial](COUNTING.md)
+provides the inputs, commands and expected outputs; preparation and discovery
+are not required for that workflow.
+
 Use a dedicated output directory whose complete tree is owned by TrackCluster.
 The reads, reference, sample manifest, and every reads path named by a manifest
 must remain outside `--output-root`. `flow`, `preparedir`, and output-root
@@ -16,7 +21,9 @@ You can run the whole pipeline in three ways:
 
 If per-gene clustering already completed, `trackcluster flow --count-only` can rerun just the final merge/count/description stage.
 
-For multi-sample/condition studies, `flow` and `count-multi` support pooled isoform discovery with per-sample usage outputs.
+For multi-sample/condition studies, `flow --manifest` discovers pooled isoforms
+and writes per-sample usage. `count-multi` quantifies an existing catalog from
+either discovery mappings or direct read assignment.
 
 ## Prerequisites
 
@@ -416,6 +423,29 @@ trackcluster count \
 ```
 
 ## Step 4 - Count isoforms (`count`)
+
+If the isoforms are already given, start directly here and skip preparation
+and discovery:
+
+```bash
+trackcluster count \
+  --reads reads.bed --isoform catalog.bed \
+  --assign-against-catalog --out out/count.csv
+
+trackcluster count-multi \
+  --manifest samples.tsv --isoform catalog.bed \
+  --assign-against-catalog --out out/quant
+```
+
+The catalog is fixed; each read with an overlapping same-strand candidate
+contributes one count to the nearest isoform by splice structure and then end
+distance. Annotated gene IDs constrain candidates when available on both
+sides. All input reads are considered without downsampling or a discovery
+mapping. The commands also write the selected mapping, unassigned reasons and
+assignment totals; zero-count catalog isoforms remain in the CSV/matrix.
+See the [worked example](COUNTING.md#run-the-bundled-example) for inputs and
+expected results, and [fixed-catalog assignment rules](CLI.md#fixed-catalog-assignment-rules)
+for scoring and tie-breaking. `--reference` is optional in this mode.
 
 `trackcluster count --output-root` reuses the same per-gene count boundary as `flow --count-only`.
 In unique assignment mode, each `<gene-path-key>/` folder is counted using its
