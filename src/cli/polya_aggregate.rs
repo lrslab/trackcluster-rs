@@ -3,21 +3,28 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 
 #[derive(clap::Args, Debug)]
-#[command(group(clap::ArgGroup::new("polya_input").required(true).args(["bam", "polya_manifest"])))]
+#[command(
+    group(clap::ArgGroup::new("polya_input").required(true).args(["bam", "nanopolish", "polya_manifest"])),
+    group(clap::ArgGroup::new("single_polya_input").args(["bam", "nanopolish"]))
+)]
 pub struct Args {
     /// Dorado BAM carrying pt:i tags (single sample; exact, unprefixed read IDs).
     #[arg(long, requires = "sample")]
     pub bam: Option<PathBuf>,
 
-    /// Sample label for --bam.
-    #[arg(long, requires = "bam")]
+    /// Nanopolish polya TSV (single sample; only qc_tag=PASS contributes lengths).
+    #[arg(long, requires = "sample")]
+    pub nanopolish: Option<PathBuf>,
+
+    /// Sample label for --bam or --nanopolish.
+    #[arg(long, requires = "single_polya_input")]
     pub sample: Option<String>,
 
-    /// Optional experimental group for --bam.
-    #[arg(long, requires = "bam")]
+    /// Optional experimental group for --bam or --nanopolish.
+    #[arg(long, requires = "single_polya_input")]
     pub group: Option<String>,
 
-    /// TSV with sample, bam, optional group; assignments must use sample::read IDs.
+    /// TSV with sample and bam or nanopolish, optional group; use sample::read IDs.
     #[arg(long = "polya-manifest")]
     pub polya_manifest: Option<PathBuf>,
 
@@ -52,7 +59,7 @@ pub(crate) fn run_with_inputs(
     paths.extend(
         inputs
             .iter()
-            .map(|input| ("poly(A) BAM input", input.bam.as_path())),
+            .map(|input| ("poly(A) source input", input.source.path())),
     );
     let output_paths = crate::polya::output_paths(prefix);
     let outputs = output_paths
@@ -74,13 +81,19 @@ pub fn run(args: Args) -> anyhow::Result<()> {
             crate::polya::ReadIdMode::SamplePrefixed,
         )
     } else {
-        let sample = args.sample.context("--bam requires --sample")?;
+        let sample = args
+            .sample
+            .context("--bam/--nanopolish requires --sample")?;
         crate::polya::validate_sample(&sample)?;
         (
             vec![crate::polya::SampleInput {
                 sample,
                 group: args.group,
-                bam: args.bam.context("missing --bam")?,
+                source: match (args.bam, args.nanopolish) {
+                    (Some(path), None) => crate::polya::InputSource::DoradoBam(path),
+                    (None, Some(path)) => crate::polya::InputSource::NanopolishTsv(path),
+                    _ => anyhow::bail!("provide exactly one of --bam or --nanopolish"),
+                },
             }],
             crate::polya::ReadIdMode::Raw,
         )
@@ -114,9 +127,20 @@ pub(crate) fn prepare_flow(
                 .context("flow: --polya-manifest requires --manifest")?,
         )?;
         Some((inputs, crate::polya::ReadIdMode::SamplePrefixed))
-    } else if let Some(bam) = &args.polya_bam {
+    } else if let Some(source) = args
+        .polya_bam
+        .as_ref()
+        .map(|path| crate::polya::InputSource::DoradoBam(path.clone()))
+        .or_else(|| {
+            args.polya_nanopolish
+                .as_ref()
+                .map(|path| crate::polya::InputSource::NanopolishTsv(path.clone()))
+        })
+    {
         let sample = args.polya_sample.clone().unwrap_or_else(|| {
-            bam.file_stem()
+            source
+                .path()
+                .file_stem()
                 .map(|value| value.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "sample".to_owned())
         });
@@ -125,7 +149,7 @@ pub(crate) fn prepare_flow(
             vec![crate::polya::SampleInput {
                 sample,
                 group: None,
-                bam: bam.clone(),
+                source,
             }],
             crate::polya::ReadIdMode::Raw,
         ))
@@ -138,7 +162,7 @@ pub(crate) fn prepare_flow(
         }
         let mut extra_inputs = inputs
             .iter()
-            .map(|input| ("poly(A) BAM input", input.bam.as_path()))
+            .map(|input| ("poly(A) source input", input.source.path()))
             .collect::<Vec<_>>();
         if let Some(manifest) = args.polya_manifest.as_deref() {
             extra_inputs.push(("poly(A) manifest input", manifest));

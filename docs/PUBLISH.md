@@ -7,15 +7,20 @@ will be tagged.
 ## 1. Freeze the release contents
 
 - Choose the release version and update `Cargo.toml` and `Cargo.lock` together.
+- Update `tests/golden/cli/trackcluster-version.txt` and
+  `tests/golden/cli/clusterj-batch-version.txt` to that same version.
 - Move the relevant `CHANGELOG.md` entries out of `Unreleased` into the new
-  version section and review the migration/breaking-change notes.
+  version section and review the migration/breaking-change notes. Replace any
+  preparation date with the actual release date when publishing.
 - Confirm repository metadata, license files, README installation commands,
   supported targets, and minimum Rust version.
 - Review the core release documentation:
   - `README.md`
   - `CHANGELOG.md`
   - `docs/CLI.md`
+  - `docs/COUNTING.md`
   - `docs/PIPELINE.md`
+  - `docs/POLYA.md`
   - `docs/FORMATS.md`
   - `docs/MODIFICATION_VALIDATION.md`
   - `docs/INTERCHANGE.md`
@@ -57,6 +62,28 @@ cargo package --locked --list
 cargo publish --locked --dry-run
 ```
 
+Check that the package list contains `docs/POLYA.md`,
+`examples/polya.nanopolish.tsv`, and `scripts/smoke_release.sh`, and excludes
+local `out/`, `output/`, and `docs/figures/archive/` content. For a review of
+uncommitted work, `--allow-dirty` can be used for package/dry-run inspection;
+the final release still requires a clean committed tree and CI on that commit.
+
+Build the binaries and exercise all bundled README quickstarts plus direct
+counting and Nanopolish aggregation with exact expected results:
+
+```bash
+cargo build --locked --release --bins
+bash scripts/smoke_release.sh "$PWD/target/release" "$PWD" "$version" "$(mktemp -d)"
+cargo bench --locked --all-features --bench perf -- 'clusterj_(abundance|terminal_variation)' --test
+```
+
+The smoke script requires Bash and Python 3 for validation; the TrackCluster
+binaries themselves do not. After installation from the `.crate`, CI runs the
+script and inputs from the unpacked crate. The release workflow runs the same
+checks from the extracted binary archive.
+Run the pinned public m6Anet and ONT checks described in
+`docs/MODIFICATION_VALIDATION.md` before release as well.
+
 The hosted CI additionally runs on Linux and macOS, rejects runtime Rust calls
 to external processes, installs the generated `.crate`, smoke-tests both
 binaries, and runs a one-thread flow. Both package and archive smoke tests
@@ -96,8 +123,9 @@ smoke test; every target is checked for its required archive contents on its
 build runner.
 
 Each binary archive contains `trackcluster`, `clusterj_batch`,
-`scripts/run_full_flow_rust.sh`, `README.md`, `CHANGELOG.md`, both license files,
-the core CLI/pipeline/format/interchange/Rust-API and behavior documentation,
+`scripts/run_full_flow_rust.sh`, `scripts/smoke_release.sh`, `README.md`,
+`CHANGELOG.md`, both license files,
+the core CLI/counting/pipeline/poly(A)/format/interchange/Rust-API and behavior documentation,
 and the complete synthetic `examples/` directory. The workflow verifies this
 required file set, rejects parent-directory entries, rejects README references
 to repository-only fixtures/internal demos, and smoke-tests the unpacked Linux

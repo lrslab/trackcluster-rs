@@ -1,1 +1,1 @@
-clusterj-batch 0.3.1
+clusterj-batch 0.3.2

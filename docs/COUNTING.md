@@ -13,8 +13,8 @@ are needed.
 
 ## Run the bundled example
 
-Run the commands below from the repository root. For a source checkout, build
-and select the current executable first:
+Run the commands below from the repository root or unpacked release directory.
+For a source checkout, build and select the current executable first:
 
 ```bash
 cargo build --release --locked --bin trackcluster

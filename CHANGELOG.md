@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.3.2
+
+_Prepared for release: 2026-10-04._
+
+- Support Nanopolish `polya` TSVs with `polya-aggregate --nanopolish`,
+  `flow --polya-nanopolish`, and the manifest's `nanopolish` column. Preserve
+  fractional and zero PASS lengths, audit failed QC and missing reads, and
+  reconcile duplicate alignment rows once per molecule. Append caller/source
+  audit columns while preserving the original Dorado column positions.
 - Add Dorado poly(A) tail-length summaries with `polya-aggregate` and optional
   `flow --polya-bam` / `--polya-manifest`. Join primary BAM `pt:i` estimates to
   globally unique final read assignments, deduplicate repeated primary records,
@@ -43,6 +52,19 @@
   benchmarks with a fixed four-isoform exon-skipping catalog and a separate
   fixed-junction terminal-variation workload. Scale each from 2,000 to 20,000
   reads, with assertions for retained structures and complete read mapping.
+- Exclude local analysis outputs and historical figure archives from the crate.
+  Ship a synthetic Nanopolish input and smoke-test fixed-catalog counting and
+  poly(A) aggregation in both the crate install and binary release workflows.
+- Fix the public ONT validation script's model declaration to match the exact
+  Dorado `@PG` model name, allowing the pinned controls to pass provenance checks.
+- Invalidate old flow poly(A) tables before core outputs change, so failed
+  reruns cannot leave tail summaries attached to replaced read assignments.
+
+Upgrade notes: existing count CSV schemas are unchanged. Poly(A) tables append
+caller-specific audit columns; consume columns by header name. Clustering fixes
+can change retained terminal isoforms and read assignments, so rerun discovery
+when comparing results with v0.3.1. The `bam2bigg` score migration is described
+above. The minimum supported Rust version remains 1.90.
 
 ## 0.3.1
 

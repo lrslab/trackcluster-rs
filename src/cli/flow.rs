@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 
 #[derive(clap::Args, Debug)]
+#[command(group(clap::ArgGroup::new("flow_single_polya_input").args(["polya_bam", "polya_nanopolish"])))]
 pub struct Args {
     /// Clustering algorithm used inside flow: `clusterj` (junction mode) or `cluster` (overlap mode)
     #[arg(long = "cluster-mode", default_value_t = crate::flow::full::ClusterMode::Clusterj)]
@@ -121,14 +122,18 @@ pub struct Args {
     pub unique_assignment_junction_offset: u32,
 
     /// Dorado BAM with pt:i tags for poly(A) summaries in single-sample --reads mode.
-    #[arg(long = "polya-bam", conflicts_with_all = ["polya_manifest", "manifest"])]
+    #[arg(long = "polya-bam", conflicts_with_all = ["polya_manifest", "polya_nanopolish", "manifest"])]
     pub polya_bam: Option<PathBuf>,
 
-    /// Sample label for --polya-bam; defaults to the BAM file stem.
-    #[arg(long = "polya-sample", requires = "polya_bam")]
+    /// Nanopolish polya TSV for poly(A) summaries in single-sample --reads mode.
+    #[arg(long = "polya-nanopolish", conflicts_with_all = ["polya_manifest", "polya_bam", "manifest"])]
+    pub polya_nanopolish: Option<PathBuf>,
+
+    /// Sample label for single-sample poly(A) input; defaults to the input file stem.
+    #[arg(long = "polya-sample", requires = "flow_single_polya_input")]
     pub polya_sample: Option<String>,
 
-    /// TSV with sample, bam, optional group for poly(A) summaries after unique assignment.
+    /// TSV with sample and bam or nanopolish, optional group for poly(A) summaries.
     #[arg(long = "polya-manifest", requires = "manifest")]
     pub polya_manifest: Option<PathBuf>,
 
@@ -375,6 +380,12 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     }
     crate::modification::generation::invalidate_current(&mod_output_prefix)?;
 
+    // A failed core rerun can already have replaced catalogs or assignments.
+    // Invalidate old poly(A) tables before any of those writes can occur.
+    for suffix in crate::polya::OUTPUT_SUFFIXES {
+        remove_stale_optional_output(&polya_prefix, suffix)?;
+    }
+
     let result = crate::flow::full::run_full_flow(crate::flow::full::FullFlowOptions {
         cluster_mode: args.cluster_mode,
         reads: args.reads,
@@ -426,10 +437,6 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         count_only: args.count_only,
     })?;
 
-    // Replaced counts/catalogs cannot retain poly(A) summaries from an older run.
-    for suffix in crate::polya::OUTPUT_SUFFIXES {
-        remove_stale_optional_output(&polya_prefix, suffix)?;
-    }
     if let Some((inputs, mode)) = polya_inputs {
         crate::cli::polya_aggregate::run_with_inputs(
             &inputs,

@@ -1,6 +1,6 @@
 [package]
 name = "trackcluster-rs"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 rust-version = "1.90"
 autobins = false
@@ -15,6 +15,8 @@ documentation = "https://docs.rs/trackcluster-rs"
 keywords = ["bioinformatics", "genomics", "isoform", "nanopore", "long-reads"]
 categories = ["science", "command-line-utilities"]
 exclude = [
+    "out/**",
+    "output/**",
     "rust-toolchain.toml",
     "todo*.md",
     "docs/PUBLISH.md",
@@ -22,6 +24,7 @@ exclude = [
     "docs/CODE_REVIEW.md",
     "docs/HANDOFF.md",
     "docs/design/**",
+    "docs/figures/archive/**",
 ]
 
 [dependencies]

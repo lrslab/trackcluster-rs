@@ -30,8 +30,9 @@ assignments.
   used for expression. Keep unknown calls and structurally absent sites distinct
   from unmodified observations, with explicit callable denominators and QC.
 - **Compare poly(A) tails across isoforms.** Join Dorado `pt:i` read estimates
-  to final unique assignments and report per-sample means, medians, quartiles
-  and the number of valid tails. Failed estimates remain missing data.
+  or Nanopolish `polya` TSV results to final unique assignments and report
+  per-sample means, medians, quartiles and the number of valid tails.
+  Failed estimates remain missing data; Nanopolish lengths require `qc_tag=PASS`.
 
 For practical use, `flow` runs preparation, per-gene clustering, counting and
 classification in one command. Native Rust interval operations remove the
@@ -60,6 +61,9 @@ Reads can be imported from BAM or supplied as BED12/bigGenePred-compatible
 tracks; annotations can be converted from GTF/GFF3. Alignment and modification
 calling are performed upstream. Discovery currently operates in loci with a
 reference anchor; reads in unmatched loci are reported as unused.
+The [alignment guide](docs/INTERCHANGE.md#align-reads-to-the-genome) covers
+minimap2/Dorado commands, reference and strand requirements, and retaining
+poly(A)/modification evidence through BAM import.
 
 ## Install
 
@@ -115,7 +119,7 @@ trackcluster --help
 
 ### From source
 
-With Rust installed, run these commands from a source checkout:
+With Rust 1.90 or newer installed, run these commands from a source checkout:
 
 ```bash
 cargo install --path . --locked --bins
@@ -202,6 +206,8 @@ both commands, expected outputs, BAM/GTF conversion and assignment rules.
 
 ### Your data: BAM and GTF/GFF3 to isoforms
 
+If starting from FASTQ or unaligned Dorado BAM, first follow the
+[alignment guide](docs/INTERCHANGE.md#align-reads-to-the-genome).
 Replace the input filenames with your genome-aligned BAM and matching annotation:
 
 ```bash
@@ -326,7 +332,7 @@ manual batching, rejected reads and resuming completed work.
 | Import, validate and export | `bam2bigg`, `gff2bigg`, `validate-bed`, `export` |
 | Prepare and cluster | `preparedir`, `clusterj`, `cluster`, `clusterj_batch` (separate binary) |
 | Quantify and interpret | `count`, `count-multi`, `desc`, `addgene` |
-| Summarize Dorado poly(A) tail lengths | `polya-aggregate`; `flow --polya-bam` or `--polya-manifest` |
+| Summarize Dorado/Nanopolish poly(A) tail lengths | `polya-aggregate`; `flow --polya-bam`, `--polya-nanopolish` or `--polya-manifest` |
 | Import modification calls | `mod-import-dorado`, `mod-import-m6anet` |
 | Summarize modifications and technical coverage | `mod-aggregate`, `mod-site-summary`, `mod-contrast`, `mod-subsample` |
 

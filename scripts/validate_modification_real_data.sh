@@ -480,7 +480,7 @@ run_ont_validation() {
             --assay-id ont_all5mer_v6_m6a \
             --bam "$bam_prefix" \
             --mod-code A+a \
-            --model-id rna004_sup_v6.0.0_inosine_m6A_2OmeA_v1 \
+            --model-id 'rna004_sup@v6.0.0_inosine_m6A_2OmeA@v1' \
             --chemistry RNA004 \
             --caller-version 2.0.0+20e87c8b \
             --candidate-rule all-target-canonical-bases \

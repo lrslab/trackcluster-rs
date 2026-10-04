@@ -4,6 +4,90 @@ TrackCluster-rs keeps one validated BED12-compatible `Transcript` model inside
 the clustering pipeline. Format adapters sit at the boundary so clustering and
 counting do not gain format-specific coordinate semantics.
 
+## Align reads to the genome
+
+Alignment runs upstream of TrackCluster-RS. Start with a genome FASTA and
+transcript annotation from the same assembly, with matching sequence names
+such as `chr1` versus `1`. The discovery and direct-counting workflows compare
+genomic exon coordinates, so the reads BAM must use those genome coordinates.
+A BAM aligned to transcript sequences needs external coordinate projection
+or realignment to the genome before it can be used for these workflows.
+`bam2bigg` converts the coordinates already present in the BAM; it does not
+perform that projection or verify the genome assembly against the annotation.
+
+### Minimap2 from FASTQ
+
+For Nanopore direct RNA, a starting command is:
+
+```bash
+set -euo pipefail
+minimap2 -t 8 -ax splice -uf -k14 genome.fa reads.fastq.gz \
+  | samtools sort -@ 4 -o reads.aligned.bam -
+samtools index reads.aligned.bam
+```
+
+Choose the preset and orientation for the library, following the
+[minimap2 RNA alignment guide](https://github.com/lh3/minimap2#map-long-mrnacdna-reads):
+
+| Input | Starting minimap2 options |
+| --- | --- |
+| Nanopore direct RNA | `-ax splice -uf -k14` |
+| Nanopore cDNA with unknown transcript orientation | `-ax splice`; review the strand limitation below before import |
+| PacBio Iso-Seq/HiFi transcript reads | `-ax splice:hq -uf` |
+
+`-a` emits SAM, which the pipeline above converts to BAM. `-uf` assumes the
+read follows transcript orientation; it does not restrict genomic alignments
+to the plus strand. Optional `--junc-bed annotation.bed12` supplies annotated
+junctions. When reusing a `.mmi` index, build it with the intended preset and
+index parameters: mapping-time `-k14` cannot change an existing index's k-mer
+size.
+
+The commands use [coordinate sorting](https://www.htslib.org/doc/samtools-sort.html)
+and [BAM indexing](https://www.htslib.org/doc/samtools-index.html) for downstream
+tools that need random access. `bam2bigg` itself reads the BAM sequentially
+and requires neither sorting nor a `.bai`/`.csi` index. It accepts BAM rather
+than the SAM or PAF output from an aligner.
+
+### Dorado from existing BAM basecalls
+
+When basecalls already carry Dorado poly(A) or modification tags, keep the
+BAM as the alignment input:
+
+```bash
+set -euo pipefail
+dorado aligner genome.fa reads.dorado.bam --mm2-opts "-x splice -k 14" \
+  | samtools sort -@ 4 -o reads.aligned.bam -
+samtools index reads.aligned.bam
+```
+
+The [Dorado alignment documentation](https://software-docs.nanoporetech.com/dorado/latest/basecaller/alignment/)
+currently describes `lr:hq` as the default preset. Specify `-x splice` for
+spliced RNA alignment. Dorado exposes a subset of minimap2 options; check
+`dorado aligner genome.fa reads.dorado.bam --mm2-opts "--help"` for the
+installed version instead of copying every standalone minimap2 flag.
+
+A plain FASTQ export does not retain BAM tags such as `pt:i` or `MM`/`ML`/`MN`.
+Keep the original BAM and its read names and caller `@PG` provenance.
+[Dorado's SAM specification](https://software-docs.nanoporetech.com/dorado/latest/basecaller/sam_spec/)
+defines `pt:i`, while its
+[modification documentation](https://software-docs.nanoporetech.com/dorado/latest/basecaller/mods/)
+describes modification tags. `bam2bigg` converts exon geometry and does not
+copy those tags into BED. Supply the source BAM separately for
+[poly(A) aggregation](POLYA.md) or the aligned modBAM for
+[`mod-import-dorado`](CLI.md#trackcluster-mod-import-dorado).
+Poly(A) aggregation can use the original unaligned Dorado BAM because it
+joins by read ID; modification projection requires genome-aligned records.
+The modification importer requires `MM`, `ML`, and an integer `MN` matching
+the current `SEQ` length. Keep those tags consistent with the sequence through
+any trimming or reorientation before import.
+
+For Nanopolish tail estimation, use a sorted/indexed BAM with the matching
+reads and genome, plus the raw-signal index required by Nanopolish. Its
+[poly(A) tutorial](https://nanopolish.readthedocs.io/en/latest/quickstart_polya.html)
+uses `map-ont` for an unspliced control reference and explicitly advises
+splice-aware alignment for native mRNA against a genome. Feed its resulting
+TSV into [TrackCluster's Nanopolish poly(A) input](POLYA.md#input-from-nanopolish).
+
 ## BAM alignment import
 
 `trackcluster bam2bigg --bamfile alignments.bam --out reads.bed` converts a
@@ -18,7 +102,12 @@ Only CIGAR `N` splits exon blocks. Other reference-consuming operations,
 including deletions, remain within an exon; insertions and clipping do not
 consume reference coordinates. A block containing only deletions is rejected,
 as is a span beyond the reference length declared in the BAM header. Flag
-`0x10` determines the strand. The emitted BED score is `0` (no SL evidence), and
+`0x10` determines the strand. The converter does not interpret transcript-strand
+tags such as minimap2's `ts:A` or `XS:A`. It assumes the alignment strand is
+the biological transcript strand used for strand-aware gene assignment and
+counting. For cDNA containing both transcript orientations, review and normalize
+orientation upstream before import; splice-aware alignment alone does not
+resolve this limitation. The emitted BED score is `0` (no SL evidence), and
 forward/reverse records receive item RGB values `250,128,114`/`64,224,208`.
 
 MAPQ only controls the alignment filter; `--score`/`--min-mapq` does not set

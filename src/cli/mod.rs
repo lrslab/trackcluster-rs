@@ -235,7 +235,7 @@ pub enum Commands {
     /// Split one high-coverage sample into synchronized low-coverage pseudo-sample inputs.
     #[command(name = "mod-subsample")]
     ModSubsample(mod_subsample::Args),
-    /// Summarize Dorado poly(A) tail lengths by final unique isoform assignment.
+    /// Summarize Dorado/Nanopolish poly(A) tails by final unique isoform assignment.
     #[command(name = "polya-aggregate")]
     PolyaAggregate(polya_aggregate::Args),
 }

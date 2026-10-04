@@ -1,8 +1,9 @@
-//! Join Dorado `pt:i` estimates to final unique read assignments.
+//! Join Dorado BAM and Nanopolish TSV estimates to final unique read assignments.
 //!
 //! Tail length is a molecule attribute, independent of alignment coordinates.
 //! Unmapped primary records can supply it; secondary/supplementary records cannot
-//! create additional molecules. Dorado's -1 and 0 sentinels are failed estimates.
+//! create additional molecules. Dorado's -1 and 0 sentinels are failed estimates;
+//! Nanopolish uses `qc_tag=PASS` and can supply valid zero/fractional lengths.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
@@ -23,7 +24,28 @@ pub(crate) const OUTPUT_SUFFIXES: [&str; 3] =
 pub(crate) struct SampleInput {
     pub sample: String,
     pub group: Option<String>,
-    pub bam: PathBuf,
+    pub source: InputSource,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum InputSource {
+    DoradoBam(PathBuf),
+    NanopolishTsv(PathBuf),
+}
+
+impl InputSource {
+    pub(crate) fn path(&self) -> &Path {
+        match self {
+            Self::DoradoBam(path) | Self::NanopolishTsv(path) => path,
+        }
+    }
+
+    fn caller(&self) -> &'static str {
+        match self {
+            Self::DoradoBam(_) => "dorado",
+            Self::NanopolishTsv(_) => "nanopolish",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,10 +88,13 @@ pub(crate) fn read_manifest(path: &Path) -> anyhow::Result<Vec<SampleInput>> {
             .iter()
             .position(|value| value.trim().eq_ignore_ascii_case(name))
     };
-    let sample_column = column("sample")
-        .context("poly(A) manifest header must include 'sample' and 'bam' columns")?;
-    let bam_column =
-        column("bam").context("poly(A) manifest header must include 'sample' and 'bam' columns")?;
+    let sample_column =
+        column("sample").context("poly(A) manifest header must include 'sample'")?;
+    let bam_column = column("bam");
+    let nanopolish_column = column("nanopolish");
+    if bam_column.is_none() && nanopolish_column.is_none() {
+        anyhow::bail!("poly(A) manifest header must include 'bam' or 'nanopolish'");
+    }
     let group_column = column("group");
     let mut samples = Vec::new();
     let mut seen = HashSet::new();
@@ -80,13 +105,26 @@ pub(crate) fn read_manifest(path: &Path) -> anyhow::Result<Vec<SampleInput>> {
         if !seen.insert(sample.to_owned()) {
             anyhow::bail!("duplicate poly(A) sample {sample:?}");
         }
-        let bam_field = row[bam_column].trim();
-        validate_identifier("poly(A) BAM path", bam_field)?;
-        let bam = PathBuf::from(bam_field);
-        let bam = if bam.is_absolute() {
-            bam
+        let path_field = |column: Option<usize>| {
+            column
+                .map(|column| row[column].trim())
+                .filter(|value| !value.is_empty() && *value != "NA")
+        };
+        let (field, nanopolish) = match (path_field(bam_column), path_field(nanopolish_column)) {
+            (Some(path), None) => (path, false),
+            (None, Some(path)) => (path, true),
+            _ => anyhow::bail!(
+                "poly(A) sample {sample:?} must supply exactly one of bam or nanopolish"
+            ),
+        };
+        validate_identifier("poly(A) input path", field)?;
+        let input_path = PathBuf::from(field);
+        let input_path = if input_path.is_absolute() {
+            input_path
         } else {
-            path.parent().unwrap_or_else(|| Path::new(".")).join(bam)
+            path.parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(input_path)
         };
         let group = group_column
             .map(|column| row[column].trim())
@@ -98,7 +136,11 @@ pub(crate) fn read_manifest(path: &Path) -> anyhow::Result<Vec<SampleInput>> {
         samples.push(SampleInput {
             sample: sample.to_owned(),
             group,
-            bam,
+            source: if nanopolish {
+                InputSource::NanopolishTsv(input_path)
+            } else {
+                InputSource::DoradoBam(input_path)
+            },
         });
     }
     if samples.is_empty() {
@@ -131,37 +173,42 @@ pub(crate) fn match_flow_samples(
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 enum TailCall {
     #[default]
-    MissingBam,
+    MissingInput,
     MissingTag,
     AnchorNotFound,
     EstimationFailed,
-    Estimated(u32),
+    QcFailed,
+    Estimated(f64),
 }
 
 impl TailCall {
-    fn status(self) -> &'static str {
+    fn status(self, source: &InputSource) -> &'static str {
         match self {
-            Self::MissingBam => "missing_bam_read",
+            Self::MissingInput => match source {
+                InputSource::DoradoBam(_) => "missing_bam_read",
+                InputSource::NanopolishTsv(_) => "missing_nanopolish_read",
+            },
             Self::MissingTag => "missing_pt_tag",
             Self::AnchorNotFound => "anchor_not_found",
             Self::EstimationFailed => "estimation_failed",
+            Self::QcFailed => "qc_failed",
             Self::Estimated(_) => "estimated",
         }
     }
 
     fn raw_pt(self) -> String {
         match self {
-            Self::MissingBam | Self::MissingTag => "NA".to_owned(),
+            Self::MissingInput | Self::MissingTag | Self::QcFailed => "NA".to_owned(),
             Self::AnchorNotFound => "-1".to_owned(),
             Self::EstimationFailed => "0".to_owned(),
             Self::Estimated(length) => length.to_string(),
         }
     }
 
-    fn length(self) -> Option<u32> {
+    fn length(self) -> Option<f64> {
         match self {
             Self::Estimated(length) => Some(length),
             _ => None,
@@ -174,10 +221,17 @@ struct AssignedRead {
     sample: usize,
     isoform: usize,
     call: TailCall,
+    nanopolish: Option<NanopolishObservation>,
+}
+
+#[derive(Debug, Clone)]
+struct NanopolishObservation {
+    raw_length: String,
+    qc_tag: String,
 }
 
 #[derive(Debug, Default)]
-struct BamQc {
+struct ImportQc {
     records: u64,
     primary_records: u64,
     skipped_secondary: u64,
@@ -186,34 +240,50 @@ struct BamQc {
     duplicate_assigned_primary_records: u64,
     primary_records_with_pt: u64,
     dorado_versions: String,
+    nanopolish_rows: u64,
+    nanopolish_pass_rows: u64,
+    nanopolish_qc_failed_rows: u64,
+    unassigned_nanopolish_rows: u64,
+    duplicate_assigned_nanopolish_rows: u64,
+    nanopolish_qc_tag_counts: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Default)]
 struct TailSummary {
     assigned: u64,
     missing_bam: u64,
+    missing_nanopolish: u64,
     missing_tag: u64,
     anchor_not_found: u64,
     estimation_failed: u64,
-    lengths: Vec<u32>,
+    qc_failed: u64,
+    lengths: Vec<f64>,
 }
 
 impl TailSummary {
-    fn add(&mut self, call: TailCall) {
+    fn add(&mut self, call: TailCall, source: &InputSource) {
         self.assigned += 1;
         match call {
-            TailCall::MissingBam => self.missing_bam += 1,
+            TailCall::MissingInput => match source {
+                InputSource::DoradoBam(_) => self.missing_bam += 1,
+                InputSource::NanopolishTsv(_) => self.missing_nanopolish += 1,
+            },
             TailCall::MissingTag => self.missing_tag += 1,
             TailCall::AnchorNotFound => self.anchor_not_found += 1,
             TailCall::EstimationFailed => self.estimation_failed += 1,
+            TailCall::QcFailed => self.qc_failed += 1,
             TailCall::Estimated(length) => self.lengths.push(length),
         }
+    }
+
+    fn observed(&self) -> u64 {
+        self.assigned - self.missing_bam - self.missing_nanopolish
     }
 
     fn count_fields(&self) -> Vec<String> {
         vec![
             self.assigned.to_string(),
-            (self.assigned - self.missing_bam).to_string(),
+            self.observed().to_string(),
             self.lengths.len().to_string(),
             self.missing_bam.to_string(),
             self.missing_tag.to_string(),
@@ -228,21 +298,19 @@ impl TailSummary {
         if self.lengths.is_empty() {
             return vec!["NA".to_owned(); 7];
         }
-        self.lengths.sort_unstable();
+        self.lengths.sort_by(f64::total_cmp);
         let mut mean = 0.0;
         let mut m2 = 0.0;
         for (index, &length) in self.lengths.iter().enumerate() {
-            let delta = f64::from(length) - mean;
+            let delta = length - mean;
             mean += delta / (index + 1) as f64;
-            m2 += delta * (f64::from(length) - mean);
+            m2 += delta * (length - mean);
         }
         let quantile = |p: f64| {
             let h = (self.lengths.len() - 1) as f64 * p;
             let left = h.floor() as usize;
             let right = h.ceil() as usize;
-            f64::from(self.lengths[left])
-                + (h - left as f64)
-                    * (f64::from(self.lengths[right]) - f64::from(self.lengths[left]))
+            self.lengths[left] + (h - left as f64) * (self.lengths[right] - self.lengths[left])
         };
         vec![
             number(Some(mean)),
@@ -292,13 +360,14 @@ fn read_bam(
     sample_index: usize,
     mode: ReadIdMode,
     assignments: &mut BTreeMap<String, AssignedRead>,
-) -> anyhow::Result<BamQc> {
+) -> anyhow::Result<ImportQc> {
     let mut reader = bam::io::Reader::new(
-        File::open(&input.bam).with_context(|| format!("open poly(A) BAM {:?}", input.bam))?,
+        File::open(input.source.path())
+            .with_context(|| format!("open poly(A) BAM {:?}", input.source.path()))?,
     );
     let header = reader
         .read_header()
-        .with_context(|| format!("read poly(A) BAM header {:?}", input.bam))?;
+        .with_context(|| format!("read poly(A) BAM header {:?}", input.source.path()))?;
     use sam::header::record::value::map::program::tag;
     let versions = header
         .programs()
@@ -316,12 +385,13 @@ fn read_bam(
         .into_iter()
         .collect::<Vec<_>>()
         .join(",");
-    let mut qc = BamQc {
+    let mut qc = ImportQc {
         dorado_versions: versions,
-        ..BamQc::default()
+        ..ImportQc::default()
     };
     for result in reader.records() {
-        let record = result.with_context(|| format!("decode poly(A) BAM {:?}", input.bam))?;
+        let record =
+            result.with_context(|| format!("decode poly(A) BAM {:?}", input.source.path()))?;
         qc.records += 1;
         if record.flags().is_secondary() {
             qc.skipped_secondary += 1;
@@ -354,7 +424,7 @@ fn read_bam(
                 match length {
                     -1 => TailCall::AnchorNotFound,
                     0 => TailCall::EstimationFailed,
-                    1.. => TailCall::Estimated(u32::try_from(length).context("Dorado pt exceeds u32")?),
+                    1.. => TailCall::Estimated(f64::from(u32::try_from(length).context("Dorado pt exceeds u32")?)),
                     _ => anyhow::bail!("invalid Dorado pt value {length} for read {name:?}; expected -1, 0, or positive tail length"),
                 }
             }
@@ -370,7 +440,7 @@ fn read_bam(
         if assigned.sample != sample_index {
             anyhow::bail!("poly(A) read {read_id:?} joined to the wrong sample");
         }
-        if assigned.call != TailCall::MissingBam {
+        if assigned.call != TailCall::MissingInput {
             if assigned.call != call {
                 anyhow::bail!(
                     "conflicting Dorado pt values in primary records for read {read_id:?}"
@@ -382,7 +452,124 @@ fn read_bam(
         }
     }
     if qc.primary_records > 0 && qc.primary_records_with_pt == 0 {
-        anyhow::bail!("poly(A) BAM {:?} has no Dorado pt:i tags on primary reads; run Dorado with --estimate-poly-a and preserve tags during alignment", input.bam);
+        anyhow::bail!("poly(A) BAM {:?} has no Dorado pt:i tags on primary reads; run Dorado with --estimate-poly-a and preserve tags during alignment", input.source.path());
+    }
+    Ok(qc)
+}
+
+fn read_nanopolish(
+    input: &SampleInput,
+    sample_index: usize,
+    mode: ReadIdMode,
+    assignments: &mut BTreeMap<String, AssignedRead>,
+) -> anyhow::Result<ImportQc> {
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(b'\t')
+        .has_headers(false)
+        .comment(Some(b'#'))
+        .from_path(input.source.path())
+        .with_context(|| format!("open Nanopolish poly(A) TSV {:?}", input.source.path()))?;
+    let mut records = reader.records();
+    let Some(first) = records.next().transpose()? else {
+        return Ok(ImportQc::default());
+    };
+    let column = |name: &str| {
+        first
+            .iter()
+            .position(|field| field.trim().eq_ignore_ascii_case(name))
+    };
+    let (read_column, length_column, qc_column, first_data) =
+        match (column("readname"), column("polya_length"), column("qc_tag")) {
+            (Some(read), Some(length), Some(qc)) => {
+                let mut columns = HashSet::new();
+                for field in &first {
+                    if !columns.insert(field.trim().to_ascii_lowercase()) {
+                        anyhow::bail!("duplicate Nanopolish column {field:?}");
+                    }
+                }
+                (read, length, qc, None)
+            }
+            // The standard ten-column output filtered with grep PASS loses its
+            // header. Keep supporting that documented Nanopolish workflow.
+            (None, None, None) if first.len() == 10 => (0, 8, 9, Some(first)),
+            _ => anyhow::bail!("Nanopolish TSV header must include readname, polya_length, qc_tag; headerless input must use the standard ten columns"),
+        };
+    let mut qc = ImportQc::default();
+    for row in first_data.into_iter().map(Ok).chain(records) {
+        let row = row.context("parse Nanopolish poly(A) TSV row")?;
+        let read_name = &row[read_column];
+        validate_identifier("Nanopolish readname", read_name)?;
+        let raw_length = row[length_column].trim();
+        validate_identifier("Nanopolish polya_length", raw_length)?;
+        let qc_tag = row[qc_column].trim();
+        validate_identifier("Nanopolish qc_tag", qc_tag)?;
+        let parsed_length = raw_length.parse::<f64>();
+        let call = if qc_tag == "PASS" {
+            let length = parsed_length.with_context(|| {
+                format!(
+                    "invalid Nanopolish PASS polya_length {raw_length:?} for read {read_name:?}"
+                )
+            })?;
+            if !length.is_finite() || length < 0.0 {
+                anyhow::bail!("Nanopolish PASS polya_length must be finite and non-negative for read {read_name:?}: {raw_length:?}");
+            }
+            qc.nanopolish_pass_rows += 1;
+            TailCall::Estimated(if length == 0.0 { 0.0 } else { length })
+        } else {
+            // Failed output can contain -1, NaN, or a missing-value placeholder.
+            // Its raw estimate is retained for audit, never used as a length.
+            if parsed_length.is_err() && raw_length != "NA" {
+                anyhow::bail!(
+                    "invalid Nanopolish polya_length {raw_length:?} for read {read_name:?}"
+                );
+            }
+            qc.nanopolish_qc_failed_rows += 1;
+            TailCall::QcFailed
+        };
+        qc.nanopolish_rows += 1;
+        *qc.nanopolish_qc_tag_counts
+            .entry(qc_tag.to_owned())
+            .or_default() += 1;
+        let read_id = match mode {
+            ReadIdMode::Raw => read_name.to_owned(),
+            ReadIdMode::SamplePrefixed => crate::sample::tagged_read_name(&input.sample, read_name),
+        };
+        let Some(assigned) = assignments.get_mut(&read_id) else {
+            qc.unassigned_nanopolish_rows += 1;
+            continue;
+        };
+        if assigned.sample != sample_index {
+            anyhow::bail!("poly(A) read {read_id:?} joined to the wrong sample");
+        }
+        let observation = NanopolishObservation {
+            raw_length: raw_length.to_owned(),
+            qc_tag: qc_tag.to_owned(),
+        };
+        if assigned.call != TailCall::MissingInput {
+            qc.duplicate_assigned_nanopolish_rows += 1;
+            match (assigned.call, call) {
+                (TailCall::Estimated(left), TailCall::Estimated(right)) if left != right => {
+                    anyhow::bail!("conflicting Nanopolish PASS tail lengths for read {read_id:?}");
+                }
+                (TailCall::Estimated(_), TailCall::QcFailed) => continue,
+                (TailCall::QcFailed, TailCall::Estimated(_)) => {}
+                _ => {
+                    let previous = assigned
+                        .nanopolish
+                        .as_ref()
+                        .expect("observed Nanopolish read has source metadata");
+                    // Agreeing PASS rows and uncallable failed rows collapse to
+                    // one deterministic representative, regardless of row order.
+                    if (&previous.qc_tag, &previous.raw_length)
+                        <= (&observation.qc_tag, &observation.raw_length)
+                    {
+                        continue;
+                    }
+                }
+            }
+        }
+        assigned.call = call;
+        assigned.nanopolish = Some(observation);
     }
     Ok(qc)
 }
@@ -391,7 +578,7 @@ pub(crate) struct AggregateResult {
     samples: Vec<SampleInput>,
     isoforms: Vec<Transcript>,
     assignments: BTreeMap<String, AssignedRead>,
-    qc: Vec<BamQc>,
+    qc: Vec<ImportQc>,
 }
 
 pub(crate) fn aggregate(
@@ -454,16 +641,24 @@ pub(crate) fn aggregate(
             AssignedRead {
                 sample,
                 isoform,
-                call: TailCall::MissingBam,
+                call: TailCall::MissingInput,
+                nanopolish: None,
             },
         );
     }
     let mut qc = Vec::new();
     for (index, input) in inputs.iter().enumerate() {
-        qc.push(
-            read_bam(input, index, mode, &mut assignments)
-                .with_context(|| format!("import Dorado poly(A) for sample {:?}", input.sample))?,
-        );
+        let import = match &input.source {
+            InputSource::DoradoBam(_) => read_bam(input, index, mode, &mut assignments),
+            InputSource::NanopolishTsv(_) => read_nanopolish(input, index, mode, &mut assignments),
+        };
+        qc.push(import.with_context(|| {
+            format!(
+                "import {} poly(A) for sample {:?}",
+                input.source.caller(),
+                input.sample
+            )
+        })?);
     }
     Ok(AggregateResult {
         samples: inputs.to_vec(),
@@ -495,6 +690,9 @@ impl AggregateResult {
             "dorado_pt",
             "polya_length_nt",
             "status",
+            "caller",
+            "nanopolish_polya_length_nt",
+            "nanopolish_qc_tag",
         ])?;
         for (read_id, assigned) in &self.assignments {
             let input = &self.samples[assigned.sample];
@@ -505,12 +703,25 @@ impl AggregateResult {
                 crate::identity::gene_id(isoform),
                 isoform.name.as_str(),
                 read_id.as_str(),
-                &assigned.call.raw_pt(),
+                &if matches!(input.source, InputSource::DoradoBam(_)) {
+                    assigned.call.raw_pt()
+                } else {
+                    "NA".to_owned()
+                },
                 &assigned
                     .call
                     .length()
                     .map_or_else(|| "NA".to_owned(), |length| length.to_string()),
-                assigned.call.status(),
+                assigned.call.status(&input.source),
+                input.source.caller(),
+                assigned
+                    .nanopolish
+                    .as_ref()
+                    .map_or("NA", |value| value.raw_length.as_str()),
+                assigned
+                    .nanopolish
+                    .as_ref()
+                    .map_or("NA", |value| value.qc_tag.as_str()),
             ])?;
         }
         writer.flush()?;
@@ -536,38 +747,82 @@ impl AggregateResult {
         ];
         header.extend(COUNT_COLUMNS);
         header.push("read_join_rate");
+        header.extend([
+            "caller",
+            "input",
+            "missing_nanopolish_reads",
+            "qc_failed_reads",
+            "nanopolish_rows",
+            "nanopolish_pass_rows",
+            "nanopolish_qc_failed_rows",
+            "unassigned_nanopolish_rows",
+            "duplicate_assigned_nanopolish_rows",
+            "nanopolish_qc_tag_counts",
+        ]);
         writer.write_record(header)?;
         let mut summaries = (0..self.samples.len())
             .map(|_| TailSummary::default())
             .collect::<Vec<_>>();
         for assigned in self.assignments.values() {
-            summaries[assigned.sample].add(assigned.call);
+            summaries[assigned.sample].add(assigned.call, &self.samples[assigned.sample].source);
         }
         for (index, input) in self.samples.iter().enumerate() {
             let qc = &self.qc[index];
             let summary = &summaries[index];
+            let dorado = matches!(input.source, InputSource::DoradoBam(_));
+            let bam_count = |value: u64| {
+                if dorado {
+                    value.to_string()
+                } else {
+                    "NA".to_owned()
+                }
+            };
+            let nanopolish_count = |value: u64| {
+                if dorado {
+                    "NA".to_owned()
+                } else {
+                    value.to_string()
+                }
+            };
             let mut row = vec![
                 input.sample.clone(),
                 input.group.clone().unwrap_or_else(|| "NA".to_owned()),
-                input.bam.to_string_lossy().into_owned(),
+                if dorado {
+                    input.source.path().to_string_lossy().into_owned()
+                } else {
+                    "NA".to_owned()
+                },
                 if qc.dorado_versions.is_empty() {
                     "NA".to_owned()
                 } else {
                     qc.dorado_versions.clone()
                 },
-                qc.records.to_string(),
-                qc.primary_records.to_string(),
-                qc.skipped_secondary.to_string(),
-                qc.skipped_supplementary.to_string(),
-                qc.unassigned_primary_records.to_string(),
-                qc.duplicate_assigned_primary_records.to_string(),
-                qc.primary_records_with_pt.to_string(),
+                bam_count(qc.records),
+                bam_count(qc.primary_records),
+                bam_count(qc.skipped_secondary),
+                bam_count(qc.skipped_supplementary),
+                bam_count(qc.unassigned_primary_records),
+                bam_count(qc.duplicate_assigned_primary_records),
+                bam_count(qc.primary_records_with_pt),
             ];
             row.extend(summary.count_fields());
-            row.push(number(rate(
-                summary.assigned - summary.missing_bam,
-                summary.assigned,
-            )));
+            row.push(number(rate(summary.observed(), summary.assigned)));
+            row.extend([
+                input.source.caller().to_owned(),
+                input.source.path().to_string_lossy().into_owned(),
+                summary.missing_nanopolish.to_string(),
+                summary.qc_failed.to_string(),
+                nanopolish_count(qc.nanopolish_rows),
+                nanopolish_count(qc.nanopolish_pass_rows),
+                nanopolish_count(qc.nanopolish_qc_failed_rows),
+                nanopolish_count(qc.unassigned_nanopolish_rows),
+                nanopolish_count(qc.duplicate_assigned_nanopolish_rows),
+                if dorado {
+                    "NA".to_owned()
+                } else {
+                    serde_json::to_string(&qc.nanopolish_qc_tag_counts)?
+                },
+            ]);
             writer.write_record(row)?;
         }
         writer.flush()?;
@@ -581,13 +836,14 @@ impl AggregateResult {
         let mut header = vec!["sample", "group", "gene", "isoform_id"];
         header.extend(COUNT_COLUMNS);
         header.extend(LENGTH_COLUMNS);
+        header.extend(["caller", "missing_nanopolish_reads", "qc_failed_reads"]);
         writer.write_record(header)?;
         let mut summaries: HashMap<(usize, usize), TailSummary> = HashMap::new();
         for assigned in self.assignments.values() {
             summaries
                 .entry((assigned.sample, assigned.isoform))
                 .or_default()
-                .add(assigned.call);
+                .add(assigned.call, &self.samples[assigned.sample].source);
         }
         let mut indices = (0..self.isoforms.len()).collect::<Vec<_>>();
         indices.sort_by(|&left, &right| {
@@ -612,6 +868,11 @@ impl AggregateResult {
                 ];
                 row.extend(summary.count_fields());
                 row.extend(summary.length_fields());
+                row.extend([
+                    input.source.caller().to_owned(),
+                    summary.missing_nanopolish.to_string(),
+                    summary.qc_failed.to_string(),
+                ]);
                 writer.write_record(row)?;
             }
         }

@@ -81,6 +81,9 @@ transcript span that does not match its outer exon bounds.
 
 Convert genome-aligned BAM records to TrackCluster bigGenePred-compatible
 BED12+8 text. This command reads BAM, not SAM or CRAM.
+See [upstream alignment](INTERCHANGE.md#align-reads-to-the-genome) for
+minimap2/Dorado commands and reference/strand requirements. The BAM is read
+sequentially; coordinate sorting and indexing are not required by this converter.
 
 Example:
 
@@ -116,7 +119,10 @@ reference. Every emitted block must contain at least one `M`, `=`, or `X`;
 deletion-only blocks, zero-length CIGAR operations, non-UTF-8 or unsafe query
 names, and alignments beyond the BAM header reference length are invalid. In
 the default `skip` mode these decoded records are excluded without stopping
-later records. Reverse-complement flag `0x10` sets the minus strand. Multiple
+later records. Reverse-complement flag `0x10` sets the minus strand; `ts:A` and
+`XS:A` transcript-strand tags do not override it. The converter assumes this
+strand matches the biological transcript, which needs upstream review for
+cDNA libraries with both transcript orientations. Multiple
 retained records with the same query name remain separate BED alignment
 instances; downstream counting applies the molecule-ID policy.
 
@@ -247,7 +253,7 @@ Run the full pipeline as a single command:
 3) merge per-gene outputs into `<prefix>_isoform.bed` and `<prefix>_unused.bed`
 4) `count` and `desc` on the merged isoforms
 5) when `--manifest` is used: run per-sample `count-multi` outputs from the pooled isoforms
-6) optionally aggregate Dorado poly(A) tail estimates and normalized modification observations using the final unique mapping
+6) optionally aggregate Dorado/Nanopolish poly(A) tail estimates and normalized modification observations using the final unique mapping
 
 Key flags:
 - `--cluster-mode`: `clusterj` (default) or `cluster` (overlap/intersection mode)
@@ -280,10 +286,14 @@ Key flags:
 - `--assignment-mode`: final counting mode, `unique` (default) or `fractional`; flow unique mode expands candidates within each gene folder before choosing the closest compatible isoform, including retained 3' early-stop isoforms. This is deliberately gene-local: a molecule assigned to multiple genes can retain one selected isoform per gene. Final counts divide that molecule across its distinct selected isoforms, preserving total abundance. The `.unique.tsv` filename does not imply global uniqueness across genes; modification aggregation separately requires globally unambiguous assignments.
 - `--unique-assignment-junction-offset` (default: `15`): maximum per-boundary difference for the ordered one-to-one intron matcher used by unique assignment.
 - `--polya-bam`: Dorado BAM carrying `pt:i` tags for single-sample flow.
-  `--polya-sample` supplies the output sample label (default: BAM stem).
-- `--polya-manifest`: TSV with `sample,bam` and optional `group`, for pooled
-  flow. It must contain exactly the samples in `--manifest`; groups come from
-  that reads manifest. Poly(A) summaries require unique assignment and reject
+- `--polya-nanopolish`: Nanopolish `polya` TSV for single-sample flow; lengths
+  require `qc_tag=PASS`. This is mutually exclusive with `--polya-bam`.
+  `--polya-sample` supplies the output sample label for either source
+  (default: input filename stem).
+- `--polya-manifest`: TSV with `sample` and `bam` or `nanopolish`, plus optional
+  `group`, for pooled flow. Each sample supplies exactly one source path.
+  It must contain exactly the samples in `--manifest`; groups come from that
+  reads manifest. Poly(A) summaries require unique assignment and reject
   reads assigned to multiple distinct isoforms. See [poly(A) workflow](POLYA.md).
 - `--mod-manifest`: optional normalized modification manifest. It requires
   manifest mode and `--assignment-mode unique`; modification aggregation runs
@@ -434,8 +444,9 @@ trackcluster flow \
 
 ### `trackcluster polya-aggregate`
 
-Summarize Dorado's per-read `pt:i` tail lengths against an existing isoform
-catalog and a globally unique final read-to-isoform mapping:
+Summarize Dorado's per-read `pt:i` tail lengths or Nanopolish `polya` TSV
+results against an existing isoform catalog and a globally unique final
+read-to-isoform mapping:
 
 ```bash
 trackcluster polya-aggregate \
@@ -445,10 +456,14 @@ trackcluster polya-aggregate \
   --out out/sample
 ```
 
-Single-sample `--bam` mode uses exact BAM query names and accepts an optional
-`--group`. Alternatively, `--polya-manifest polya.tsv` reads `sample,bam` and
-optional `group` columns; pooled mapping IDs must be `sample::original_read_id`.
-BAM paths are relative to the manifest. `--out` (alias `--out-prefix`) emits
+For Nanopolish, replace `--bam sample.dorado.bam` with
+`--nanopolish polya_results.tsv`. Single-sample mode requires `--sample`,
+uses exact source read names and accepts an optional `--group`.
+Alternatively, `--polya-manifest polya.tsv` reads `sample`, a `bam` or
+`nanopolish` source column, and optional `group`. Both source columns can be
+present, with exactly one nonempty/non-`NA` path per sample. Pooled mapping
+IDs must be `sample::original_read_id`. Source paths are relative to the
+manifest. `--out` (alias `--out-prefix`) emits
 `.isoform_polya.tsv`, `.read_polya.tsv`, and `.polya_qc.tsv`.
 
 Positive `pt:i` estimates contribute once per assigned molecule. Dorado `-1`
@@ -458,6 +473,14 @@ valid-read counts, mean, median, quartiles, range and sample standard deviation;
 zero-read catalog isoforms have `NA` lengths. Primary unmapped records are
 allowed; secondary and supplementary alignments are ignored. Conflicting
 primary estimates, noninteger tags and ambiguous mappings fail validation.
+
+Nanopolish requires header columns `readname,polya_length,qc_tag`, in any
+order, or headerless standard ten-column output. Only `qc_tag=PASS` supplies
+finite, non-negative lengths; fractional and zero values are retained.
+Other QC results and absent reads have separate failure/missing counters.
+Agreeing PASS rows count once per read, PASS takes precedence over failed-QC
+rows, and conflicting PASS lengths fail validation. Output tables append
+caller and Nanopolish audit fields after the original Dorado columns.
 
 See [poly(A) workflow](POLYA.md) for pooled and flow examples and
 [formats](FORMATS.md#isoform-level-polya-formats) for column definitions.

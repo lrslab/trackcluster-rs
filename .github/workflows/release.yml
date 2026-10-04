@@ -64,10 +64,12 @@ jobs:
           cp README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "$stage/"
           cp \
             docs/CLI.md \
+            docs/COUNTING.md \
             docs/FORMATS.md \
             docs/INTERCHANGE.md \
             docs/MODIFICATION_VALIDATION.md \
             docs/PIPELINE.md \
+            docs/POLYA.md \
             docs/RUST_API.md \
             "$stage/docs/"
           cp docs/behavior/cluster.md docs/behavior/desc.md "$stage/docs/behavior/"
@@ -78,6 +80,7 @@ jobs:
             docs/figures/trackcluster_rs_fig1_caption.md \
             "$stage/docs/figures/"
           cp scripts/run_full_flow_rust.sh "$stage/scripts/"
+          cp scripts/smoke_release.sh "$stage/scripts/"
           cp -R examples "$stage/"
           python3 - "$stage" <<'PY'
           import re
@@ -117,10 +120,12 @@ jobs:
             LICENSE-MIT
             LICENSE-APACHE
             docs/CLI.md
+            docs/COUNTING.md
             docs/FORMATS.md
             docs/INTERCHANGE.md
             docs/MODIFICATION_VALIDATION.md
             docs/PIPELINE.md
+            docs/POLYA.md
             docs/RUST_API.md
             docs/behavior/cluster.md
             docs/behavior/desc.md
@@ -129,6 +134,7 @@ jobs:
             docs/figures/trackcluster_rs_fig1_600dpi.png
             docs/figures/trackcluster_rs_fig1_caption.md
             scripts/run_full_flow_rust.sh
+            scripts/smoke_release.sh
             examples/README.md
             examples/annotation.gff3
             examples/minimal.bed
@@ -137,12 +143,14 @@ jobs:
             examples/samples.tsv
             examples/S1.reads.bed
             examples/S2.reads.bed
+            examples/polya.nanopolish.tsv
           )
           for path in "${required[@]}"; do
             test -s "$stage/$path"
             grep -Fx "$archive/$path" "$archive.contents" >/dev/null
           done
           test -x "$stage/scripts/run_full_flow_rust.sh"
+          test -x "$stage/scripts/smoke_release.sh"
           version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[0].version')
           grep -Fx "## $version" "$stage/CHANGELOG.md" >/dev/null
           if grep -Ev "^$archive(/|$)" "$archive.contents"; then
@@ -172,6 +180,8 @@ jobs:
           test -x "$bin_dir/clusterj_batch"
           version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[0].version')
           test "$("$bin_dir/trackcluster" --version)" = "trackcluster $version"
+          "$bin_dir/scripts/smoke_release.sh" \
+            "$bin_dir" "$bin_dir" "$version" "$(mktemp -d)"
           test "$("$bin_dir/clusterj_batch" --version)" = "clusterj-batch $version"
           help=$("$bin_dir/trackcluster" --help)
           grep -F "bam2bigg" <<<"$help"

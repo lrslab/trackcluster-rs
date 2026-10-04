@@ -23,6 +23,8 @@
 /todo*.md
 /tmp/
 /results/
+/out/
+/output/
 /artifacts/
 /tests/genes/
 /isoform*.bed

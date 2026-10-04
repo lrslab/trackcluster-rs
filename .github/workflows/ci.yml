@@ -46,6 +46,9 @@ jobs:
             --path "target/package-unpacked/trackcluster-rs-${version}" \
             --root target/package-install
           bin_dir="$PWD/target/package-install/bin"
+          packaged_source="$PWD/target/package-unpacked/trackcluster-rs-${version}"
+          bash "$packaged_source/scripts/smoke_release.sh" \
+            "$bin_dir" "$packaged_source" "$version" "$(mktemp -d)"
           "$bin_dir/trackcluster" --version
           "$bin_dir/trackcluster" --help
           "$bin_dir/clusterj_batch" --version

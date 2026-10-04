@@ -1,0 +1,2 @@
+readname	contig	position	leader_start	adapter_start	polya_start	transcript_start	read_rate	polya_length	qc_tag
+read_trunc	chr1	120	0	1	2	3	100.0	80.25	PASS

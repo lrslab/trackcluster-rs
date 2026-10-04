@@ -43,6 +43,14 @@ You should have:
 - **Reads**: BED12 / bigGenePred-like (0-based, half-open).
 - **Reference**: BED12 / bigGenePred-like, ideally with gene names populated in the extra fields.
 
+For FASTQ or unaligned basecalls, follow
+[upstream alignment and BAM import](INTERCHANGE.md#align-reads-to-the-genome)
+first. Align to the genome assembly used by the annotation and preserve source
+read names and poly(A)/modification tags. `flow --reads` accepts converted BED;
+it does not run an aligner. The BAM converter derives strand from flag `0x10`,
+so cDNA libraries with both transcript orientations need orientation review
+before import.
+
 Notes:
 
 - Most commands say "sorted recommended". The current implementation will work on unsorted inputs, but performance and determinism are best on sorted inputs.
@@ -200,16 +208,20 @@ The direct single-gene `clusterj` and `cluster` commands use the same policy. Wi
 ### Optional isoform-level poly(A) summaries
 
 For reads basecalled with Dorado `--estimate-poly-a`, add
-`--polya-bam sample.dorado.bam --polya-sample S1` to single-sample flow, or
-`--polya-manifest polya.tsv` to manifest flow. The poly(A) manifest has required
-`sample,bam` columns and optional `group`; paths are relative to the manifest.
+`--polya-bam sample.dorado.bam --polya-sample S1` to single-sample flow. For
+Nanopolish `polya` output, use `--polya-nanopolish polya_results.tsv` instead.
+Add `--polya-manifest polya.tsv` to manifest flow. The poly(A) manifest requires
+`sample` and a `bam` or `nanopolish` source column, with optional `group`;
+each sample supplies exactly one source path, relative to the manifest.
 It must cover exactly the samples in the reads manifest, whose group labels
 are inherited. Final assignments must be globally unambiguous.
 
 The optional stage writes `<prefix>.isoform_polya.tsv` with per-sample valid
 tail counts, mean, median, quartiles, range and sample standard deviation,
 plus `.read_polya.tsv` and `.polya_qc.tsv` audit tables. Dorado `pt:i:-1` and
-`pt:i:0` are failures and never enter length statistics. These statistics use
+`pt:i:0` are failures and never enter length statistics. Nanopolish lengths
+require `qc_tag=PASS`, retaining fractional and zero estimates. Other QC
+results remain missing lengths. Every row records the caller. These statistics use
 actual assigned molecules without downsampling count scaling.
 
 Use `polya-aggregate` to summarize an existing discovery or fixed-catalog

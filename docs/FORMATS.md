@@ -65,6 +65,9 @@ The standard BED fields differ as follows:
   strand color (`250,128,114` for `+`, `64,224,208` for `-`), and CIGAR-derived
   blocks. CIGAR `N` alone splits blocks. `thickStart` and `thickEnd` are both
   zero. MAPQ is used only for filtering and is not written to BED score.
+  Transcript-strand tags (`ts:A`, `XS:A`) do not override the BAM flag-derived
+  strand; cDNA read orientation must be resolved upstream when it differs
+  from transcript orientation. See [alignment requirements](INTERCHANGE.md#bam-alignment-import).
 - `gff2bigg` uses the annotation transcript identity, score `100`, resolved
   exon strand, `itemRgb=0`, and exon-derived blocks. GFF/GTF coordinates
   `[start,end]` become BED `[start-1,end)`. CDS/UTR/phase are not transferred,
@@ -443,13 +446,20 @@ unique-mode provenance file when the same output prefix is rerun successfully.
 ## Isoform-level poly(A) formats
 
 `polya-aggregate` and optional flow poly(A) processing consume Dorado BAM
-`pt:i` tags and a two-column, headerless, globally unique read-to-isoform
-mapping. Positive estimates are lengths in nucleotides; `-1` (anchor not
-found) and `0` (estimation failed) are missing lengths.
+`pt:i` tags or Nanopolish `polya` TSV results, plus a two-column, headerless,
+globally unique read-to-isoform mapping. Dorado positive integers are lengths
+in nucleotides; `-1` (anchor not found) and `0` (estimation failed) are missing
+lengths. Nanopolish uses `readname,polya_length,qc_tag` header columns in any
+order, or the standard ten-column headerless format. Only `qc_tag=PASS`
+supplies lengths, which must be finite, non-negative floats, including zero.
+Other QC tags are failed estimates. Empty Nanopolish files supply no rows.
 
-The poly(A) manifest is TSV with required `sample,bam` and optional `group`
-columns. BAM paths are relative to the manifest. Manifest-mode mapping IDs
-are `sample::original_read_id`; single-BAM mode uses exact BAM query names.
+The poly(A) manifest is TSV with `sample`, at least one source column (`bam`
+or `nanopolish`), and optional `group`. Each sample appears once and supplies
+exactly one source path; blank or `NA` means no path. Paths are relative to
+the manifest. Manifest-mode mapping IDs are `sample::original_read_id`;
+single-sample mode uses exact source read names. `caller` is `dorado` or
+`nanopolish`; each sample's statistics use its selected caller separately.
 
 `*.isoform_polya.tsv` has one row for each sample/catalog isoform, including
 unexpressed isoforms, with columns in this order:
@@ -460,38 +470,67 @@ assigned_reads observed_reads polya_reads missing_bam_reads missing_pt_reads
 anchor_not_found_reads estimation_failed_reads polya_fraction
 polya_mean_nt polya_median_nt polya_q25_nt polya_q75_nt
 polya_min_nt polya_max_nt polya_stddev_nt
+caller missing_nanopolish_reads qc_failed_reads
 ```
 
-`polya_reads` counts positive estimates. `observed_reads` counts assigned
-reads present among primary BAM records, regardless of estimate success.
-The four failure/missing counts plus `polya_reads` sum to `assigned_reads`.
+`polya_reads` counts accepted estimates under the caller's rules.
+`observed_reads` counts assigned reads present among primary BAM records or
+Nanopolish rows, regardless of estimate success. The six failure/missing
+counts plus `polya_reads` sum to `assigned_reads`; caller-inapplicable molecule
+counters are zero. The final three columns are appended to the original
+Dorado schema.
 `polya_fraction` is `polya_reads / assigned_reads`. Length summaries exclude
 all failed/missing estimates. Quantiles interpolate at `(n - 1) * p`; standard
 deviation uses `n - 1`. Missing statistics and zero-denominator fractions are
-`NA`; standard deviation is also `NA` with one positive estimate.
+`NA`; standard deviation is also `NA` with one accepted estimate.
 
 `*.read_polya.tsv` columns are
-`sample,group,gene,isoform_id,read_id,dorado_pt,polya_length_nt,status`.
+`sample,group,gene,isoform_id,read_id,dorado_pt,polya_length_nt,status,caller,nanopolish_polya_length_nt,nanopolish_qc_tag`.
 `dorado_pt` preserves the raw positive, `-1`, or `0` value, or `NA` when
-unavailable. `polya_length_nt` contains only positive estimates; otherwise
-it is `NA`. Status is one of `estimated`, `anchor_not_found`,
-`estimation_failed`, `missing_pt_tag`, or `missing_bam_read`.
+unavailable, including every Nanopolish row. `polya_length_nt` contains only
+accepted lengths; otherwise it is `NA`. The Nanopolish source fields preserve
+the selected raw length text and QC tag, including failed-QC sentinels, or
+`NA` for missing reads and Dorado input. Status is one of `estimated`,
+`anchor_not_found`, `estimation_failed`, `missing_pt_tag`, `missing_bam_read`,
+`missing_nanopolish_read`, or `qc_failed`.
 
 `*.polya_qc.tsv` starts with
 `sample,group,bam,dorado_versions,bam_records,primary_records,skipped_secondary,skipped_supplementary,unassigned_primary_records,duplicate_assigned_primary_records,primary_records_with_pt`,
 then the eight count/fraction columns above, and `read_join_rate`.
-Versions are taken from available Dorado `@PG` header records, or `NA`.
-`read_join_rate = observed_reads / assigned_reads`; unassigned BAM records do
-not enter its denominator. Secondary/supplementary records are excluded,
-and agreeing repeated assigned primary records count once. Conflicting
-estimates fail validation. Counts are actual molecules, without downsampling
-scaling. See [the poly(A) guide](POLYA.md) for commands and interpretation.
+It appends these columns in order:
+
+```text
+caller input missing_nanopolish_reads qc_failed_reads
+nanopolish_rows nanopolish_pass_rows nanopolish_qc_failed_rows
+unassigned_nanopolish_rows duplicate_assigned_nanopolish_rows
+nanopolish_qc_tag_counts
+```
+
+`input` is the source path for either caller. For Dorado, `bam` is that same
+path; versions are taken from available Dorado `@PG` records, or `NA`.
+For Nanopolish, `bam`, `dorado_versions`, and the seven BAM record counters
+are `NA`. The five Nanopolish row counters and its QC-tag inventory are `NA`
+for Dorado. `nanopolish_qc_tag_counts` is a JSON object mapping every supplied
+QC tag to its raw row count. Row counters include unassigned reads and
+duplicates; molecule counters describe unique assigned reads.
+
+`read_join_rate = observed_reads / assigned_reads`; unassigned records/rows
+do not enter its denominator. Dorado secondary/supplementary records are
+excluded, and agreeing repeated assigned primary records count once.
+For Nanopolish, agreeing PASS lengths count once and PASS takes precedence
+over failed-QC rows for the same read. Conflicting accepted estimates fail
+validation. The representative Nanopolish source row is chosen by lexical
+`(qc_tag, raw length)` order among agreeing PASS rows, or among failed-QC rows
+when no PASS exists. Thus input row order does not affect output. Counts are
+actual molecules, without downsampling scaling. See
+[the poly(A) guide](POLYA.md) for commands and interpretation.
 
 ## Isoform-level modification formats
 
 The modification boundary is a normalized genomic read/site observation table.
 `mod-import-m6anet` and `mod-import-dorado` produce that table;
-`mod-aggregate` consumes it and produces three TSVs; `mod-contrast` consumes the
+`mod-aggregate` consumes it and produces four TSVs (sample join QC, site join
+QC, site audit, and design table); `mod-contrast` consumes the
 design TSV and an explicit contrast specification.
 
 All TSV schemas below have an exact header and column order. Fields are separated
